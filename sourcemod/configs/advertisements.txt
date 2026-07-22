@@ -1,0 +1,43 @@
+// Types: center / chat / hint / menu
+// Colors: {default}(white) {green}(orange) {olive}(green) {lightgreen}(light green) {red}(red, needs infected) {blue}(blue, needs survivor)
+// Warning: {lightgreen} {red} {blue} — only 2 of 3 in one sentence
+
+"Advertisements"
+{
+	"1"
+	{
+		"chat"  "{olive}[粟藜24人困难|6特]{default}直连IP: {lightgreen}connect 81.71.101.135:27015"
+	}
+	"2"
+	{
+		"chat"  "{olive}[粟藜24人困难|6特]{default}QQ群: {lightgreen}873133645  {default}Steam组: {lightgreen}suli-l4d2-server"
+	}
+	"3"
+	{
+		"chat"  "{olive}[指令]{default}!motd 公告 | !join 加入生还者 | !kill 自杀 | !votes 投票 | !rtv 换图"
+	}
+	"4"
+	{
+		"chat"  "{olive}[特性]{default}24人 60tick |多特感:人数x1.25 上限20 |Tank血量=人数x3000 |击杀回血2%"
+	}
+	"5"
+	{
+		"chat"  "{olive}[特性]{default}枪械真实口径重平衡 |备弹1.5x |狙击4弹夹 |M60 450发打空即弃 |友伤75%"
+	}
+	"6"
+	{
+		"chat"  "{olive}[特性]{default}推搡疲劳/2 |电锯燃料x3 |40秒自动复活 |团灭4次自动换图"
+	}
+	"7"
+	{
+		"chat"  "{olive}[难度]{default}困难模式 |55-75s特感波次 |RTV投票换图"
+	}
+	"8"
+	{
+		"chat"  "{olive}[规则]{default}友善游戏，禁止恶意TK、挂机、刷屏。输入 {lightgreen}!motd {default}查看完整公告"
+	}
+	"9"
+	{
+		"chat"  "{olive}[趣味]{default}高光操作自动播报(空爆/砍头/冲锋) |回合结束击杀MVP统计"
+	}
+}

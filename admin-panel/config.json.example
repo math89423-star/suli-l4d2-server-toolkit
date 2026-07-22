@@ -1,0 +1,41 @@
+{
+    "_comment": "===== L4D2 Admin Panel 配置文件 =====",
+    "_instructions": "复制此文件为 config.json，然后修改下面的 ★ 标记项",
+
+    "rcon_host": "127.0.0.1",
+    "rcon_port": 27015,
+    "rcon_password": "★ 改为你的 RCON 密码",
+
+    "admin_password_hash": "replace_me_auto_generated_on_first_run",
+    "secret_key": "replace_me_auto_generated_on_first_run",
+
+    "host": "0.0.0.0",
+    "port": 5000,
+
+    "_paths_note": "以下所有路径都必须根据你的实际部署修改",
+
+    "mapcycle_path": "★ /opt/gameservers/l4d2/data/addons/sourcemod/configs/mapcycle.txt",
+    "mapcycle_official_path": "★ /opt/gameservers/l4d2/data/addons/sourcemod/configs/mapcycle_official.txt",
+    "mapcycle_custom_path": "★ /opt/gameservers/l4d2/data/addons/sourcemod/configs/mapcycle_custom.txt",
+
+    "addons_dir": "★ /opt/gameservers/l4d2/data/addons",
+    "steamcmd_path": "★ /usr/games/steamcmd",
+
+    "maps_zip_dir": "★ /opt/gameservers/l4d2/admin-panel/maps/zip",
+    "maps_vpk_dir": "★ /opt/gameservers/l4d2/admin-panel/maps/vpk",
+
+    "scan_script": "★ /opt/gameservers/l4d2/admin-panel/scan_maps.py",
+    "compose_file": "★ /opt/gameservers/l4d2/docker-compose.yml",
+
+    "post_switch_buffer": 15,
+
+    "tumtara_maps": [
+        "tumtara",
+        "tumtara_l4d1_playground"
+    ],
+    "tumtara_unload_plugins": [
+        "AI_HardSI",
+        "specialspawner",
+        "spawn_infected_nolimit"
+    ]
+}

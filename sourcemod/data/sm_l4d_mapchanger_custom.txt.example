@@ -1,0 +1,37 @@
+"ForceMissionChanger"
+{
+    // Dead City 2 → Dark Wood
+    "dc2m6_station"
+    {
+        "next mission map"      "dw_woods"
+        "next mission name"     "Dark Wood"
+    }
+
+    // Dark Wood → Dear Esther
+    "dw_final"
+    {
+        "next mission map"      "de_donnelley_m1"
+        "next mission name"     "Dear Esther"
+    }
+
+    // Dear Esther → 天梯1
+    "de_paul_m4"
+    {
+        "next mission map"      "hls_05"
+        "next mission name"     "天梯1"
+    }
+
+    // 天梯1 → 天梯2
+    "hls_09"
+    {
+        "next mission map"      "hls_10"
+        "next mission name"     "天梯2"
+    }
+
+    // 天梯2 → Dead City 2 (loop)
+    "hls_14"
+    {
+        "next mission map"      "dc2m1_riverside"
+        "next mission name"     "Dead City II"
+    }
+}

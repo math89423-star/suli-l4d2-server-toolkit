@@ -1,0 +1,14 @@
+[Unit]
+Description=L4D2 Admin Web Panel
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=★ /opt/gameservers/l4d2/admin-panel
+ExecStart=/usr/bin/python3 app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

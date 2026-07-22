@@ -1,0 +1,12 @@
+"hostport"
+{
+	"default"
+	{
+		"ServerName"		"粟藜求生多特战役服"
+		"Connect"		"connect 81.71.101.135:27015"
+		"Tickle"		"60tick"
+		"Slots"			"16人"
+		"Region"		"CN | 亚洲"
+		"Difficulty"		"困难"
+	}
+}

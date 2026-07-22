@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<base href="/">
+<title>L4D2 服务器管理</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+</head>
+<body>
+
+<div id="login-overlay">
+  <div class="login-box">
+    <h1>L4D2 服务器管理</h1>
+    <input type="password" id="login-pw" placeholder="管理员密码" autofocus>
+    <button id="login-btn">登 录</button>
+    <p id="login-err"></p>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+  <header>
+    <h1>L4D2 服务器管理</h1>
+    <button id="logout-btn">退出</button>
+  </header>
+
+  <div id="main">
+    <!-- ====== LEFT COLUMN ====== -->
+    <div id="left-col">
+
+      <!-- 服务器状态 -->
+      <div class="card status-card">
+        <h2>服务器状态 <span id="status-dot" class="dot green"></span></h2>
+        <div class="status-grid">
+          <div class="stat-item">
+            <span class="stat-label">主机名</span>
+            <span class="stat-value" id="st-hostname">-</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">当前地图</span>
+            <span class="stat-value" id="st-map">-</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">玩家</span>
+            <span class="stat-value" id="st-players">-</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Tickrate</span>
+            <span class="stat-value" id="st-tickrate">-</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 轮换模式切换 -->
+      <div class="card mode-card">
+        <h2>轮换模式</h2>
+        <div class="mode-toggle">
+          <button id="mode-official-btn" class="mode-btn" data-mode="official">官方图池</button>
+          <button id="mode-custom-btn" class="mode-btn" data-mode="custom">三方图池</button>
+        </div>
+        <p class="mode-info" id="mode-info">当前生效：-</p>
+      </div>
+
+      <!-- 官方图轮换 -->
+      <div class="card cycle-card" id="cycle-card-official">
+        <h2>官方图轮换 <small>(拖拽排序)</small></h2>
+        <ul id="cycle-list-official" class="cycle-list"></ul>
+        <div class="cycle-actions">
+          <button class="cycle-save-btn" data-pool="official">保存排序</button>
+        </div>
+        <p class="cycle-msg" id="cycle-msg-official"></p>
+      </div>
+
+      <!-- 三方图轮换 -->
+      <div class="card cycle-card" id="cycle-card-custom">
+        <h2>三方图轮换 <small>(拖拽排序)</small></h2>
+        <ul id="cycle-list-custom" class="cycle-list"></ul>
+        <div class="cycle-actions">
+          <button class="cycle-save-btn" data-pool="custom">保存排序</button>
+        </div>
+        <p class="cycle-msg" id="cycle-msg-custom"></p>
+      </div>
+    </div>
+
+    <!-- ====== RIGHT COLUMN ====== -->
+    <div id="right-col">
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="official">官方战役</button>
+        <button class="tab-btn" data-tab="custom">三方战役</button>
+        <button class="tab-btn" data-tab="manage">地图管理</button>
+      </div>
+      <div id="map-categories"></div>
+
+      <!-- Map Management Tab -->
+      <div id="map-management" style="display:none">
+        <div id="restart-banner" class="restart-banner" style="display:none">
+          <i class="fas fa-triangle-exclamation"></i> 新增 VPK 需要重启容器才能生效
+          <button id="restart-btn"><i class="fas fa-rotate-right"></i> 重启服务器</button>
+        </div>
+
+        <div class="mgmt-section">
+          <h3><i class="fas fa-file-zipper"></i> 上传 ZIP 地图</h3>
+          <div class="upload-zone" id="upload-zone">
+            <i class="fas fa-cloud-arrow-up" style="font-size:2rem;color:var(--fg3);margin-bottom:10px;display:block"></i>
+            <p>拖拽 .zip 文件到此处，或点击选择</p>
+            <p class="upload-hint">支持最大 2GB，包含 .vpk 的 ZIP 压缩包</p>
+          </div>
+          <input type="file" id="upload-file-input" accept=".zip" hidden>
+          <p id="upload-file-name" style="display:none;margin:8px 0;font-size:.84rem"></p>
+          <div id="upload-progress" class="progress-bar" style="display:none">
+            <div class="progress-fill" id="upload-progress-fill"></div>
+            <span class="progress-text" id="upload-progress-text">0%</span>
+          </div>
+          <p class="msg" id="upload-msg"></p>
+          <button id="upload-btn" class="mgmt-action-btn" disabled><i class="fas fa-upload"></i> 上传并安装</button>
+        </div>
+
+        <div class="mgmt-divider">或</div>
+
+        <div class="mgmt-section">
+          <h3><i class="fab fa-steam"></i> Steam 工坊下载</h3>
+          <div class="input-row">
+            <input type="text" id="workshop-input" placeholder="输入工坊链接或 ID，如 https://steamcommunity.com/sharedfiles/filedetails/?id=123456789">
+            <button id="workshop-btn" class="mgmt-action-btn"><i class="fas fa-download"></i> 下载</button>
+          </div>
+          <p class="msg" id="workshop-msg"></p>
+        </div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+
+        <div class="mgmt-section">
+          <h3><i class="fas fa-map"></i> 已安装三方地图</h3>
+          <div id="managed-list"></div>
+          <p class="msg" id="managed-msg"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+
+let mapsData = null;
+let activePool = null;
+
+async function api(url, opts = {}) {
+  const res = await fetch(url, { credentials: "same-origin", ...opts });
+  if (res.status === 401) { $("#app").style.display = "none"; $("#login-overlay").style.display = "flex"; return null; }
+  return res.json();
+}
+
+function toast(msg, ok = true) {
+  const el = $("#toast");
+  el.textContent = msg; el.className = ok ? "show" : "show error";
+  setTimeout(() => el.className = "", 2500);
+}
+
+// ── Login ─────────────────────────────────────────────
+
+$("#login-btn").onclick = async () => {
+  const pw = $("#login-pw").value;
+  const r = await api("api/login", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: pw }),
+  });
+  if (r && r.ok) {
+    $("#login-overlay").style.display = "none";
+    $("#app").style.display = "";
+    $("#login-pw").value = "";
+    loadAll();
+  } else { $("#login-err").textContent = r?.error || "登录失败"; }
+};
+
+$("#login-pw").onkeydown = e => { if (e.key === "Enter") $("#login-btn").click(); };
+
+$("#logout-btn").onclick = async () => {
+  await api("api/logout", { method: "POST" });
+  $("#app").style.display = "none"; $("#login-overlay").style.display = "flex";
+};
+
+// ── Status ────────────────────────────────────────────
+
+async function loadStatus() {
+  const r = await api("api/status");
+  if (!r) return;
+  if (!r.online) { $("#status-dot").className = "dot red"; $("#st-hostname").textContent = "离线"; return; }
+  $("#status-dot").className = "dot green";
+  $("#st-hostname").textContent = r.hostname || "-";
+  $("#st-map").textContent = r.map_label || r.map || "-";
+  $("#st-players").textContent = `${r.players}/${r.maxplayers}`;
+  $("#st-tickrate").textContent = r.tickrate || "-";
+}
+
+// ── Maps (right column, tabbed) ───────────────────────
+
+let currentTab = "official";
+
+function renderMaps(tabId) {
+  if (!mapsData) return;
+  const container = $("#map-categories");
+  container.innerHTML = "";
+
+  let cats;
+  if (tabId === "custom") {
+    cats = mapsData.categories.filter(c => c.id === "custom" || c.id === "fun");
+  } else {
+    cats = mapsData.categories.filter(c => c.id === tabId);
+  }
+  if (!cats.length) return;
+
+  for (const cat of cats) {
+    const sec = document.createElement("div");
+    sec.className = "map-section";
+    sec.innerHTML = `<h3>${cat.name} <small>(${cat.campaigns.length} 个战役)</small></h3>`;
+
+    for (const camp of cat.campaigns) {
+      const cd = document.createElement("div");
+      cd.className = "campaign-card";
+
+      const header = document.createElement("div");
+      header.className = "campaign-header";
+      header.innerHTML = `<span>${camp.name}</span>`;
+      if (camp.alias) header.innerHTML += `<code>${camp.alias}</code>`;
+      if (camp.size) header.innerHTML += `<span class="size-tag">${camp.size}</span>`;
+      cd.appendChild(header);
+
+      const mapList = document.createElement("div");
+      mapList.className = "map-list";
+
+      for (let mi = 0; mi < camp.maps.length; mi++) {
+        const mapName = camp.maps[mi];
+        const row = document.createElement("div");
+        row.className = "map-row";
+        const label = mapsData.map_labels?.[mapName] || mapName;
+        row.innerHTML = `<span class="map-name" title="${mapName}">${label}</span>
+          <span class="map-fn">${mapName}</span>
+          <button class="switch-btn" data-map="${mapName}">切换</button>
+          ${tabId === "custom" && mi === 0 ? `<button class="add-cycle-btn" data-map="${mapName}">+轮换</button>` : ""}`;
+        mapList.appendChild(row);
+      }
+      cd.appendChild(mapList);
+      sec.appendChild(cd);
+    }
+    container.appendChild(sec);
+  }
+
+  // Bind switch buttons
+  $$(".switch-btn").forEach(btn => {
+    btn.onclick = async () => {
+      if (switchLocked) return;
+      const map = btn.dataset.map;
+      if (!confirm(`确定切换到 ${map}？`)) return;
+      // Lock immediately, start polling
+      startPolling();
+      const r = await api("api/switch", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ map }),
+      });
+      if (r && r.ok) {
+        toast(`已切换至 ${map}`);
+        setTimeout(loadStatus, 2500);
+      } else {
+        stopPolling();
+        toast(r?.error || "切图失败", false);
+      }
+    };
+  });
+}
+
+document.addEventListener("click", e => {
+  if (!e.target.classList.contains("tab-btn")) return;
+  const tabId = e.target.dataset.tab;
+  if (tabId === currentTab) return;
+  currentTab = tabId;
+  $$(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tabId));
+  // Toggle visibility
+  $("#map-categories").style.display = (tabId === "manage") ? "none" : "";
+  $("#map-management").style.display = (tabId === "manage") ? "" : "none";
+  if (tabId === "manage") loadManagementTab();
+  else renderMaps(tabId);
+});
+
+async function loadMaps() {
+  mapsData = await api("api/maps");
+  if (mapsData) renderMaps(currentTab);
+}
+
+// ── Switch cooldown (dynamic: detect actual map load) ──
+
+let switchPollTimer = null;
+let switchLocked = false;
+let switchRemaining = 0;
+
+function updateSwitchButtons(state) {
+  switchLocked = (state !== "ready");
+  $$(".switch-btn").forEach(b => {
+    b.disabled = switchLocked;
+    if (state === "loading") {
+      b.textContent = `加载中 ${Math.ceil(switchRemaining)}s`;
+    } else if (state === "buffer") {
+      b.textContent = `⏳${Math.ceil(switchRemaining)}s`;
+    } else {
+      b.textContent = "切换";
+    }
+  });
+}
+
+async function pollSwitchLock() {
+  try {
+    const r = await api("api/cooldown");
+    if (!r) return;
+    if (r.remaining <= 0 && !r.loading) {
+      updateSwitchButtons("ready");
+      stopPolling();
+      return;
+    }
+    switchRemaining = r.remaining;
+    updateSwitchButtons(r.loading ? "loading" : "buffer");
+  } catch (e) { /* keep polling */ }
+}
+
+function startPolling() {
+  switchLocked = true;
+  updateSwitchButtons("loading");
+  stopPolling();
+  pollSwitchLock();
+  switchPollTimer = setInterval(pollSwitchLock, 2000);
+}
+
+function stopPolling() {
+  if (switchPollTimer) { clearInterval(switchPollTimer); switchPollTimer = null; }
+  switchLocked = false;
+}
+
+async function checkCooldown() {
+  const r = await api("api/cooldown");
+  if (r && (r.loading || r.remaining > 0)) {
+    switchRemaining = r.remaining;
+    updateSwitchButtons(r.loading ? "loading" : "buffer");
+    switchLocked = true;
+    stopPolling();
+    switchPollTimer = setInterval(pollSwitchLock, 2000);
+  }
+}
+
+// ── Mapcycle (left column) ────────────────────────────
+
+let sortables = {};
+
+function renderCycleList(pool, maps) {
+  const list = document.getElementById(`cycle-list-${pool}`);
+  list.innerHTML = "";
+  for (const m of maps) {
+    const li = document.createElement("li");
+    li.className = "cycle-item";
+    li.dataset.map = m.name;
+    li.innerHTML = `<span class="drag-handle">≡</span>
+      <span class="cycle-name" title="${m.name}">${m.label}</span>
+      <span class="cycle-fn">${m.name}</span>
+      ${pool === "custom" ? `<button class="cycle-remove-btn" data-map="${m.name}" title="移除">×</button>` : ""}`;
+    list.appendChild(li);
+  }
+  if (sortables[pool]) sortables[pool].destroy();
+  sortables[pool] = new Sortable(list, {
+    handle: ".drag-handle", animation: 150, ghostClass: "sortable-ghost",
+  });
+}
+
+function updateModeUI(pool) {
+  activePool = pool;
+  $("#mode-official-btn").classList.toggle("active", pool === "official");
+  $("#mode-custom-btn").classList.toggle("active", pool === "custom");
+  $("#mode-info").textContent = `当前生效：${pool === "official" ? "官方图池" : pool === "custom" ? "三方图池" : "未知"}`;
+  $("#cycle-card-official").classList.toggle("active-pool", pool === "official");
+  $("#cycle-card-custom").classList.toggle("active-pool", pool === "custom");
+}
+
+async function loadMapcycle() {
+  const r = await api("api/mapcycle");
+  if (!r) return;
+  renderCycleList("official", r.official || []);
+  renderCycleList("custom", r.custom || []);
+  updateModeUI(r.active_pool);
+}
+
+// Mode toggle
+document.addEventListener("click", async e => {
+  if (!e.target.classList.contains("mode-btn")) return;
+  const mode = e.target.dataset.mode;
+  if (mode === activePool) return;
+  if (!confirm(`确定切换到「${mode === "official" ? "官方图池" : "三方图池"}」模式？`)) return;
+  const r = await api("api/mapcycle/activate", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: mode }),
+  });
+  if (r && r.ok) { updateModeUI(mode); toast(`已切换至${mode === "official" ? "官方图" : "三方图"}轮换`); }
+  else { toast(r?.error || "切换失败", false); }
+});
+
+// Save cycle
+document.addEventListener("click", async e => {
+  if (!e.target.classList.contains("cycle-save-btn")) return;
+  const pool = e.target.dataset.pool;
+  await saveCycleFromDOM(pool);
+});
+
+// Helper: save current DOM state of a cycle list to server
+async function saveCycleFromDOM(pool) {
+  const items = $$(`#cycle-list-${pool} .cycle-item`);
+  const maps = [...items].map(el => el.dataset.map);
+  const r = await api(`api/mapcycle?type=${pool}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ maps }),
+  });
+  const msgEl = document.getElementById(`cycle-msg-${pool}`);
+  if (r && r.ok) {
+    if (pool === activePool) {
+      await api("api/mapcycle/activate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: pool }),
+      });
+    }
+    toast(`已保存 ${r.count} 张地图`); msgEl.textContent = "";
+    return true;
+  } else { msgEl.textContent = r?.error || "保存失败"; return false; }
+}
+
+// Remove map from custom cycle
+document.addEventListener("click", async e => {
+  if (!e.target.classList.contains("cycle-remove-btn")) return;
+  const map = e.target.dataset.map;
+  const li = e.target.closest(".cycle-item");
+  const label = li.querySelector(".cycle-name").textContent;
+  if (!confirm(`确定从轮换中移除「${label}」？`)) return;
+  li.remove();
+  const ok = await saveCycleFromDOM("custom");
+  if (ok) toast(`已移除 ${label}`);
+});
+
+// Add map to custom cycle
+document.addEventListener("click", async e => {
+  if (!e.target.classList.contains("add-cycle-btn")) return;
+  const map = e.target.dataset.map;
+  const label = mapsData.map_labels?.[map] || map;
+  // Check duplicate
+  const existing = $$("#cycle-list-custom .cycle-item");
+  if ([...existing].some(el => el.dataset.map === map)) {
+    toast("该地图已在轮换中", false);
+    return;
+  }
+  // Add to DOM
+  const list = document.getElementById("cycle-list-custom");
+  const li = document.createElement("li");
+  li.className = "cycle-item";
+  li.dataset.map = map;
+  li.innerHTML = `<span class="drag-handle">≡</span>
+    <span class="cycle-name" title="${map}">${label}</span>
+    <span class="cycle-fn">${map}</span>
+    <button class="cycle-remove-btn" data-map="${map}" title="移除">×</button>`;
+  list.appendChild(li);
+  // Recreate sortable
+  if (sortables["custom"]) sortables["custom"].destroy();
+  sortables["custom"] = new Sortable(list, {
+    handle: ".drag-handle", animation: 150, ghostClass: "sortable-ghost",
+  });
+  const ok = await saveCycleFromDOM("custom");
+  if (ok) toast(`已加入 ${label}`);
+});
+
+// ── Auto-check existing session on load ────────────────
+
+async function checkSession() {
+  const r = await api("api/check");
+  if (r && r.authed) {
+    $("#login-overlay").style.display = "none";
+    $("#app").style.display = "";
+    loadAll();
+  }
+}
+
+// ── Map Management ─────────────────────────────────────
+
+let managedCampaigns = [];
+
+async function loadManagementTab() {
+  await Promise.all([loadManagedList(), checkRestartNeeded()]);
+}
+
+async function loadManagedList() {
+  const r = await api("api/maps");
+  if (!r) return;
+  // Filter to only show custom + fun campaigns (not official)
+  managedCampaigns = [];
+  for (const cat of (r.categories || [])) {
+    if (cat.id === "official") continue;
+    for (const camp of (cat.campaigns || [])) {
+      managedCampaigns.push(camp);
+    }
+  }
+  renderManagedList();
+}
+
+function renderManagedList() {
+  const container = $("#managed-list");
+  if (!managedCampaigns.length) {
+    container.innerHTML = `<p style="color:var(--fg3);font-size:.84rem">暂无已安装的三方地图</p>`;
+    return;
+  }
+  container.innerHTML = managedCampaigns.map(c => {
+    const tagClass = c.size === "工坊" ? "workshop" : "upload";
+    const tagText = c.size === "工坊" ? "工坊" : "ZIP";
+    return `<div class="mgmt-camp-card">
+      <div class="mgmt-camp-header">
+        <span class="name">${c.name}</span>
+        <span class="tag ${tagClass}">${tagText}</span>
+        <span class="mgmt-size">${c.size || "?"}</span>
+      </div>
+      <div class="mgmt-camp-maps">${(c.maps || []).join(", ")}</div>
+    </div>`;
+  }).join("");
+}
+
+// ── Upload ──────────────────────────────────────────────
+
+let uploadFile = null;
+
+$("#upload-zone").onclick = () => $("#upload-file-input").click();
+
+$("#upload-zone").ondragover = e => { e.preventDefault(); e.currentTarget.classList.add("dragover"); };
+$("#upload-zone").ondragleave = e => { e.currentTarget.classList.remove("dragover"); };
+$("#upload-zone").ondrop = e => {
+  e.preventDefault(); e.currentTarget.classList.remove("dragover");
+  const f = e.dataTransfer.files[0];
+  if (f) setUploadFile(f);
+};
+
+$("#upload-file-input").onchange = () => {
+  const f = $("#upload-file-input").files[0];
+  if (f) setUploadFile(f);
+};
+
+function setUploadFile(f) {
+  if (!f.name.toLowerCase().endsWith(".zip")) {
+    toast("仅支持 .zip 文件", false); return;
+  }
+  uploadFile = f;
+  const el = $("#upload-file-name");
+  el.style.display = "";
+  el.innerHTML = `<i class="fas fa-paperclip"></i> <strong>${f.name}</strong> (${(f.size/1024/1024).toFixed(0)} MB)`;
+  $("#upload-btn").disabled = false;
+}
+
+$("#upload-btn").onclick = async () => {
+  if (!uploadFile) return;
+  const btn = $("#upload-btn");
+  const msg = $("#upload-msg");
+  const progBar = $("#upload-progress");
+  const progFill = $("#upload-progress-fill");
+  const progText = $("#upload-progress-text");
+
+  btn.disabled = true;
+  msg.className = "msg"; msg.textContent = "";
+  progBar.style.display = ""; progFill.style.width = "0%"; progText.textContent = "0%";
+
+  const fd = new FormData();
+  fd.append("file", uploadFile);
+
+  const result = await new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    const startTime = Date.now();
+    let lastLoaded = 0, lastTime = startTime;
+
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round(e.loaded / e.total * 100);
+      progFill.style.width = pct + "%";
+
+      const now = Date.now();
+      const elapsed = Math.max(1, now - startTime);
+      const speed = e.loaded / elapsed * 1000;
+      const speedStr = speed > 1048576
+        ? (speed / 1048576).toFixed(1) + " MB/s"
+        : (speed / 1024).toFixed(0) + " KB/s";
+
+      const remain = (e.total - e.loaded) / Math.max(1, speed);
+      const remainStr = remain > 60
+        ? Math.ceil(remain / 60) + "min"
+        : Math.ceil(remain) + "s";
+
+      progText.textContent = pct + "%  ·  " + speedStr + "  ·  剩余 " + remainStr;
+    };
+
+    xhr.onload = () => {
+      try { resolve(JSON.parse(xhr.responseText)); }
+      catch(e) { resolve(null); }
+    };
+    xhr.onerror = () => resolve(null);
+    xhr.open("POST", "api/maps/upload");
+    xhr.withCredentials = true;
+    xhr.send(fd);
+  });
+
+  if (result && result.ok) {
+    progText.textContent = "完成";
+    setTimeout(() => { progBar.style.display = "none"; }, 1500);
+    msg.className = "msg ok";
+    msg.textContent = `已安装 ${(result.vpks||[]).join(", ")}，需要重启服务器生效`;
+    toast("地图已安装");
+    uploadFile = null; $("#upload-file-name").style.display = "none";
+    $("#upload-file-input").value = "";
+    loadManagedList();
+    checkRestartNeeded();
+  } else {
+    progBar.style.display = "none";
+    msg.className = "msg err"; msg.textContent = result?.error || "上传失败";
+  }
+  btn.disabled = !uploadFile;
+};
+
+// ── Workshop ────────────────────────────────────────────
+
+$("#workshop-btn").onclick = async () => {
+  const input = $("#workshop-input");
+  const url = input.value.trim();
+  if (!url) { toast("请输入工坊链接或 ID", false); return; }
+
+  const btn = $("#workshop-btn");
+  const msg = $("#workshop-msg");
+  btn.disabled = true; btn.textContent = "下载中...";
+  msg.className = "msg"; msg.textContent = "steamcmd 下载中，请耐心等待...";
+
+  try {
+    const r = await api("api/maps/workshop", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    if (r && r.ok) {
+      msg.className = "msg ok";
+      msg.textContent = `已添加: ${r.campaign.name} (${r.maps.length} 张地图, Workshop ID: ${r.workshop_id})`;
+      toast("工坊地图已添加");
+      input.value = "";
+      loadManagedList();
+    } else {
+      msg.className = "msg err"; msg.textContent = r?.error || "下载失败";
+    }
+  } catch (e) {
+    msg.className = "msg err"; msg.textContent = "下载失败";
+  }
+  btn.disabled = false; btn.textContent = "下载";
+};
+
+// ── Restart ─────────────────────────────────────────────
+
+async function checkRestartNeeded() {
+  // Check if any vpk-based maps exist (not workshop) — if so, prompt restart
+  // Simple heuristic: if there are custom maps in managed list, restart may be needed
+  // The upload endpoint already tells us, but we don't persist that state.
+  // For now, always show banner if there are non-workshop managed campaigns.
+  const hasVpk = managedCampaigns.some(c => c.size !== "工坊");
+  $("#restart-banner").style.display = hasVpk ? "" : "none";
+}
+
+$("#restart-btn").onclick = async () => {
+  if (!confirm("确定要重启 L4D2 服务器容器吗？\n\n玩家会被断开连接。")) return;
+  const btn = $("#restart-btn");
+  btn.disabled = true; btn.textContent = "重启中...";
+  try {
+    const r = await api("api/server/restart", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    if (r && r.ok) {
+      toast("服务器正在重启...");
+      btn.textContent = "已重启";
+    } else if (r && r.confirm_required) {
+      toast(`有 ${r.players} 名玩家在线，请确认`, false);
+      btn.disabled = false; btn.textContent = "重启服务器";
+    } else {
+      toast(r?.error || "重启失败", false);
+      btn.disabled = false; btn.textContent = "重启服务器";
+    }
+  } catch (e) {
+    toast("重启失败", false);
+    btn.disabled = false; btn.textContent = "重启服务器";
+  }
+};
+
+// ── Init ──────────────────────────────────────────────
+
+async function loadAll() {
+  await Promise.all([loadStatus(), loadMaps(), loadMapcycle(), checkCooldown()]);
+}
+
+checkSession();
+setInterval(() => { if ($("#app").style.display !== "none") loadStatus(); }, 30000);
+</script>
+</body>
+</html>

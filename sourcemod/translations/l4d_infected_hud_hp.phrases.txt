@@ -1,0 +1,43 @@
+"Phrases"
+{
+    "HUD_Boomer"
+    {
+        "en"    "Boomer"
+        "chi"   "Boomer"
+    }
+    "HUD_Smoker"
+    {
+        "en"    "Smoker"
+        "chi"   "Smoker"
+    }
+    "HUD_Hunter"
+    {
+        "en"    "Hunter"
+        "chi"   "Hunter"
+    }
+    "HUD_Charger"
+    {
+        "en"    "Charger"
+        "chi"   "Charger"
+    }
+    "HUD_Spitter"
+    {
+        "en"    "Spitter"
+        "chi"   "Spitter"
+    }
+    "HUD_Jockey"
+    {
+        "en"    "Jockey"
+        "chi"   "Jockey"
+    }
+    "HUD_Tank"
+    {
+        "en"    "Tank"
+        "chi"   "Tank"
+    }
+    "HUD_Witch"
+    {
+        "en"    "Witch"
+        "chi"   "Witch"
+    }
+}

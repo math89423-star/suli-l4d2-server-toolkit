@@ -1,0 +1,61 @@
+# ============================================
+# L4D2 Server - Gitignore
+# ============================================
+
+# --- SourceMod Binaries (52MB, download from sourcemod.net) ---
+sourcemod/bin/
+
+# --- GeoIP Database (60MB, download via scripts/download-geoip.sh) ---
+sourcemod/configs/geoip/
+
+# --- Runtime Logs ---
+sourcemod/logs/
+*.log
+
+# --- Runtime State (generated at runtime) ---
+sourcemod/data/sqlite/
+sourcemod/data/last_map.txt
+sourcemod/data/hostname.txt
+
+# --- Sensitive Configs (use .example as template) ---
+sourcemod/configs/admins.cfg
+sourcemod/configs/admins_simple.ini
+sourcemod/configs/databases.cfg
+sourcemod/configs/l4d2_hostname.txt
+sourcemod/configs/l4d2_sv_maxplayers.txt
+
+# --- Map Changer Runtime State ---
+sourcemod/data/sm_l4d_mapchanger.txt
+sourcemod/data/sm_l4d_mapchanger_custom.txt
+sourcemod/data/sm_l4d_mapchanger_official.txt
+
+# --- Admin Panel Runtime Config ---
+admin-panel/config.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# --- Docker ---
+docker-compose.override.yml
+
+# --- OS Files ---
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# --- IDE ---
+.vscode/
+.idea/
+*.sublime-*

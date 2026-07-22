@@ -1,0 +1,28 @@
+"Databases"
+{
+	"driver_default"		"sqlite"
+	
+	"default"
+	{
+		"driver"			"sqlite"
+		"host"				"localhost"
+		"database"			"sourcemod"
+		"user"				"root"
+		"pass"				""
+	}
+	
+	"storage-local"
+	{
+		"driver"			"sqlite"
+		"database"			"sourcemod-local"
+	}
+
+	"clientprefs"
+	{
+		"driver"			"sqlite"
+		"host"				"localhost"
+		"database"			"clientprefs-sqlite"
+		"user"				"root"
+		"pass"				""
+	}
+}
