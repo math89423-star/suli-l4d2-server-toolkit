@@ -8,7 +8,7 @@ public Plugin myinfo = {
     name = "Tank HP Scaler",
     author = "claude",
     description = "Scale tank HP based on alive survivor count",
-    version = "1.1",
+    version = "1.2",
     url = ""
 };
 
@@ -17,8 +17,19 @@ ConVar g_cvHPPerSurvivor;
 public void OnPluginStart()
 {
     g_cvHPPerSurvivor = CreateConVar("sm_tank_hp_per_survivor", "3000", "Tank HP per alive survivor");
+    // Pre-hook tank_spawn: update announce cvars BEFORE l4d2_tank_announce reads them
+    HookEvent("tank_spawn",   Event_TankSpawn,   EventHookMode_Pre);
     HookEvent("player_spawn", Event_PlayerSpawn);
     AutoExecConfig(true, "l4d2_tank_hp_scaler");
+}
+
+// Pre-hook on tank_spawn — fires before tank_announce plugin reads l4d2_tank_minimum
+// This ensures the announcement shows the correct (survivors * 3000) value
+public void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+    int survivors = AliveSurvivorCount();
+    int hp = survivors * g_cvHPPerSurvivor.IntValue;
+    SyncAnnounceCvars(hp);
 }
 
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
@@ -35,7 +46,7 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
     if (GetEntProp(client, Prop_Send, "m_zombieClass") != TANK_CLASS)
         return;
 
-    // Update announce cvars IMMEDIATELY so Tank Announcer reads them
+    // Update announce cvars (fallback — tank_spawn pre-hook covers the normal path)
     int survivors = AliveSurvivorCount();
     int hp = survivors * g_cvHPPerSurvivor.IntValue;
     SyncAnnounceCvars(hp);
