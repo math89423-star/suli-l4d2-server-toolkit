@@ -8,7 +8,7 @@ public Plugin myinfo = {
     name = "Tank HP Scaler",
     author = "claude",
     description = "Scale tank HP based on alive survivor count",
-    version = "1.2",
+    version = "1.3",
     url = ""
 };
 
@@ -51,18 +51,41 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
     int hp = survivors * g_cvHPPerSurvivor.IntValue;
     SyncAnnounceCvars(hp);
 
-    // Delay HP set by 0.1s to let the game fully init the Tank
-    CreateTimer(0.1, Timer_SetTankHP, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+    // Delay HP set — 0.3s ensures we fire AFTER tank_announce plugin finishes its own HP logic
+    CreateTimer(0.3, Timer_SetTankHP, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+    // Retry at 1.0s in case first attempt was too early (tank not fully spawned)
+    CreateTimer(1.0, Timer_SetTankHP_Retry, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public Action Timer_SetTankHP(Handle timer, int userid)
 {
+    SetTankHP(userid);
+    return Plugin_Stop;
+}
+
+public Action Timer_SetTankHP_Retry(Handle timer, int userid)
+{
     int tank = GetClientOfUserId(userid);
-    if (tank <= 0 || tank > MaxClients || !IsClientInGame(tank))
+    if (tank <= 0 || tank > MaxClients || !IsClientInGame(tank) || !IsPlayerAlive(tank))
         return Plugin_Stop;
 
+    // Only retry if HP wasn't set correctly the first time
+    int expectedHP = AliveSurvivorCount() * g_cvHPPerSurvivor.IntValue;
+    int currentHP = GetEntProp(tank, Prop_Send, "m_iMaxHealth");
+    if (currentHP != expectedHP)
+        SetTankHP(userid);
+
+    return Plugin_Stop;
+}
+
+void SetTankHP(int userid)
+{
+    int tank = GetClientOfUserId(userid);
+    if (tank <= 0 || tank > MaxClients || !IsClientInGame(tank))
+        return;
+
     if (!IsPlayerAlive(tank))
-        return Plugin_Stop;
+        return;
 
     int survivors = AliveSurvivorCount();
     int hp = survivors * g_cvHPPerSurvivor.IntValue;
@@ -70,10 +93,8 @@ public Action Timer_SetTankHP(Handle timer, int userid)
     SetEntProp(tank, Prop_Send, "m_iMaxHealth", hp);
     SetEntProp(tank, Prop_Send, "m_iHealth", hp);
 
-    if (!IsPlayerAlive(tank))
-        return Plugin_Stop;
-
-    return Plugin_Stop;
+    // Re-sync announce after actually setting HP
+    SyncAnnounceCvars(hp);
 }
 
 void SyncAnnounceCvars(int hp)

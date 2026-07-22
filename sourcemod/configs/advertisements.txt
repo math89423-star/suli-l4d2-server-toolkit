@@ -18,7 +18,7 @@
 	}
 	"4"
 	{
-		"chat"  "{olive}[特性]{default}24人 60tick |多特感:人数x1.25 上限20 |Tank血量=人数x3000 |击杀回血2%"
+		"chat"  "{olive}[特性]{default}24人 60tick |多特感:人数x1.25 上限24 |Tank血量=人数x3000 |击杀回血1%"
 	}
 	"5"
 	{
@@ -30,7 +30,7 @@
 	}
 	"7"
 	{
-		"chat"  "{olive}[难度]{default}困难模式 |55-75s特感波次 |RTV投票换图"
+		"chat"  "{olive}[难度]{default}困难模式 |40-60s特感波次 |RTV投票换图"
 	}
 	"8"
 	{

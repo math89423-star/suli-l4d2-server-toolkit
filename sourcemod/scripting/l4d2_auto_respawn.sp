@@ -10,8 +10,8 @@ ConVar g_cvRespawnTime;
 public Plugin myinfo = {
     name = "Auto Respawn with Countdown",
     author = "claude",
-    description = "Auto respawn dead survivors with countdown notifications",
-    version = "2.1",
+    description = "Auto respawn dead survivors with countdown notifications (supports idle players)",
+    version = "2.2",
     url = ""
 };
 
@@ -20,18 +20,29 @@ public void OnPluginStart()
     g_cvRespawnTime = CreateConVar("sm_respawn_delay", "180", "Seconds before auto respawn (default 180 = 3 min)", _, true, 10.0);
     AutoExecConfig(true, "l4d2_auto_respawn");
     HookEvent("player_death", Event_PlayerDeath);
+    HookEvent("player_bot_replace", Event_PlayerBotReplace);
 }
 
-void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+int GetIdlePlayerOfBot(int bot)
 {
-    int client = GetClientOfUserId(event.GetInt("userid"));
-    if (client < 1 || !IsClientInGame(client) || GetClientTeam(client) != 2)
-        return;
+    if (!IsFakeClient(bot))
+        return 0;
 
+    static char sNetClass[64];
+    GetEntityNetClass(bot, sNetClass, sizeof(sNetClass));
+    if (FindSendPropInfo(sNetClass, "m_humanSpectatorUserID") < 1)
+        return 0;
+
+    return GetClientOfUserId(GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID"));
+}
+
+void StartRespawnTimer(int client)
+{
     float delay = g_cvRespawnTime.FloatValue;
     int userid = GetClientUserId(client);
 
-    PrintToChat(client, "\x04[复活]\x01 你已死亡，将在 \x03%.0f 秒\x01 后自动复活", delay);
+    if (!IsFakeClient(client))
+        PrintToChat(client, "\x04[复活]\x01 你已死亡，将在 \x03%.0f 秒\x01 后自动复活", delay);
 
     CreateTimer(delay, Timer_Respawn, userid);
 
@@ -45,6 +56,42 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
             dp.WriteCell(thresholds[i]);
             CreateTimer(delay - float(thresholds[i]), Timer_NotifyCountdown, dp);
         }
+    }
+}
+
+void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+    int victim = GetClientOfUserId(event.GetInt("userid"));
+    if (victim < 1 || !IsClientInGame(victim) || GetClientTeam(victim) != 2)
+        return;
+
+    // If victim is a bot controlled by an idle human, respawn the HUMAN instead
+    int target = victim;
+    if (IsFakeClient(victim))
+    {
+        int idlePlayer = GetIdlePlayerOfBot(victim);
+        if (idlePlayer > 0)
+            target = idlePlayer;
+        // If no idle human behind this bot, respawn the bot itself
+    }
+
+    StartRespawnTimer(target);
+}
+
+void Event_PlayerBotReplace(Event event, const char[] name, bool dontBroadcast)
+{
+    // When a human joins and takes over a dead bot, restart the respawn timer for the human
+    int player = GetClientOfUserId(event.GetInt("player"));
+
+    if (player == 0 || !IsClientInGame(player) || GetClientTeam(player) != 2)
+        return;
+
+    // If the replaced bot was dead, the human inherits the dead state
+    if (!IsPlayerAlive(player))
+    {
+        PrintToChat(player, "\x04[复活]\x01 你接替了死亡角色，将在 \x03%.0f 秒\x01 后自动复活",
+                     g_cvRespawnTime.FloatValue);
+        StartRespawnTimer(player);
     }
 }
 
