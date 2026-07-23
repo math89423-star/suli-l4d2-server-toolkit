@@ -87,6 +87,15 @@ public void OnPluginStart()
     g_hCvarFinaleAuto = CreateConVar("l4d_path_to_goal_finale_auto", "0",
     "Automatically draw beams to rescue vehicle for all clients. l4d_path_to_goal_finale must be less than 3.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
+    g_hCvarAutoEnable = CreateConVar("l4d_path_to_goal_auto", "1",
+    "Auto guide mode: periodically draw the full escape route for all players. 0=OFF, 1=ON.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarAutoDuration = CreateConVar("l4d_path_to_goal_auto_duration", "8.0",
+    "Auto guide beam duration in seconds.",FCVAR_NOTIFY, true, 1.0, true, 60.0);
+
+    g_hCvarAutoInterval = CreateConVar("l4d_path_to_goal_auto_interval", "25.0",
+    "Seconds between auto guide beam pulses.",FCVAR_NOTIFY, true, 5.0, true, 300.0);
+
   	g_hCvarMPGameMode = FindConVar("mp_gamemode");
   	g_hCvarMPGameMode.AddChangeHook(ConVarGameMode);
     
@@ -108,6 +117,8 @@ public void OnPluginStart()
     HookEvent("finale_vehicle_incoming",  evtFinaleVehicle,  EventHookMode_PostNoCopy);
     }
 
+    // Auto-guide: check periodically if guide is ready, then start pulse timer
+    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
@@ -508,6 +519,10 @@ public void OnMapEnd()
     beams_cooldown_reset(_,true); // reset all requests and cooldowns
     timer_nav = null;
     finale = false;
+
+    // Stop auto-guide timers
+    if (g_hAutoTimer != null) { KillTimer(g_hAutoTimer); g_hAutoTimer = null; }
+    if (g_hAutoCheckTimer != null) { KillTimer(g_hAutoCheckTimer); g_hAutoCheckTimer = null; }
 }
 
 public void OnPluginEnd()
@@ -515,6 +530,55 @@ public void OnPluginEnd()
     Guide_Cleanup();
     guide_prep = false;
     g_iPrepStage = STAGE_NONE;
+}
+
+// --- Auto-Guide System (Overwatch-style pulse beacon) ---
+
+Action Timer_AutoCheck(Handle timer)
+{
+    if (!g_hCvarAutoEnable.BoolValue) return Plugin_Continue;
+    if (!guide_ready || g_GuideCells == null || g_GuideCells.Length < 2) return Plugin_Continue;
+    if (g_hAutoTimer != null) return Plugin_Continue;
+
+    g_hAutoTimer = CreateTimer(g_hCvarAutoInterval.FloatValue, Timer_AutoGuidePulse, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+    g_hAutoCheckTimer = null;
+    // Fire immediately on first guide ready
+    AutoGuideDrawPath();
+    return Plugin_Stop;
+}
+
+void AutoGuideDrawPath()
+{
+    if (g_GuideCells == null || g_GuideCells.Length < 2) return;
+
+    int color[4] = {25, 255, 25, 255};
+    float duration = g_hCvarAutoDuration.FloatValue;
+    int laser = g_iLaser;
+    if (laser == 0) return;
+
+    float sw = 1.5;
+    float ew = sw * 1.05;
+    int fade = 10;
+
+    int count = g_GuideCells.Length;
+    for (int i = 0; i < count - 1; i++)
+    {
+        Cell cell1, cell2;
+        g_GuideCells.GetArray(i, cell1, sizeof(Cell));
+        g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
+        TE_SetupBeamPoints(cell1.center, cell2.center, laser, 0, 0, 0,
+            duration, sw, ew, fade, 0.0, color, 0);
+        TE_SendToAll();
+    }
+}
+
+Action Timer_AutoGuidePulse(Handle timer)
+{
+    if (!g_hCvarAutoEnable.BoolValue) { g_hAutoTimer = null; return Plugin_Stop; }
+    if (!guide_ready || g_GuideCells == null || g_GuideCells.Length < 2) return Plugin_Continue;
+    if (!gamemode_guidable || !map_started || !nav_started) return Plugin_Continue;
+    AutoGuideDrawPath();
+    return Plugin_Continue;
 }
 
 public void OnClientPutInServer(int client)

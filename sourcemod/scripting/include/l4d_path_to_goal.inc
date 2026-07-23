@@ -100,7 +100,23 @@ enum struct NavConnection
 
 ArrayList g_GuideCells;
 ConVar g_hCvarMPGameMode, g_hCvarEnable, g_hCvarMax, g_hCvarSurvivors, g_hCvarInfected, g_hCvarSpec, g_hCvarBudget, g_hCvarDetourBudget, g_hCvarFinaleAuto, g_hCvarZM;
+ConVar g_hCvarAutoEnable, g_hCvarAutoDuration, g_hCvarAutoInterval;
+Handle g_hAutoTimer = null;
+Handle g_hAutoCheckTimer = null;
 bool gamemode_guidable, guide_ready, guide_prep, map_started, nav_started, enable, g_bL4D2, finale, finale_rescue, finale_gauntlet;
+bool g_bGlobalBeams = false; // When true, DrawBeam sends to all clients (auto-guide mode)
+
+// Forward-declare optional newer left4dhooks natives (may not be in server's include)
+enum NavCornerType {
+    NAV_CORNER_NORTH_WEST = 0,
+    NAV_CORNER_NORTH_EAST = 1,
+    NAV_CORNER_SOUTH_EAST = 2,
+    NAV_CORNER_SOUTH_WEST = 3
+};
+native float L4D_NavArea_GetZ(Address area, const float pos[3]);
+native int L4D_NavArea_GetElevator(Address area);
+native void L4D_NavArea_GetCorner(Address area, NavCornerType corner, float pos[3]);
+native int L4D_NavArea_GetLadder(Address area, ArrayList ladderList);
 int g_iLaser, g_iLaserCustom, g_iLaserWhite;
 float t_nav = -1.0; // nav event gametime
 Handle timer_nav;
@@ -946,7 +962,10 @@ int DrawBeam(int client, float pos_start[3], float pos_end[3], float duration = 
     LogMessage("client %d duration %f laser %d custom %s", client, duration, laser, g_sCustomKeys[client]);
     #endif
     TE_SetupBeamPoints(pos_start,pos_end,laser,0,0,0,duration,start_width,end_width,fade_length,amp,color,0);
-    TE_SendToClient(client,g_BeamDelay[client]);
+    if (g_bGlobalBeams)
+        TE_SendToAll();
+    else
+        TE_SendToClient(client,g_BeamDelay[client]);
     if (g_sCustomKeys[client][4]=='d') g_BeamDelay[client] += 0.05;
     return 1;
 }
