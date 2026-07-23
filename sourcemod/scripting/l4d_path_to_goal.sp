@@ -20,7 +20,8 @@
 #define PLUGIN_VERSION 			"1.53 2026-07-19"
 
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
-bool g_bGuideToggled = false;
+// Per-client: each player toggles their own guide independently
+bool g_bGuideToggled[MAXPLAYERS+1];
 Handle g_hToggleTimer = null;
 float g_fLastPtgTime[MAXPLAYERS+1];
 
@@ -253,31 +254,61 @@ Action CmdRequestGuide(int client, int args)
         }
     }
 
-    if (g_bGuideToggled)
+    if (g_bGuideToggled[client])
     {
-        // Turn OFF
-        g_bGuideToggled = false;
-        if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); g_hToggleTimer = null; }
+        // Turn OFF (this client only)
+        g_bGuideToggled[client] = false;
         ReplyToCommand(client, "[PTG] \x04Guide OFF");
+        Guide_UpdateRedrawTimer();
     }
     else
     {
-        // Turn ON — redraw every 15s (beams last 20s, always visible)
-        g_bGuideToggled = true;
-        AutoGuideDrawPath();
-        if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); }
-        g_hToggleTimer = CreateTimer(15.0, Timer_ToggleRedraw, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
-        ReplyToCommand(client, "[PTG] \x04Guide ON");
+        // Turn ON — draw for this client, redraw every 15s (beams last 20s)
+        g_bGuideToggled[client] = true;
+        AutoGuideDrawPath(client);
+        Guide_UpdateRedrawTimer();
+        ReplyToCommand(client, "[PTG] \x05Guide ON");
     }
 
     return Plugin_Continue;
 }
 
+void Guide_UpdateRedrawTimer()
+{
+    bool anyOn = false;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (g_bGuideToggled[i]) { anyOn = true; break; }
+    }
+
+    if (anyOn && g_hToggleTimer == null)
+    {
+        g_hToggleTimer = CreateTimer(15.0, Timer_ToggleRedraw, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+    }
+    else if (!anyOn && g_hToggleTimer != null)
+    {
+        KillTimer(g_hToggleTimer);
+        g_hToggleTimer = null;
+    }
+}
+
 Action Timer_ToggleRedraw(Handle timer)
 {
-    if (!g_bGuideToggled) { g_hToggleTimer = null; return Plugin_Stop; }
-    if (!guide_ready || g_GuideCells == null) return Plugin_Continue;
-    AutoGuideDrawPath();
+    bool anyOn = false;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (g_bGuideToggled[i] && IsValidClient(i) && !IsFakeClient(i))
+        {
+            anyOn = true;
+            AutoGuideDrawPath(i);
+        }
+    }
+
+    if (!anyOn)
+    {
+        g_hToggleTimer = null;
+        return Plugin_Stop;
+    }
     return Plugin_Continue;
 }
 
@@ -493,7 +524,13 @@ public void OnMapEnd()
     if (g_hAutoTimer != null) { KillTimer(g_hAutoTimer); g_hAutoTimer = null; }
     if (g_hAutoCheckTimer != null) { KillTimer(g_hAutoCheckTimer); g_hAutoCheckTimer = null; }
     if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); g_hToggleTimer = null; }
-    g_bGuideToggled = false;
+    for (int i = 1; i <= MaxClients; i++) g_bGuideToggled[i] = false;
+}
+
+public void OnClientDisconnect(int client)
+{
+    g_bGuideToggled[client] = false;
+    g_fLastPtgTime[client] = 0.0;
 }
 
 public void OnPluginEnd()
@@ -507,14 +544,29 @@ public void OnPluginEnd()
 
 Action Timer_AutoCheck(Handle timer)
 {
-    if (!g_hCvarAutoEnable.BoolValue)
+    // Always reschedule (recursive one-shot — TIMER_REPEAT won't fire on empty servers)
+    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
+
+    // Always keep guide prepped in background, even when auto pulse is off.
+    // This way !ptg is instant when a player uses it.
+    if (!guide_ready && !guide_prep && g_iFallbackStage < 2)
     {
-        g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
+        if (g_iPrepAttempts >= 10 && g_iFallbackStage == 0)
+        {
+            LogMessage("[PTG] Standard prep failed after %d attempts. Trying fallback nav collection...", g_iPrepAttempts);
+            g_iFallbackStage = 1;
+            Guide_Prep_Fallback();
+        }
+        else if (g_iFallbackStage == 0)
+        {
+            g_iPrepAttempts++;
+            Guide_Prep();
+        }
         return Plugin_Stop;
     }
 
-    // Reschedule before other logic (recursive one-shot pattern — TIMER_REPEAT won't fire on empty servers)
-    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
+    // Auto pulse mode (only when cvar enabled)
+    if (!g_hCvarAutoEnable.BoolValue) return Plugin_Stop;
 
     if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
     {
@@ -527,21 +579,6 @@ Action Timer_AutoCheck(Handle timer)
         }
         g_iPrepAttempts = 0;
         g_iFallbackStage = 0;
-    }
-    else if (!guide_ready && !guide_prep && g_iFallbackStage < 2)
-    {
-        // If standard prep keeps failing, try fallback after 10 attempts (~20s)
-        if (g_iPrepAttempts >= 10 && g_iFallbackStage == 0)
-        {
-            LogMessage("[PTG] Standard prep failed after %d attempts. Trying fallback nav collection...", g_iPrepAttempts);
-            g_iFallbackStage = 1;
-            Guide_Prep_Fallback();
-        }
-        else if (g_iFallbackStage == 0)
-        {
-            g_iPrepAttempts++;
-            Guide_Prep();
-        }
     }
 
     return Plugin_Stop;
@@ -647,7 +684,7 @@ void Guide_Prep_Fallback()
 // We can't call it directly since it's file-static, but SortCustom with SortFlow works
 // because SortFlow is in scope during compilation (include is inlined)
 
-void AutoGuideDrawPath()
+void AutoGuideDrawPath(int client = -1)
 {
     if (g_GuideCells == null || g_GuideCells.Length < 2) return;
 
@@ -680,7 +717,8 @@ void AutoGuideDrawPath()
         // Thin arrow beam on the ground: 1.2→4.5 wide, thin→thick shows direction
         TE_SetupBeamPoints(pos1, pos2, laser, 0, 0, 0,
             duration, 1.2, 4.5, 0, 0.0, color_trail, 0);
-        TE_SendToAll();
+        if (client > 0) TE_SendToClient(client);
+        else TE_SendToAll();
     }
 
     // Small ground chevrons every ~5 cells — directional arrow marks
@@ -726,12 +764,14 @@ void AutoGuideDrawPath()
         // Left blade: tip → baseLeft
         TE_SetupBeamPoints(tip, baseLeft, laser, 0, 0, 0,
             duration, 3.0, 0.8, 0, 0.0, color_chevron, 0);
-        TE_SendToAll();
+        if (client > 0) TE_SendToClient(client);
+        else TE_SendToAll();
 
         // Right blade: tip → baseRight
         TE_SetupBeamPoints(tip, baseRight, laser, 0, 0, 0,
             duration, 3.0, 0.8, 0, 0.0, color_chevron, 0);
-        TE_SendToAll();
+        if (client > 0) TE_SendToClient(client);
+        else TE_SendToAll();
     }
 }
 
