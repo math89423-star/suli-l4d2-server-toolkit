@@ -32,7 +32,6 @@ public void OnPluginStart()
 {
     AutoExecConfig(true, CONFIG_FILENAME);
     LoadTranslations("l4d_path_to_goal.phrases");
-    LogMessage("[PTG-AUTO] V2 Plugin starting v%s", PLUGIN_VERSION);
 
     RegConsoleCmd("path_to_goal",       CmdRequestGuide, "Point where to go to progress in the map.");
     RegConsoleCmd("pathtogoal",         CmdRequestGuide, "Point where to go to progress in the map.");
@@ -118,7 +117,9 @@ public void OnPluginStart()
     HookEvent("finale_vehicle_incoming",  evtFinaleVehicle,  EventHookMode_PostNoCopy);
     }
 
-    // Auto-guide check timer is created per-map in OnMapStart
+    // Auto-guide: check periodically if guide is ready, then start pulse timer
+    // Use recursive one-shot timers (TIMER_REPEAT doesn't fire on empty servers)
+    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
@@ -498,16 +499,7 @@ public void OnMapStart()
     g_iLaserWhite = PrecacheModel(VMT_LASERBEAM_WHITE, true);
     g_iLaserCustom = PrecacheModel(VMT_LASERBEAM_CUSTOM, true);
     RequestFrame(MapStarted);
-
-    // Restart auto-guide check timer each map
-    LogMessage("[PTG-AUTO] OnMapStart, auto=%d, laser=%d", g_hCvarAutoEnable.BoolValue, g_iLaser);
-    if (g_hCvarAutoEnable.BoolValue)
-    {
-        if (g_hAutoCheckTimer != null) KillTimer(g_hAutoCheckTimer);
-        g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
-        LogMessage("[PTG-AUTO] Check timer created");
-    }
-    if (g_hAutoTimer != null) { KillTimer(g_hAutoTimer); g_hAutoTimer = null; }
+    //GetCurrentMap(mapName, sizeof(mapName));
 }
 
 void MapStarted()
@@ -545,23 +537,31 @@ public void OnPluginEnd()
 
 Action Timer_AutoCheck(Handle timer)
 {
-    // Reschedule FIRST before any operation that might crash
-    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
-
-    if (!g_hCvarAutoEnable.BoolValue) return Plugin_Stop;
-    if (g_hAutoTimer != null) return Plugin_Stop; // pulse already running
-
-    if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
+    if (!g_hCvarAutoEnable.BoolValue)
     {
-        LogMessage("[PTG-AUTO] Guide ready (%d cells), pulse every %.0fs, duration %.0fs",
-            g_GuideCells.Length, g_hCvarAutoInterval.FloatValue, g_hCvarAutoDuration.FloatValue);
-
-        g_hAutoTimer = CreateTimer(g_hCvarAutoInterval.FloatValue, Timer_AutoGuidePulse, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
-        AutoGuideDrawPath();
+        g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
         return Plugin_Stop;
     }
 
-    if (!guide_ready && !guide_prep) Guide_Prep();
+    // Reschedule before other logic (recursive one-shot pattern — TIMER_REPEAT won't fire on empty servers)
+    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
+
+    if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
+    {
+        if (g_hAutoTimer == null)
+        {
+            LogMessage("[PTG] Guide ready (%d cells), starting pulse timer every %.0fs, duration %.0fs",
+                g_GuideCells.Length, g_hCvarAutoInterval.FloatValue, g_hCvarAutoDuration.FloatValue);
+            g_hAutoTimer = CreateTimer(g_hCvarAutoInterval.FloatValue, Timer_AutoGuidePulse, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+            AutoGuideDrawPath();
+        }
+    }
+
+    if (!guide_ready && !guide_prep)
+    {
+        Guide_Prep();
+    }
+
     return Plugin_Stop;
 }
 
@@ -569,46 +569,53 @@ void AutoGuideDrawPath()
 {
     if (g_GuideCells == null || g_GuideCells.Length < 2) return;
 
-    // Overwatch-style golden beacon
-    int color_line[4] = {255, 185, 30, 255};   // warm amber
-    int color_pin[4] = {255, 220, 80, 200};    // softer gold with slight transparency
+    // Blue breathing arrow: aura glow + directional core + waypoint pins
+    int color_aura[4]  = {10, 90, 255, 70};     // deep blue breathing aura
+    int color_core[4]  = {0, 200, 255, 255};    // bright cyan-blue arrow core
+    int color_pin[4]   = {50, 180, 255, 180};   // sky blue waypoint markers
 
     float duration = g_hCvarAutoDuration.FloatValue;
-    int laser = g_iLaser;
+    int laser = g_iLaserWhite;
+    if (laser == 0) laser = g_iLaser;
     if (laser == 0) return;
 
     int count = g_GuideCells.Length;
+    float wave_step = duration * 0.06 / float(count); // progressive wave
 
-    // Draw main path beam — thick, tapered (directional hint)
     for (int i = 0; i < count - 1; i++)
     {
         Cell cell1, cell2;
         g_GuideCells.GetArray(i, cell1, sizeof(Cell));
         g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
 
-        // Skip very short segments (< 64 units apart)
         if (GetVectorDistance(cell1.center, cell2.center, true) < 4096.0) continue;
 
+        float delay = float(i) * wave_step;
+
+        // Layer 1 — wide breathing aura (pulses outward, fades quick)
         TE_SetupBeamPoints(cell1.center, cell2.center, laser, 0, 0, 0,
-            duration, 4.0, 6.0, 10, 0.0, color_line, 0);
-        TE_SendToAll();
+            duration * 0.55, 16.0, 5.0, 30, 0.0, color_aura, 0);
+        TE_SendToAll(delay);
+
+        // Layer 2 — bright arrow (thin→thick shows way forward)
+        TE_SetupBeamPoints(cell1.center, cell2.center, laser, 0, 0, 0,
+            duration, 2.5, 10.0, 0, 0.0, color_core, 0);
+        TE_SendToAll(delay);
     }
 
-    // Draw waypoint pins at each cell — floating vertical markers
-    float pin_half = 32.0;
+    // Waypoint pins — blue floating glows
+    float pin_half = 28.0;
     for (int i = 0; i < count; i++)
     {
         Cell cell;
         g_GuideCells.GetArray(i, cell, sizeof(Cell));
 
         float pos_bottom[3], pos_top[3];
-        pos_bottom = cell.center;
-        pos_bottom[2] -= pin_half;
-        pos_top = cell.center;
-        pos_top[2] += pin_half;
+        pos_bottom = cell.center; pos_bottom[2] -= pin_half;
+        pos_top = cell.center;    pos_top[2] += pin_half;
 
         TE_SetupBeamPoints(pos_bottom, pos_top, laser, 0, 0, 0,
-            duration, 8.0, 2.0, 10, 0.0, color_pin, 0);
+            duration, 12.0, 3.0, 20, 0.0, color_pin, 0);
         TE_SendToAll();
     }
 }
