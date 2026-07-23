@@ -551,23 +551,47 @@ void AutoGuideDrawPath()
 {
     if (g_GuideCells == null || g_GuideCells.Length < 2) return;
 
-    int color[4] = {25, 255, 25, 255};
+    // Overwatch-style golden beacon
+    int color_line[4] = {255, 185, 30, 255};   // warm amber
+    int color_pin[4] = {255, 220, 80, 200};    // softer gold with slight transparency
+
     float duration = g_hCvarAutoDuration.FloatValue;
-    int laser = g_iLaser;
+    int laser = g_iLaserWhite;  // clean white/glow sprite
+    if (laser == 0) laser = g_iLaser;
     if (laser == 0) return;
 
-    float sw = 1.5;
-    float ew = sw * 1.05;
-    int fade = 10;
-
     int count = g_GuideCells.Length;
+
+    // Draw main path beam — thick, tapered (directional hint)
     for (int i = 0; i < count - 1; i++)
     {
         Cell cell1, cell2;
         g_GuideCells.GetArray(i, cell1, sizeof(Cell));
         g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
+
+        // Skip very short segments (< 64 units apart)
+        if (GetVectorDistance(cell1.center, cell2.center, true) < 4096.0) continue;
+
         TE_SetupBeamPoints(cell1.center, cell2.center, laser, 0, 0, 0,
-            duration, sw, ew, fade, 0.0, color, 0);
+            duration, 4.0, 6.0, 10, 0.0, color_line, 0);
+        TE_SendToAll();
+    }
+
+    // Draw waypoint pins at each cell — floating vertical markers
+    float pin_half = 32.0;
+    for (int i = 0; i < count; i++)
+    {
+        Cell cell;
+        g_GuideCells.GetArray(i, cell, sizeof(Cell));
+
+        float pos_bottom[3], pos_top[3];
+        pos_bottom = cell.center;
+        pos_bottom[2] -= pin_half;
+        pos_top = cell.center;
+        pos_top[2] += pin_half;
+
+        TE_SetupBeamPoints(pos_bottom, pos_top, laser, 0, 0, 0,
+            duration, 8.0, 2.0, 10, 0.0, color_pin, 0);
         TE_SendToAll();
     }
 }
