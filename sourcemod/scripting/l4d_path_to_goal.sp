@@ -19,6 +19,11 @@
 
 #define PLUGIN_VERSION 			"1.53 2026-07-19"
 
+// Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
+bool g_bGuideToggled = false;
+Handle g_hToggleTimer = null;
+float g_fLastPtgTime[MAXPLAYERS+1];
+
 public Plugin myinfo =
 {
 	name = "[L4D1/L4D2] Path To Goal",
@@ -87,11 +92,11 @@ public void OnPluginStart()
     g_hCvarFinaleAuto = CreateConVar("l4d_path_to_goal_finale_auto", "0",
     "Automatically draw beams to rescue vehicle for all clients. l4d_path_to_goal_finale must be less than 3.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_hCvarAutoEnable = CreateConVar("l4d_path_to_goal_auto", "1",
+    g_hCvarAutoEnable = CreateConVar("l4d_path_to_goal_auto", "0",
     "Auto guide mode: periodically draw the full escape route for all players. 0=OFF, 1=ON.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_hCvarAutoDuration = CreateConVar("l4d_path_to_goal_auto_duration", "8.0",
-    "Auto guide beam duration in seconds.",FCVAR_NOTIFY, true, 1.0, true, 60.0);
+    g_hCvarAutoDuration = CreateConVar("l4d_path_to_goal_auto_duration", "20.0",
+    "Auto guide beam duration in seconds. Also used for manual !ptg trigger duration.",FCVAR_NOTIFY, true, 1.0, true, 60.0);
 
     g_hCvarAutoInterval = CreateConVar("l4d_path_to_goal_auto_interval", "25.0",
     "Seconds between auto guide beam pulses.",FCVAR_NOTIFY, true, 5.0, true, 300.0);
@@ -228,99 +233,51 @@ void ConVarGameMode(ConVar convar, const char[] oldValue, const char[] newValue)
 Action CmdRequestGuide(int client, int args)
 {
     if (!enable || !map_started || !nav_started || !gamemode_guidable || !IsValidClient(client) || IsFakeClient(client)) return Plugin_Continue;
-    float duration = 5.0;
-    bool backward = GetClientTeam(client)!=TEAM_SURVIVOR;
-    
-    static char arg[16];
-    int i = 0;
-    g_sCustomKeys[client] = "              ";
-    //g_GuidePrefs[client].Init();
-    while (i>=0 && i<=10)
+
+    // Double-tap detection: only toggle on two rapid presses within 0.5s
+    float now = GetGameTime();
+    float gap = g_fLastPtgTime[client] > 0.0 ? (now - g_fLastPtgTime[client]) : 999.0;
+    g_fLastPtgTime[client] = now;
+
+    if (gap > 0.5)
+        return Plugin_Continue; // ignore single press, wait for double-tap
+
+    // Double-tap detected — force guide prep if needed
+    if (!guide_ready)
     {
-        if (args>i) {GetCmdArg(i+1,arg,sizeof(arg)); process_cmd_arg(client,arg,duration,backward);}
-        else break;
-        i += 1;
-    }
-
-    switch (RequestGuide(client,duration,backward))
-    {
-        case true: // beams drawn
+        Guide_Prep();
+        if (!guide_ready || g_GuideCells == null)
         {
-            static float eye_client[3], ang_client[3], ang_beam[3];
-            GetClientEyePosition(client,eye_client);
-
-            float dx = FloatAbs(eye_client[0] - g_RequestFirstPos[0]);
-            float dy = FloatAbs(eye_client[1] - g_RequestFirstPos[1]);
-            if (dx<=5.0 && dy<=5.0) // Direction will be spurious if we are on the point
-            {
-                if (g_fRequestFlow>0.0) ReplyToCommand(client, "[PTG|%.0f|%.0f] %t%t", g_fRequestFlow, g_fMaxFlow, "ptg_look", "ptg_down");
-                else ReplyToCommand(client, "[PTG] %t%t", "ptg_look", "ptg_down");
-                return Plugin_Continue;
-            }
-
-            GetClientEyeAngles(client,ang_client);
-    
-            SubtractVectors(g_RequestFirstPos,eye_client,ang_beam);
-            GetVectorAngles(ang_beam,ang_beam);  
-            if (ang_beam[0] > 180.0) ang_beam[0] -= 360.0;
-            if (ang_beam[1] > 180.0) ang_beam[1] -= 360.0;
-            SubtractVectors(ang_beam,ang_client,ang_beam);
-            //LogMessage("%.1f %.1f %.1f", ang_beam[0], ang_beam[1], ang_beam[2]);
-
-            static char str1[PLATFORM_MAX_PATH], str2[PLATFORM_MAX_PATH];
-            
-            if (FloatAbs(ang_beam[1]) < 90.0) Format(str1,sizeof(str1),"%T", "ptg_ahead", client);
-            else Format(str1,sizeof(str1),"%T", "ptg_behind", client);
-            //else if ( FloatAbs(FloatAbs(ang_beam[1])-180.0) <= 45.0 ) Format(str1,sizeof(str1),"%T", "ptg_behind", client);
-            //else if (ang_beam[1]>0.0) Format(str1,sizeof(str1),"%T", "ptg_left", client);
-            //else Format(str1,sizeof(str1),"%T", "ptg_right", client);
-
-            if (ang_beam[0]>=30.0) Format(str2,sizeof(str2),"%T", "ptg_down", client);
-            else if (ang_beam[0]<=(-30.0)) Format(str2,sizeof(str2),"%T", "ptg_up", client);
-            else str2 = "\0";
-            if (g_fRequestFlow>0.0) ReplyToCommand(client, "[PTG|%.0f|%.0f] %t%s %s", g_fRequestFlow, g_fMaxFlow, "ptg_look", str1, str2);
-            else ReplyToCommand(client, "[PTG] %t%s %s", "ptg_look", str1, str2);
-
-            // Instructor Hint
-            //client_hint = client;
-            //int entity = CreateEntityByName("info_target"); 
-            //DispatchKeyValue(entity, "targetname", "ptg_hint");
-            //DispatchKeyValue(entity, "spawnflags", "2");
-            //DispatchSpawn(entity);
-            //TeleportEntity(entity, g_RequestFirstPos, NULL_VECTOR, NULL_VECTOR);
-            //SDKHook(entity, SDKHook_SetTransmit, TransmitInfoTarget);
-            //static char szBuffer[36];
-            //Format(szBuffer, sizeof szBuffer, "OnUser1 !self:Kill::%f:-1", duration);
-            //SetVariantString(szBuffer); 
-            //AcceptEntityInput(entity, "AddOutput"); 
-            //AcceptEntityInput(entity, "FireUser1");
-            //entity = CreateEntityByName("env_instructor_hint");
-            //DispatchKeyValueFloat(entity, "hint_timeout", duration);
-            //DispatchKeyValue(entity, "hint_allow_nodraw_target", "1");
-            //DispatchKeyValue(entity, "hint_target", "ptg_hint"); //a entity's targetname
-            //DispatchKeyValue(entity, "hint_auto_start", "1");
-            //DispatchKeyValue(entity, "hint_color", "255 255 255");
-            //DispatchKeyValue(entity, "hint_icon_offscreen", "icon_door");
-            //DispatchKeyValue(entity, "hint_instance_type", "2");
-            //DispatchKeyValue(entity, "hint_icon_onscreen", "icon_door");
-            //DispatchKeyValue(entity, "hint_caption", "PTG");
-            //DispatchKeyValue(entity, "hint_static", "0");
-            //DispatchKeyValue(entity, "hint_nooffscreen", "0");
-            //DispatchKeyValue(entity, "hint_icon_offset", "0");
-            //DispatchKeyValue(entity, "hint_range", "10000");
-            //DispatchKeyValue(entity, "hint_forcecaption", "0");
-            //DispatchKeyValue(entity, "hint_suppress_rest", "1");
-            //DispatchSpawn(entity);
-            //TeleportEntity(entity, g_RequestFirstPos, NULL_VECTOR, NULL_VECTOR); 
-            //SetVariantString(szBuffer); 
-            //AcceptEntityInput(entity, "AddOutput"); 
-            //AcceptEntityInput(entity, "FireUser1");
-        }
-        default: // beams not drawn
-        {
-            if (!guide_ready && g_CellRequests[client].duration > 0.0) ReplyToCommand(client, "[PTG] %t", "ptg_wait");
+            ReplyToCommand(client, "[PTG] %t", "ptg_wait");
+            return Plugin_Continue;
         }
     }
+
+    if (g_bGuideToggled)
+    {
+        // Turn OFF
+        g_bGuideToggled = false;
+        if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); g_hToggleTimer = null; }
+        ReplyToCommand(client, "[PTG] \x04Guide OFF");
+    }
+    else
+    {
+        // Turn ON — redraw every 15s (beams last 20s, always visible)
+        g_bGuideToggled = true;
+        AutoGuideDrawPath();
+        if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); }
+        g_hToggleTimer = CreateTimer(15.0, Timer_ToggleRedraw, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+        ReplyToCommand(client, "[PTG] \x04Guide ON");
+    }
+
+    return Plugin_Continue;
+}
+
+Action Timer_ToggleRedraw(Handle timer)
+{
+    if (!g_bGuideToggled) { g_hToggleTimer = null; return Plugin_Stop; }
+    if (!guide_ready || g_GuideCells == null) return Plugin_Continue;
+    AutoGuideDrawPath();
     return Plugin_Continue;
 }
 
@@ -502,7 +459,7 @@ public void OnMapStart()
     //GetCurrentMap(mapName, sizeof(mapName));
 }
 
-// Global state for auto-guide fallback (must be above MapStarted)
+// Global state for auto-guide fallback
 int g_iPrepAttempts = 0;
 int g_iFallbackStage = 0; // 0=normal, 1=fallback pending, 2=fallback done
 
@@ -535,6 +492,8 @@ public void OnMapEnd()
     // Stop auto-guide timers
     if (g_hAutoTimer != null) { KillTimer(g_hAutoTimer); g_hAutoTimer = null; }
     if (g_hAutoCheckTimer != null) { KillTimer(g_hAutoCheckTimer); g_hAutoCheckTimer = null; }
+    if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); g_hToggleTimer = null; }
+    g_bGuideToggled = false;
 }
 
 public void OnPluginEnd()
@@ -717,9 +676,6 @@ void AutoGuideDrawPath()
         float pos1[3], pos2[3];
         pos1 = cell1.center; pos1[2] -= 13.0;
         pos2 = cell2.center; pos2[2] -= 13.0;
-
-        // Skip segment if wall/geometry blocks line-of-sight
-        if (!twopos_traversable(pos1, pos2)) continue;
 
         // Thin arrow beam on the ground: 1.2→4.5 wide, thin→thick shows direction
         TE_SetupBeamPoints(pos1, pos2, laser, 0, 0, 0,
