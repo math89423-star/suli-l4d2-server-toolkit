@@ -32,6 +32,7 @@ public void OnPluginStart()
 {
     AutoExecConfig(true, CONFIG_FILENAME);
     LoadTranslations("l4d_path_to_goal.phrases");
+    LogMessage("[PTG-AUTO] V2 Plugin starting v%s", PLUGIN_VERSION);
 
     RegConsoleCmd("path_to_goal",       CmdRequestGuide, "Point where to go to progress in the map.");
     RegConsoleCmd("pathtogoal",         CmdRequestGuide, "Point where to go to progress in the map.");
@@ -117,8 +118,7 @@ public void OnPluginStart()
     HookEvent("finale_vehicle_incoming",  evtFinaleVehicle,  EventHookMode_PostNoCopy);
     }
 
-    // Auto-guide: check periodically if guide is ready, then start pulse timer
-    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+    // Auto-guide check timer is created per-map in OnMapStart
 }
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
@@ -498,7 +498,16 @@ public void OnMapStart()
     g_iLaserWhite = PrecacheModel(VMT_LASERBEAM_WHITE, true);
     g_iLaserCustom = PrecacheModel(VMT_LASERBEAM_CUSTOM, true);
     RequestFrame(MapStarted);
-    //GetCurrentMap(mapName, sizeof(mapName));
+
+    // Restart auto-guide check timer each map
+    LogMessage("[PTG-AUTO] OnMapStart, auto=%d, laser=%d", g_hCvarAutoEnable.BoolValue, g_iLaser);
+    if (g_hCvarAutoEnable.BoolValue)
+    {
+        if (g_hAutoCheckTimer != null) KillTimer(g_hAutoCheckTimer);
+        g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
+        LogMessage("[PTG-AUTO] Check timer created");
+    }
+    if (g_hAutoTimer != null) { KillTimer(g_hAutoTimer); g_hAutoTimer = null; }
 }
 
 void MapStarted()
@@ -536,14 +545,23 @@ public void OnPluginEnd()
 
 Action Timer_AutoCheck(Handle timer)
 {
-    if (!g_hCvarAutoEnable.BoolValue) return Plugin_Continue;
-    if (!guide_ready || g_GuideCells == null || g_GuideCells.Length < 2) return Plugin_Continue;
-    if (g_hAutoTimer != null) return Plugin_Continue;
+    // Reschedule FIRST before any operation that might crash
+    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
 
-    g_hAutoTimer = CreateTimer(g_hCvarAutoInterval.FloatValue, Timer_AutoGuidePulse, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
-    g_hAutoCheckTimer = null;
-    // Fire immediately on first guide ready
-    AutoGuideDrawPath();
+    if (!g_hCvarAutoEnable.BoolValue) return Plugin_Stop;
+    if (g_hAutoTimer != null) return Plugin_Stop; // pulse already running
+
+    if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
+    {
+        LogMessage("[PTG-AUTO] Guide ready (%d cells), pulse every %.0fs, duration %.0fs",
+            g_GuideCells.Length, g_hCvarAutoInterval.FloatValue, g_hCvarAutoDuration.FloatValue);
+
+        g_hAutoTimer = CreateTimer(g_hCvarAutoInterval.FloatValue, Timer_AutoGuidePulse, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+        AutoGuideDrawPath();
+        return Plugin_Stop;
+    }
+
+    if (!guide_ready && !guide_prep) Guide_Prep();
     return Plugin_Stop;
 }
 
@@ -556,8 +574,7 @@ void AutoGuideDrawPath()
     int color_pin[4] = {255, 220, 80, 200};    // softer gold with slight transparency
 
     float duration = g_hCvarAutoDuration.FloatValue;
-    int laser = g_iLaserWhite;  // clean white/glow sprite
-    if (laser == 0) laser = g_iLaser;
+    int laser = g_iLaser;
     if (laser == 0) return;
 
     int count = g_GuideCells.Length;
