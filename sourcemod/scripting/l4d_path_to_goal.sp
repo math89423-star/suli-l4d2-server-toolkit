@@ -569,10 +569,10 @@ void AutoGuideDrawPath()
 {
     if (g_GuideCells == null || g_GuideCells.Length < 2) return;
 
-    // Blue breathing arrow: aura glow + directional core + waypoint pins
-    int color_aura[4]  = {10, 90, 255, 70};     // deep blue breathing aura
-    int color_core[4]  = {0, 200, 255, 255};    // bright cyan-blue arrow core
-    int color_pin[4]   = {50, 180, 255, 180};   // sky blue waypoint markers
+    // Warm golden trail — like Fable breadcrumb on the ground
+    // RGBA: soft amber, semi-transparent so it blends with the floor
+    int color_trail[4]   = {255, 200, 75, 200};
+    int color_chevron[4] = {255, 180, 40, 240};
 
     float duration = g_hCvarAutoDuration.FloatValue;
     int laser = g_iLaserWhite;
@@ -580,7 +580,6 @@ void AutoGuideDrawPath()
     if (laser == 0) return;
 
     int count = g_GuideCells.Length;
-    float wave_step = duration * 0.06 / float(count); // progressive wave
 
     for (int i = 0; i < count - 1; i++)
     {
@@ -588,34 +587,68 @@ void AutoGuideDrawPath()
         g_GuideCells.GetArray(i, cell1, sizeof(Cell));
         g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
 
-        if (GetVectorDistance(cell1.center, cell2.center, true) < 4096.0) continue;
+        float distSq = GetVectorDistance(cell1.center, cell2.center, true);
+        if (distSq < 4096.0) continue;
 
-        float delay = float(i) * wave_step;
+        // Hug the ground: cell centers are at ground+16, drop to ground+3
+        float pos1[3], pos2[3];
+        pos1 = cell1.center; pos1[2] -= 13.0;
+        pos2 = cell2.center; pos2[2] -= 13.0;
 
-        // Layer 1 — wide breathing aura (pulses outward, fades quick)
-        TE_SetupBeamPoints(cell1.center, cell2.center, laser, 0, 0, 0,
-            duration * 0.55, 16.0, 5.0, 30, 0.0, color_aura, 0);
-        TE_SendToAll(delay);
-
-        // Layer 2 — bright arrow (thin→thick shows way forward)
-        TE_SetupBeamPoints(cell1.center, cell2.center, laser, 0, 0, 0,
-            duration, 2.5, 10.0, 0, 0.0, color_core, 0);
-        TE_SendToAll(delay);
+        // Thin arrow beam on the ground: 1.2→4.5 wide, thin→thick shows direction
+        TE_SetupBeamPoints(pos1, pos2, laser, 0, 0, 0,
+            duration, 1.2, 4.5, 0, 0.0, color_trail, 0);
+        TE_SendToAll();
     }
 
-    // Waypoint pins — blue floating glows
-    float pin_half = 28.0;
-    for (int i = 0; i < count; i++)
+    // Small ground chevrons every ~5 cells — directional arrow marks
+    int chevronInterval = 5;
+    for (int i = 0; i < count - 1; i += chevronInterval)
     {
-        Cell cell;
-        g_GuideCells.GetArray(i, cell, sizeof(Cell));
+        Cell cell1, cell2;
+        g_GuideCells.GetArray(i, cell1, sizeof(Cell));
+        g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
 
-        float pos_bottom[3], pos_top[3];
-        pos_bottom = cell.center; pos_bottom[2] -= pin_half;
-        pos_top = cell.center;    pos_top[2] += pin_half;
+        float dir[3];
+        SubtractVectors(cell2.center, cell1.center, dir);
+        float dist = GetVectorLength(dir);
+        if (dist < 1.0) continue;
 
-        TE_SetupBeamPoints(pos_bottom, pos_top, laser, 0, 0, 0,
-            duration, 12.0, 3.0, 20, 0.0, color_pin, 0);
+        // Normalize direction (XY only, keep flat on ground)
+        dir[2] = 0.0;
+        NormalizeVector(dir, dir);
+
+        // Perpendicular direction
+        float perp[3];
+        perp[0] = -dir[1];
+        perp[1] = dir[0];
+        perp[2] = 0.0;
+
+        // Chevron tip and base positions on the ground
+        float tip[3], baseLeft[3], baseRight[3];
+        float arrowLen = 24.0;
+        float halfWidth = 14.0;
+
+        tip[0] = cell1.center[0] + dir[0] * arrowLen;
+        tip[1] = cell1.center[1] + dir[1] * arrowLen;
+        tip[2] = cell1.center[2] - 13.0;
+
+        baseLeft[0] = cell1.center[0] + perp[0] * halfWidth;
+        baseLeft[1] = cell1.center[1] + perp[1] * halfWidth;
+        baseLeft[2] = cell1.center[2] - 13.0;
+
+        baseRight[0] = cell1.center[0] - perp[0] * halfWidth;
+        baseRight[1] = cell1.center[1] - perp[1] * halfWidth;
+        baseRight[2] = cell1.center[2] - 13.0;
+
+        // Left blade: tip → baseLeft
+        TE_SetupBeamPoints(tip, baseLeft, laser, 0, 0, 0,
+            duration, 3.0, 0.8, 0, 0.0, color_chevron, 0);
+        TE_SendToAll();
+
+        // Right blade: tip → baseRight
+        TE_SetupBeamPoints(tip, baseRight, laser, 0, 0, 0,
+            duration, 3.0, 0.8, 0, 0.0, color_chevron, 0);
         TE_SendToAll();
     }
 }
