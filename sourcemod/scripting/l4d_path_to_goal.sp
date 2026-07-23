@@ -502,11 +502,22 @@ public void OnMapStart()
     //GetCurrentMap(mapName, sizeof(mapName));
 }
 
+// Global state for auto-guide fallback (must be above MapStarted)
+int g_iPrepAttempts = 0;
+int g_iFallbackStage = 0; // 0=normal, 1=fallback pending, 2=fallback done
+
 void MapStarted()
 {
     map_started = true;
     t_nav = -1.0;
     timer_nav = null;
+    g_iPrepAttempts = 0;
+    g_iFallbackStage = 0;
+
+    // Re-create check timer on every map load (OnPluginStart only fires once;
+    // OnMapEnd kills it, so we must recreate here after each map change)
+    if (g_hAutoCheckTimer != null) { KillTimer(g_hAutoCheckTimer); }
+    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public void OnMapEnd()
@@ -555,15 +566,127 @@ Action Timer_AutoCheck(Handle timer)
             g_hAutoTimer = CreateTimer(g_hCvarAutoInterval.FloatValue, Timer_AutoGuidePulse, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
             AutoGuideDrawPath();
         }
+        g_iPrepAttempts = 0;
+        g_iFallbackStage = 0;
     }
-
-    if (!guide_ready && !guide_prep)
+    else if (!guide_ready && !guide_prep && g_iFallbackStage < 2)
     {
-        Guide_Prep();
+        // If standard prep keeps failing, try fallback after 10 attempts (~20s)
+        if (g_iPrepAttempts >= 10 && g_iFallbackStage == 0)
+        {
+            LogMessage("[PTG] Standard prep failed after %d attempts. Trying fallback nav collection...", g_iPrepAttempts);
+            g_iFallbackStage = 1;
+            Guide_Prep_Fallback();
+        }
+        else if (g_iFallbackStage == 0)
+        {
+            g_iPrepAttempts++;
+            Guide_Prep();
+        }
     }
 
     return Plugin_Stop;
 }
+
+// Fallback: collect ALL nav areas sorted by flow (skip ESCAPE_ROUTE requirement)
+// Works on custom maps where the nav mesh lacks proper spawn attributes
+void Guide_Prep_Fallback()
+{
+    if (!enable || !gamemode_guidable || !map_started || !nav_started) return;
+
+    float maxFlow = L4D2Direct_GetMapMaxFlowDistance();
+    if (maxFlow <= 0.0)
+    {
+        LogMessage("[PTG] Fallback failed: MapMaxFlowDistance = %.1f", maxFlow);
+        g_iFallbackStage = 2;
+        return;
+    }
+
+    ArrayList fbAreas = new ArrayList();
+    L4D_GetAllNavAreas(fbAreas);
+    if (fbAreas.Length <= 1)
+    {
+        LogMessage("[PTG] Fallback failed: L4D_GetAllNavAreas returned %d areas", fbAreas.Length);
+        delete fbAreas;
+        g_iFallbackStage = 2;
+        return;
+    }
+
+    ArrayList fallbackCells = new ArrayList(sizeof(Cell));
+    Cell cell;
+    float pos[3];
+
+    for (int i = 0; i < fbAreas.Length; i++)
+    {
+        Address navArea = fbAreas.Get(i);
+        if (navArea == Address_Null) continue;
+        if (blocked_available && L4D_NavArea_IsBlocked(navArea, TEAM_SURVIVOR, true)) continue;
+
+        float flow = L4D2Direct_GetTerrorNavAreaFlow(navArea);
+        if (flow < 0.0) continue;
+
+        L4D_GetNavAreaCenter(navArea, pos);
+        pos[2] += 16.0;
+        // Skip underwater positions
+        if (pos[2] < -1000.0) continue;
+
+        cell.navArea = navArea;
+        cell.center = pos;
+        cell.flow = flow;
+        fallbackCells.PushArray(cell);
+    }
+
+    delete fbAreas;
+
+    if (fallbackCells.Length < 2)
+    {
+        LogMessage("[PTG] Fallback failed: only %d cells with valid flow collected", fallbackCells.Length);
+        delete fallbackCells;
+        g_iFallbackStage = 2;
+        return;
+    }
+
+    // Sort by flow (ascending: start → end)
+    fallbackCells.SortCustom(SortFlow);
+
+    // Build g_GuideCells (dedup identical flows)
+    delete g_GuideCells;
+    g_GuideCells = new ArrayList(sizeof(Cell));
+
+    Cell cellPrev;
+    fallbackCells.GetArray(0, cell, sizeof(Cell));
+    g_GuideCells.PushArray(cell);
+    cellPrev = cell;
+
+    for (int i = 1; i < fallbackCells.Length; i++)
+    {
+        fallbackCells.GetArray(i, cell, sizeof(Cell));
+        // Skip if same flow as previous (duplicate)
+        if (cell.flow == cellPrev.flow) continue;
+        g_GuideCells.PushArray(cell);
+        cellPrev = cell;
+    }
+
+    delete fallbackCells;
+
+    if (g_GuideCells.Length < 2)
+    {
+        LogMessage("[PTG] Fallback failed: only %d unique flow cells after dedup", g_GuideCells.Length);
+        delete g_GuideCells;
+        g_iFallbackStage = 2;
+        return;
+    }
+
+    guide_ready = true;
+    guide_prep = false;
+    g_iFallbackStage = 2;
+    LogMessage("[PTG] Fallback success: %d guide cells built (bypassing ESCAPE_ROUTE requirement)", g_GuideCells.Length);
+}
+
+// Wrapper: expose SortFlow from include to our fallback code
+// SortFlow is defined in the include file, called via SortCustom
+// We can't call it directly since it's file-static, but SortCustom with SortFlow works
+// because SortFlow is in scope during compilation (include is inlined)
 
 void AutoGuideDrawPath()
 {
