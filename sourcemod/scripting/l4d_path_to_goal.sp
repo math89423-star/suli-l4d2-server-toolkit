@@ -96,8 +96,8 @@ public void OnPluginStart()
     g_hCvarAutoEnable = CreateConVar("l4d_path_to_goal_auto", "0",
     "Auto guide mode: periodically draw the full escape route for all players. 0=OFF, 1=ON.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_hCvarAutoDuration = CreateConVar("l4d_path_to_goal_auto_duration", "20.0",
-    "Auto guide beam duration in seconds. Also used for manual !ptg trigger duration.",FCVAR_NOTIFY, true, 1.0, true, 60.0);
+    g_hCvarAutoDuration = CreateConVar("l4d_path_to_goal_auto_duration", "1.0",
+    "Guide beam lifetime in seconds. Keep low for instant OFF, auto-pulse may need higher.",FCVAR_NOTIFY, true, 1.0, true, 60.0);
 
     g_hCvarAutoInterval = CreateConVar("l4d_path_to_goal_auto_interval", "25.0",
     "Seconds between auto guide beam pulses.",FCVAR_NOTIFY, true, 5.0, true, 300.0);
@@ -283,7 +283,7 @@ void Guide_UpdateRedrawTimer()
 
     if (anyOn && g_hToggleTimer == null)
     {
-        g_hToggleTimer = CreateTimer(15.0, Timer_ToggleRedraw, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+        g_hToggleTimer = CreateTimer(0.6, Timer_ToggleRedraw, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
     }
     else if (!anyOn && g_hToggleTimer != null)
     {
