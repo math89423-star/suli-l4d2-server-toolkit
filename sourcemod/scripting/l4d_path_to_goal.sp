@@ -688,10 +688,10 @@ void AutoGuideDrawPath(int client = -1)
 {
     if (g_GuideCells == null || g_GuideCells.Length < 2) return;
 
-    // Warm golden trail — like Fable breadcrumb on the ground
-    // RGBA: soft amber, semi-transparent so it blends with the floor
-    int color_trail[4]   = {255, 200, 75, 200};
-    int color_chevron[4] = {255, 180, 40, 240};
+    // Bold golden trail — high visibility from third-person view
+    // Full opacity, saturated amber that stands out against most floor textures
+    int color_trail[4]   = {255, 180, 40, 255};  // deep amber, fully opaque
+    int color_chevron[4] = {255, 140, 20, 255};  // richer orange for arrows
 
     float duration = g_hCvarAutoDuration.FloatValue;
     int laser = g_iLaserWhite;
@@ -700,6 +700,8 @@ void AutoGuideDrawPath(int client = -1)
 
     int count = g_GuideCells.Length;
 
+    // Ground-hugging trail at ground+5 (slightly above floor to catch light)
+    // Wide beam: 8→14 units, easily visible from standard L4D2 camera distance
     for (int i = 0; i < count - 1; i++)
     {
         Cell cell1, cell2;
@@ -707,22 +709,23 @@ void AutoGuideDrawPath(int client = -1)
         g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
 
         float distSq = GetVectorDistance(cell1.center, cell2.center, true);
-        if (distSq < 4096.0) continue;
+        if (distSq < 400.0) continue;  // skip only very close cells (< 20 units)
 
-        // Hug the ground: cell centers are at ground+16, drop to ground+3
+        // Slightly above ground (at ground+5) so beam catches light
         float pos1[3], pos2[3];
-        pos1 = cell1.center; pos1[2] -= 13.0;
-        pos2 = cell2.center; pos2[2] -= 13.0;
+        pos1 = cell1.center; pos1[2] -= 11.0;
+        pos2 = cell2.center; pos2[2] -= 11.0;
 
-        // Thin arrow beam on the ground: 1.2→4.5 wide, thin→thick shows direction
+        // Wide beam: 8.0→14.0, thin→thick shows direction
+        // amplitude=3.0 adds subtle shimmer to catch the eye
         TE_SetupBeamPoints(pos1, pos2, laser, 0, 0, 0,
-            duration, 1.2, 4.5, 0, 0.0, color_trail, 0);
+            duration, 8.0, 14.0, 0, 3.0, color_trail, 0);
         if (client > 0) TE_SendToClient(client);
         else TE_SendToAll();
     }
 
-    // Small ground chevrons every ~5 cells — directional arrow marks
-    int chevronInterval = 5;
+    // Large ground chevrons every 3 cells — easy to spot directional arrows
+    int chevronInterval = 3;
     for (int i = 0; i < count - 1; i += chevronInterval)
     {
         Cell cell1, cell2;
@@ -744,32 +747,32 @@ void AutoGuideDrawPath(int client = -1)
         perp[1] = dir[0];
         perp[2] = 0.0;
 
-        // Chevron tip and base positions on the ground
+        // Large chevron — 55 long × 30 half-width, clearly visible
         float tip[3], baseLeft[3], baseRight[3];
-        float arrowLen = 24.0;
-        float halfWidth = 14.0;
+        float arrowLen = 55.0;
+        float halfWidth = 30.0;
 
         tip[0] = cell1.center[0] + dir[0] * arrowLen;
         tip[1] = cell1.center[1] + dir[1] * arrowLen;
-        tip[2] = cell1.center[2] - 13.0;
+        tip[2] = cell1.center[2] - 11.0;
 
         baseLeft[0] = cell1.center[0] + perp[0] * halfWidth;
         baseLeft[1] = cell1.center[1] + perp[1] * halfWidth;
-        baseLeft[2] = cell1.center[2] - 13.0;
+        baseLeft[2] = cell1.center[2] - 11.0;
 
         baseRight[0] = cell1.center[0] - perp[0] * halfWidth;
         baseRight[1] = cell1.center[1] - perp[1] * halfWidth;
-        baseRight[2] = cell1.center[2] - 13.0;
+        baseRight[2] = cell1.center[2] - 11.0;
 
-        // Left blade: tip → baseLeft
+        // Left blade: tip → baseLeft, thick→thin
         TE_SetupBeamPoints(tip, baseLeft, laser, 0, 0, 0,
-            duration, 3.0, 0.8, 0, 0.0, color_chevron, 0);
+            duration, 12.0, 4.0, 0, 0.0, color_chevron, 0);
         if (client > 0) TE_SendToClient(client);
         else TE_SendToAll();
 
         // Right blade: tip → baseRight
         TE_SetupBeamPoints(tip, baseRight, laser, 0, 0, 0,
-            duration, 3.0, 0.8, 0, 0.0, color_chevron, 0);
+            duration, 12.0, 4.0, 0, 0.0, color_chevron, 0);
         if (client > 0) TE_SendToClient(client);
         else TE_SendToAll();
     }
@@ -789,6 +792,18 @@ public void OnClientPutInServer(int client)
     if (!IsValidClient(client) || IsFakeClient(client)) return;
     beams_cooldown_reset(client,true); // reset cooldown and last request from client
     g_sCustomKeys[client] = "";
+    // Auto-bind M key for double-tap toggle (delayed so client is fully in-game)
+    CreateTimer(3.0, Timer_AutoBind, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+Action Timer_AutoBind(Handle timer, int userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client > 0 && IsClientInGame(client) && !IsFakeClient(client))
+    {
+        ClientCommand(client, "bind m \"say !ptg\"");
+    }
+    return Plugin_Stop;
 }
 
 // NATIVE //
