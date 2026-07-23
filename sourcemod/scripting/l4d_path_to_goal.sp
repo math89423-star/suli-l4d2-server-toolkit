@@ -718,6 +718,9 @@ void AutoGuideDrawPath()
         pos1 = cell1.center; pos1[2] -= 13.0;
         pos2 = cell2.center; pos2[2] -= 13.0;
 
+        // Skip segment if wall/geometry blocks line-of-sight
+        if (!twopos_traversable(pos1, pos2)) continue;
+
         // Thin arrow beam on the ground: 1.2→4.5 wide, thin→thick shows direction
         TE_SetupBeamPoints(pos1, pos2, laser, 0, 0, 0,
             duration, 1.2, 4.5, 0, 0.0, color_trail, 0);
