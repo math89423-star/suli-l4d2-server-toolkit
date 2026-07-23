@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-L4D2 Admin Panel — Flask web 应用。
-提供服务器状态监控、切图、地图池管理、ZIP 上传、Steam 工坊下载、重启功能。
-
-所有路径从 config.json 读取，不硬编码。
-"""
-
-import hashlib, json, os, re, secrets, shutil, subprocess, sys, tempfile, zipfile, time as _time
+import hashlib, json, os, re, secrets, shutil, subprocess, sys, tempfile, zipfile
 from datetime import timedelta
 from functools import wraps
 from flask import Flask, jsonify, request, session, send_from_directory
@@ -41,6 +34,7 @@ app.secret_key = cfg["secret_key"]
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB max upload
 
 def check_password(pw):
     p = cfg["admin_password_hash"].split(":")
@@ -105,9 +99,24 @@ def api_status():
             tr=m.group(1)
     except: pass
     lb=load_labels()
+    # Check if restart is needed (any VPK newer than last restart)
+    restart_needed = False
+    addons_dir = cfg.get("addons_dir", "/opt/gameservers/l4d2/data/addons")
+    last_restart = cfg.get("last_restart", 0)
+    if os.path.isdir(addons_dir):
+        try:
+            for fn in os.listdir(addons_dir):
+                if fn.lower().endswith(".vpk"):
+                    vpk_mtime = os.path.getmtime(os.path.join(addons_dir, fn))
+                    if vpk_mtime > last_restart:
+                        restart_needed = True
+                        break
+        except:
+            pass
     return jsonify({"online":True,"hostname":hn,"map":mp,
         "map_label":lb.get(mp,mp),"players":int(pl),
-        "maxplayers":int(mx),"tickrate":tr})
+        "maxplayers":int(mx),"tickrate":tr,
+        "restart_needed": restart_needed})
 
 @app.route("/api/maps")
 @login_required
@@ -183,10 +192,12 @@ def api_activate_mapcycle():
         f.write(pool)
     return jsonify({"ok":True,"active_pool":pool})
 
+import time as _time
 _LAST_SWITCH = 0.0
 _SWITCH_TARGET = ""          # map we're waiting to load
 _SWITCH_LOADED_AT = 0.0      # when server confirmed target loaded
 _POST_LOAD_BUFFER = cfg.get("post_switch_buffer", 15)  # seconds after load before release
+_SWITCH_TIMEOUT = 120        # max seconds for map load; after this, assume stale and clear
 
 def _get_current_map():
     """Get current map name from server status. Returns '' on failure."""
@@ -214,17 +225,25 @@ def api_cooldown():
     current = _get_current_map()
     loaded = (current == _SWITCH_TARGET)
 
+    # Auto-clear if switch timed out: map never loaded (or already moved past target)
+    if not loaded and elapsed > _SWITCH_TIMEOUT:
+        _SWITCH_TARGET = ""
+        _SWITCH_LOADED_AT = 0.0
+        return jsonify({"loading": False, "remaining": 0, "current": current})
+
     if loaded and _SWITCH_LOADED_AT == 0:
         _SWITCH_LOADED_AT = _time.time()
 
     if not loaded:
+        # Still loading — remaining shows elapsed time for UI
         return jsonify({"loading": True, "target": _SWITCH_TARGET,
             "current": current, "elapsed": round(elapsed, 1),
             "remaining": round(elapsed, 1)})
 
+    # Loaded — compute post-load buffer remaining
     buffer_remain = max(0, _POST_LOAD_BUFFER - (_time.time() - _SWITCH_LOADED_AT))
     if buffer_remain <= 0:
-        _SWITCH_TARGET = ""
+        _SWITCH_TARGET = ""       # fully done, release lock
         _SWITCH_LOADED_AT = 0.0
         return jsonify({"loading": False, "remaining": 0, "current": current})
 
@@ -240,19 +259,40 @@ def api_switch():
     t=d.get("map","").strip()
     if not t: return jsonify({"error":"no map"}),400
 
+    # Check if a switch is already in progress
     if _SWITCH_TARGET:
         current = _get_current_map()
         if current != _SWITCH_TARGET:
-            elapsed = round(_time.time() - _LAST_SWITCH, 1)
-            return jsonify({"error": f"正在加载 {_SWITCH_TARGET}，已等待 {elapsed} 秒，请等待加载完成"}), 429
-        buffer_remain = max(0, _POST_LOAD_BUFFER - (_time.time() - _SWITCH_LOADED_AT))
-        if buffer_remain > 0:
-            return jsonify({"error": f"地图刚加载完成，请等待 {round(buffer_remain,1)} 秒让玩家进入"}), 429
-        _SWITCH_TARGET = ""
-        _SWITCH_LOADED_AT = 0.0
+            # Target not yet reached — check if this is a stale state
+            elapsed = _time.time() - _LAST_SWITCH
+            if elapsed > _SWITCH_TIMEOUT:
+                # Stale state from a previous switch whose polling was abandoned
+                _SWITCH_TARGET = ""
+                _SWITCH_LOADED_AT = 0.0
+            else:
+                elapsed = round(_time.time() - _LAST_SWITCH, 1)
+                return jsonify({"error": f"正在加载 {_SWITCH_TARGET}，已等待 {elapsed} 秒，请等待加载完成"}), 429
+        else:
+            # Loaded but buffer active
+            buffer_remain = max(0, _POST_LOAD_BUFFER - (_time.time() - _SWITCH_LOADED_AT))
+            if buffer_remain > 0:
+                return jsonify({"error": f"地图刚加载完成，请等待 {round(buffer_remain,1)} 秒让玩家进入"}), 429
+            # Buffer expired, clear and allow
+            _SWITCH_TARGET = ""
+            _SWITCH_LOADED_AT = 0.0
 
-    if t in cfg.get("tumtara_maps",[]):
-        for plg in cfg.get("tumtara_unload_plugins",[]):
+    # Detect if we're currently on a tumtara map (need special plugin handling)
+    current_map = ""
+    try:
+        current_map = _get_current_map()
+    except:
+        pass
+    coming_from_tumtara = current_map in cfg.get("tumtara_maps", [])
+    going_to_tumtara = t in cfg.get("tumtara_maps", [])
+
+    if going_to_tumtara:
+        # Unload multi-SI plugins before switching (tumtara has no nav mesh)
+        for plg in cfg.get("tumtara_unload_plugins", []):
             try: rcon(f"sm plugins unload {plg}")
             except: pass
     try:
@@ -260,9 +300,14 @@ def api_switch():
         _SWITCH_TARGET = t
         _SWITCH_LOADED_AT = 0.0
         rs=rcon(f"sm_map {t}")
+        # Reload multi-SI plugins when leaving tumtara
+        if coming_from_tumtara and not going_to_tumtara:
+            for plg in cfg.get("tumtara_unload_plugins", []):
+                try: rcon(f"sm plugins load {plg}")
+                except: pass
         return jsonify({"ok":True,"map":t,"result":rs,"buffer":_POST_LOAD_BUFFER})
     except Exception as e:
-        _SWITCH_TARGET = ""
+        _SWITCH_TARGET = ""  # clear on error
         return jsonify({"error":str(e)}),500
 
 # ── Map extraction helper ──────────────────────────────────
@@ -271,6 +316,7 @@ def _extract_map_names(vpk_path):
     """Extract BSP map names from a VPK using strings. Returns sorted list."""
     maps = set()
     vpk_path = os.path.realpath(vpk_path)
+    # Handle ZIP-wrapped VPK (e.g. deadcity2)
     if zipfile.is_zipfile(vpk_path):
         with zipfile.ZipFile(vpk_path, 'r') as zf:
             names = zf.namelist()
@@ -318,7 +364,8 @@ def api_maps_upload():
     if not f.filename or not f.filename.lower().endswith(".zip"):
         return jsonify({"error": "only .zip allowed"}), 400
 
-    maps_zip_dir = cfg.get("maps_zip_dir", os.path.join(BASE_DIR, "maps", "zip"))
+    # Save ZIP to authoritative source (also serves as download server)
+    maps_zip_dir = cfg.get("maps_zip_dir", "/home/ubuntu/l4d2-maps")
     os.makedirs(maps_zip_dir, exist_ok=True)
     zip_dst = os.path.join(maps_zip_dir, f.filename)
     try:
@@ -326,6 +373,7 @@ def api_maps_upload():
     except Exception as e:
         return jsonify({"error": f"save zip failed: {e}"}), 500
 
+    # Unzip VPK to temp
     tmpdir = tempfile.mkdtemp(prefix="l4d2_upload_")
     try:
         subprocess.run(["unzip", "-o", zip_dst, "*.vpk", "-d", tmpdir],
@@ -337,6 +385,7 @@ def api_maps_upload():
         shutil.rmtree(tmpdir, ignore_errors=True)
         return jsonify({"error": f"unzip failed: {e}"}), 500
 
+    # Find VPK files
     vpks = []
     for fn in sorted(os.listdir(tmpdir)):
         if fn.lower().endswith(".vpk"):
@@ -346,8 +395,9 @@ def api_maps_upload():
         shutil.rmtree(tmpdir, ignore_errors=True)
         return jsonify({"error": "no .vpk found in zip"}), 400
 
-    addons = cfg.get("addons_dir", os.path.join(BASE_DIR, "..", "data", "addons"))
-    vpk_dir = cfg.get("maps_vpk_dir", os.path.join(BASE_DIR, "maps", "vpk"))
+    # Copy VPK: addons/ (engine) + thirdparty-maps/ (backup)
+    addons = cfg.get("addons_dir", "/opt/gameservers/l4d2/data/addons")
+    vpk_dir = cfg.get("maps_vpk_dir", "/home/ubuntu/l4d2-thirdparty-maps")
     os.makedirs(vpk_dir, exist_ok=True)
     copied = []
     for vpk in vpks:
@@ -357,6 +407,7 @@ def api_maps_upload():
             os.chmod(dst, 0o644)
         copied.append(os.path.basename(vpk))
 
+    # Run scan_maps.py to regenerate maps.json
     scan = cfg.get("scan_script", os.path.join(BASE_DIR, "scan_maps.py"))
     scan_ok = False
     try:
@@ -382,6 +433,7 @@ def api_maps_workshop():
     if not url:
         return jsonify({"error": "no url or id"}), 400
 
+    # Extract workshop ID
     wid = None
     if url.isdigit():
         wid = url
@@ -394,6 +446,7 @@ def api_maps_workshop():
     if not wid:
         return jsonify({"error": "cannot extract workshop id"}), 400
 
+    # Download via steamcmd
     steamcmd = cfg.get("steamcmd_path", "/usr/games/steamcmd")
     tmpdir = tempfile.mkdtemp(prefix="l4d2_ws_")
     try:
@@ -408,12 +461,14 @@ def api_maps_workshop():
         shutil.rmtree(tmpdir, ignore_errors=True)
         return jsonify({"error": f"steamcmd failed: {e}"}), 500
 
+    # Find downloaded VPK
     vpks = []
     for root, dirs, files in os.walk(tmpdir):
         for fn in files:
             if fn.lower().endswith(".vpk"):
                 vpks.append(os.path.join(root, fn))
     if not vpks:
+        # Also check steamapps directory
         for root, dirs, files in os.walk(os.path.expanduser("~/.local/share/Steam")):
             for fn in files:
                 if fn.lower().endswith(".vpk"):
@@ -423,6 +478,7 @@ def api_maps_workshop():
         shutil.rmtree(tmpdir, ignore_errors=True)
         return jsonify({"error": "download succeeded but no vpk found"}), 500
 
+    # Extract map names
     maps = []
     for vpk in vpks:
         maps.extend(_extract_map_names(vpk))
@@ -432,12 +488,15 @@ def api_maps_workshop():
         return jsonify({"error": "no maps found in vpk"}), 500
 
     first_map = maps[0]
+    # Generate campaign id from first map
     cid = re.sub(r'[^a-z0-9_]', '', first_map.rsplit('_', 1)[0]) if '_' in first_map else first_map
     if len(cid) < 2:
         cid = "ws_" + wid
 
+    # Add to maps.json
     with open(MAPS_FILE) as f:
         mj = json.load(f)
+    # Check duplicate
     for cat in mj["categories"]:
         for camp in cat["campaigns"]:
             if camp["maps"][0] == first_map:
@@ -461,6 +520,7 @@ def api_maps_workshop():
     with open(MAPS_FILE, "w") as f:
         json.dump(mj, f, indent=2, ensure_ascii=False)
 
+    # Add first map to custom mapcycle
     mcp = cfg.get("mapcycle_custom_path", "")
     if mcp:
         existing = []
@@ -484,6 +544,7 @@ def api_server_restart():
     d = request.get_json(silent=True) or {}
     force = d.get("force", False)
 
+    # Check players if not forced
     if not force:
         try:
             raw = rcon("status")
@@ -497,14 +558,16 @@ def api_server_restart():
         except:
             pass
 
-    compose = cfg.get("compose_file", os.path.join(BASE_DIR, "..", "docker-compose.yml"))
     try:
         result = subprocess.run(
-            ["docker", "compose", "-f", compose, "restart"],
+            ["docker", "restart", "l4d2-server"],
             capture_output=True, text=True, timeout=60
         )
         if result.returncode != 0:
             return jsonify({"error": result.stderr.strip()}), 500
+        # Record restart time so frontend knows restart is no longer needed
+        cfg["last_restart"] = _time.time()
+        save_config(cfg)
         return jsonify({"ok": True, "message": "服务器正在重启..."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -517,6 +580,14 @@ def index():
 @app.route("/style.css")
 def style():
     return send_from_directory(os.path.join(BASE_DIR,"static"),"style.css")
+
+@app.route("/static/<path:filename>")
+def static_files(filename):
+    return send_from_directory(os.path.join(BASE_DIR,"static"),filename)
+
+@app.route("/webfonts/<path:filename>")
+def webfonts(filename):
+    return send_from_directory(os.path.join(BASE_DIR,"static","webfonts"),filename)
 
 @app.route("/health")
 def health():

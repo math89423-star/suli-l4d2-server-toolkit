@@ -18,56 +18,25 @@ scan_maps.py — 扫描 L4D2 addons 目录里的 VPK 文件，自动生成 maps.
 import json, os, re, subprocess, sys, zipfile, tempfile, shutil
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+ADDONS_DIR = "/opt/gameservers/l4d2/data/addons"
 MAPS_FILE = os.path.join(BASE_DIR, "maps.json")
 
-def load_addons_dir():
-    """从 config.json 读取 addons_dir，失败则使用默认值。"""
-    # ★ 部署时修改: 默认 addons 目录路径
-    default = "/opt/gameservers/l4d2/data/addons"
-    try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE) as f:
-                cfg = json.load(f)
-                return cfg.get("addons_dir", default)
-    except Exception:
-        pass
-    return default
-
-ADDONS_DIR = load_addons_dir()
-
 # ============================================================
-# 目录：VPK 文件名（不含 .vpk）→ 战役元数据
-#   (campaign_id, campaign_name, alias, size_label, category)
-#   category: "custom" | "fun"
-#
-# ★ 部署时修改: 根据你安装的地图更新此表
+# VPK 元数据覆盖（完全可选 — 留空也能自动发现所有 VPK）
+#   如果某个 VPK 需要自定义中文名、别名、或分类(fun/custom)，
+#   在这里添加一行即可。不在此表中的 VPK 全自动处理。
+#   格式: "vpk文件名(不含.vpk)": (campaign_id, 显示名称, 别名, 分类)
 # ============================================================
-VPK_CATALOG = {
-    "darkwood_extended_19":       ("dw",   "Dark Wood (Extended)", "dw",   "940M", "custom"),
-    "gzzc7.9":                    ("zc",   "广州增城",              "zc",   "834M", "custom"),
-    "amidtheruins":               ("atr",  "Amid the Ruins",       "atr",  "537M", "custom"),
-    "resident_evil3_10sep2025":   ("re3",  "生化危机3",            "re3",  "463M", "custom"),
-    "dearesther":                 ("de",   "Dear Esther",          "de",   "432M", "custom"),
-    "resident_evil1_19junio2024": ("re1",  "生化危机1",            "re1",  "350M", "custom"),
-    "ddg_v2_1":                   ("ddg",  "Drop Dead Gorges",     "ddg",  "282M", "custom"),
-    "deadcity2":                  ("dc2",  "死城2 (Dead City 2)",  "dc2",  "190M", "custom"),
-    "l4d2_tanksplayground":       ("tank", "Tanks Playground",     "tank", "108M", "fun"),
-    "lab024_l4d2":                ("lab",  "Lab 024",              "lab",  "97M",  "custom"),
-}
+VPK_CATALOG = {}
 
-# 自定义地图排序（无法通过自然排序自动推断的战役）
-# 键 = campaign_id，值 = 正确顺序的地图列表
-MAP_ORDER = {
-    "dw": ["dw_woods", "dw_complex", "dw_underground", "dw_otherworld", "dw_final"],
-    "de": ["de_donnelley_m1", "de_jakobson_m2", "de_esther_m3", "de_paul_m4"],
-}
+# 自定义地图排序（完全可选）
+#   仅当某个战役的自然排序不对时才需要手动指定。
+#   键 = campaign_id，值 = 正确顺序的地图列表
+MAP_ORDER = {}
 
 # ============================================================
 # 工坊图 / 无 VPK 的战役 — 地图列表手动维护
 #   (campaign_id, campaign_name, alias, size_label, category, [maps])
-#
-# ★ 部署时修改: 根据你安装的工坊图更新此列表
 # ============================================================
 MANUAL_CAMPAIGNS = [
     ("hls",     "天梯1+2",  "hls",     "工坊", "custom",
@@ -174,7 +143,7 @@ def _clean_map_name(raw):
     # 过滤明显不是地图名的（太短、太长、含特殊字符、纯数字）
     if len(name) < 4 or len(name) > 48:
         return None
-    if not re.match(r'^[a-z][a-z0-9_]*[a-z0-9]$', name):
+    if not re.match(r'^[a-z][a-z0-9_-]*[a-z0-9]$', name):
         return None
     # 过滤 Source 引擎内置/测试图
     if name in ('credits', '6', 'curling_stadium', 'motionprimingtest',
@@ -199,6 +168,37 @@ def load_existing_labels():
             pass
     return {}
 
+def load_existing_metadata():
+    """从已有 maps.json 加载各 campaign 的元数据。
+       返回两个查询表：按首关名、按地图集合。"""
+    by_first = {}
+    by_maps = {}
+    if os.path.exists(MAPS_FILE):
+        try:
+            with open(MAPS_FILE, 'r') as f:
+                data = json.load(f)
+                for cat in data.get('categories', []):
+                    for camp in cat.get('campaigns', []):
+                        maps = camp.get('maps', [])
+                        cid = camp.get('id', '')
+                        if not maps:
+                            continue
+                        meta = {
+                            'id': cid,
+                            'name': camp.get('name', ''),
+                            'alias': camp.get('alias', ''),
+                            'category': cat.get('id', 'custom'),
+                        }
+                        if maps[0] not in by_first:
+                            by_first[maps[0]] = meta
+                        # 用排序后的 maps 集合作为匹配键
+                        key = '\n'.join(sorted(maps))
+                        if key not in by_maps:
+                            by_maps[key] = meta
+        except Exception:
+            pass
+    return by_first, by_maps
+
 
 def auto_label(campaign_name, map_name, index):
     """自动生成地图中文标签。"""
@@ -206,16 +206,47 @@ def auto_label(campaign_name, map_name, index):
     m = re.match(r'^c(\d+)m(\d+)', map_name)
     if m:
         c, mnum = int(m.group(1)), int(m.group(2))
+        # 用 campaign_name 的前几个字
         short = campaign_name.split('(')[0].strip()
         return f"{short}{mnum}"
     # 三方图: 用战役名 + 序号
     return f"{campaign_name}-{index + 1}"
 
 
-def build_maps_json(addons_dir=None):
+def _auto_campaign_id(basename):
+    """从 VPK 文件名自动生成 campaign ID。"""
+    cid = basename.lower()
+    # 去掉常见前缀
+    for pf in ('l4d2_', 'l4d_', 'left4dead2_', 'left4dead_'):
+        if cid.startswith(pf):
+            cid = cid[len(pf):]
+            break
+    # 去掉版本号后缀（_v1, _19, _v2_1 等）
+    cid = re.sub(r'_v?\d+(_\d+)*$', '', cid)
+    cid = re.sub(r'[^a-z0-9_]', '', cid)[:16]
+    if not cid or cid[0].isdigit():
+        cid = 'm_' + cid
+    return cid
+
+
+def _auto_campaign_name(basename):
+    """从 VPK 文件名自动生成可读的名称。"""
+    name = basename
+    # 去掉常见前缀
+    for pf in ('l4d2_', 'l4d_', 'left4dead2_', 'left4dead_'):
+        if name.lower().startswith(pf):
+            name = name[len(pf):]
+            break
+    # 去掉版本号后缀
+    name = re.sub(r'_v?\d+(_\d+)*$', '', name)
+    # 下划线 → 空格，首字母大写
+    name = name.replace('_', ' ').strip()
+    name = ' '.join(w[0].upper() + w[1:] if w and w[0].islower() else w for w in name.split() if w)
+    return name if name else basename.replace('_', ' ').title()
+
+
+def build_maps_json(addons_dir=ADDONS_DIR):
     """扫描并构建完整的 maps.json 数据结构。"""
-    if addons_dir is None:
-        addons_dir = ADDONS_DIR
     existing_labels = load_existing_labels()
 
     categories = []
@@ -234,14 +265,23 @@ def build_maps_json(addons_dir=None):
     custom_campaigns = []
     fun_campaigns = []
 
-    # 从 VPK 扫描
-    for vpk_basename, (cid, cname, alias, size, cat) in VPK_CATALOG.items():
-        vpk_path = os.path.join(addons_dir, vpk_basename + ".vpk")
-        if not os.path.exists(vpk_path):
-            print(f"  ✗ VPK 不存在: {vpk_basename}.vpk，跳过", file=sys.stderr)
-            continue
+    # 自动发现 addons 目录下所有 .vpk 文件
+    vpk_files = []
+    if os.path.isdir(addons_dir):
+        for fn in sorted(os.listdir(addons_dir)):
+            if fn.lower().endswith(".vpk"):
+                vpk_files.append(fn)
 
-        print(f"  扫描 {vpk_basename}.vpk ...", file=sys.stderr)
+    # 加载已有元数据，用于跨扫描保留人工编辑的名称/别名
+    existing_by_first, existing_by_maps = load_existing_metadata()
+
+    scanned_ids = set()
+
+    for vpk_filename in vpk_files:
+        vpk_basename = vpk_filename[:-4]  # strip .vpk
+        vpk_path = os.path.join(addons_dir, vpk_filename)
+
+        print(f"  扫描 {vpk_filename} ...", file=sys.stderr)
         maps = extract_maps_from_vpk(vpk_path)
         if not maps:
             print(f"    ⚠ 未提取到地图，跳过", file=sys.stderr)
@@ -249,11 +289,50 @@ def build_maps_json(addons_dir=None):
 
         print(f"    → {len(maps)} 张地图: {', '.join(maps)}", file=sys.stderr)
 
+        # 优先从 VPK_CATALOG → 已有 maps.json（首关/全集合匹配）→ 自动生成
+        catalog_entry = VPK_CATALOG.get(vpk_basename)
+        if catalog_entry:
+            cid, cname, alias, cat = catalog_entry
+        else:
+            # 用首关地图名匹配已有 maps.json，保留人工编辑的名称/别名
+            old = existing_by_first.get(maps[0])
+            # 回退：用排序后的完整地图集合匹配（防止 MAP_ORDER 改变首关顺序）
+            if not old:
+                old = existing_by_maps.get('\n'.join(sorted(maps)))
+            if old:
+                cid = old['id']
+                cname = old['name']
+                alias = old.get('alias') or cid
+                cat = old.get('category') or 'custom'
+            else:
+                # 全新地图：自动生成
+                cid = _auto_campaign_id(vpk_basename)
+                cname = _auto_campaign_name(vpk_basename)
+                alias = cid
+                cat = "custom"
+
+        # 防重名 ID
+        if cid in scanned_ids:
+            cid = cid + "_2"
+        scanned_ids.add(cid)
+
         # 应用自定义排序
         if cid in MAP_ORDER:
             ordered = MAP_ORDER[cid]
             existing = set(maps)
             maps = [m for m in ordered if m in existing] + [m for m in maps if m not in ordered]
+
+        # 自动计算大小
+        try:
+            size_bytes = os.path.getsize(vpk_path)
+            if size_bytes >= 1048576:
+                size = f"{size_bytes // 1048576}M"
+            elif size_bytes >= 1024:
+                size = f"{size_bytes // 1024}K"
+            else:
+                size = f"{size_bytes}B"
+        except:
+            size = "?"
 
         campaign = {
             "id": cid, "name": cname, "alias": alias, "maps": maps, "size": size
@@ -263,8 +342,10 @@ def build_maps_json(addons_dir=None):
         else:
             custom_campaigns.append(campaign)
 
-    # 工坊图（无 VPK）
+    # 工坊图（无 VPK — 手动维护）
     for cid, cname, alias, size, cat, maps in MANUAL_CAMPAIGNS:
+        if cid in scanned_ids:
+            continue  # 如果 addons 已有同名 VPK，跳过手动条目
         campaign = {
             "id": cid, "name": cname, "alias": alias, "maps": maps, "size": size
         }

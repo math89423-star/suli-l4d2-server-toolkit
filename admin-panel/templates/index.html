@@ -6,8 +6,8 @@
 <base href="/">
 <title>L4D2 服务器管理</title>
 <link rel="stylesheet" href="style.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css">
-<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+<link rel="stylesheet" href="static/fontawesome.min.css">
+<script src="static/sortable.min.js"></script>
 </head>
 <body>
 
@@ -195,6 +195,8 @@ async function loadStatus() {
   $("#st-map").textContent = r.map_label || r.map || "-";
   $("#st-players").textContent = `${r.players}/${r.maxplayers}`;
   $("#st-tickrate").textContent = r.tickrate || "-";
+  // Show/hide restart banner based on server-side tracking
+  $("#restart-banner").style.display = r.restart_needed ? "" : "none";
 }
 
 // ── Maps (right column, tabbed) ───────────────────────
@@ -250,27 +252,17 @@ function renderMaps(tabId) {
     container.appendChild(sec);
   }
 
-  // Bind switch buttons
-  $$(".switch-btn").forEach(btn => {
-    btn.onclick = async () => {
-      if (switchLocked) return;
-      const map = btn.dataset.map;
-      if (!confirm(`确定切换到 ${map}？`)) return;
-      // Lock immediately, start polling
-      startPolling();
-      const r = await api("api/switch", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ map }),
-      });
-      if (r && r.ok) {
-        toast(`已切换至 ${map}`);
-        setTimeout(loadStatus, 2500);
+  // Re-apply lock state to freshly rendered buttons
+  if (switchLocked) {
+    $$(".switch-btn").forEach(b => {
+      b.disabled = true;
+      if (switchPollTimer) {
+        b.textContent = `加载中 ${Math.ceil(switchRemaining)}s`;
       } else {
-        stopPolling();
-        toast(r?.error || "切图失败", false);
+        b.textContent = `⏳${Math.ceil(switchRemaining)}s`;
       }
-    };
-  });
+    });
+  }
 }
 
 document.addEventListener("click", e => {
@@ -284,6 +276,31 @@ document.addEventListener("click", e => {
   $("#map-management").style.display = (tabId === "manage") ? "" : "none";
   if (tabId === "manage") loadManagementTab();
   else renderMaps(tabId);
+});
+
+// Delegated switch button handler (survives tab switches / re-renders)
+document.addEventListener("click", async e => {
+  const btn = e.target.closest(".switch-btn");
+  if (!btn) return;
+  e.stopPropagation();
+  if (switchLocked) {
+    toast("切图冷却中，请等待倒计时结束", false);
+    return;
+  }
+  const map = btn.dataset.map;
+  if (!confirm(`确定切换到 ${map}？`)) return;
+  startPolling();
+  const r = await api("api/switch", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ map }),
+  });
+  if (r && r.ok) {
+    toast(`已切换至 ${map}`);
+    setTimeout(loadStatus, 2500);
+  } else {
+    stopPolling();
+    toast(r?.error || "切图失败", false);
+  }
 });
 
 async function loadMaps() {
@@ -581,6 +598,11 @@ $("#upload-btn").onclick = async () => {
       const pct = Math.round(e.loaded / e.total * 100);
       progFill.style.width = pct + "%";
 
+      if (pct >= 100) {
+        progText.textContent = "上传完成，正在安装…";
+        return;
+      }
+
       const now = Date.now();
       const elapsed = Math.max(1, now - startTime);
       const speed = e.loaded / elapsed * 1000;
@@ -598,16 +620,18 @@ $("#upload-btn").onclick = async () => {
 
     xhr.onload = () => {
       try { resolve(JSON.parse(xhr.responseText)); }
-      catch(e) { resolve(null); }
+      catch(e) { resolve({error: `解析响应失败 (status ${xhr.status})`}); }
     };
-    xhr.onerror = () => resolve(null);
+    xhr.onerror = () => resolve({error: "网络错误，请检查连接或文件是否过大"});
+    xhr.upload.onerror = () => resolve({error: "上传中断，请重试"});
     xhr.open("POST", "api/maps/upload");
     xhr.withCredentials = true;
     xhr.send(fd);
   });
 
   if (result && result.ok) {
-    progText.textContent = "完成";
+    progText.textContent = "安装完成";
+    progFill.style.width = "100%";
     setTimeout(() => { progBar.style.display = "none"; }, 1500);
     msg.className = "msg ok";
     msg.textContent = `已安装 ${(result.vpks||[]).join(", ")}，需要重启服务器生效`;
@@ -658,12 +682,10 @@ $("#workshop-btn").onclick = async () => {
 // ── Restart ─────────────────────────────────────────────
 
 async function checkRestartNeeded() {
-  // Check if any vpk-based maps exist (not workshop) — if so, prompt restart
-  // Simple heuristic: if there are custom maps in managed list, restart may be needed
-  // The upload endpoint already tells us, but we don't persist that state.
-  // For now, always show banner if there are non-workshop managed campaigns.
-  const hasVpk = managedCampaigns.some(c => c.size !== "工坊");
-  $("#restart-banner").style.display = hasVpk ? "" : "none";
+  const r = await api("api/status");
+  if (r && typeof r.restart_needed === "boolean") {
+    $("#restart-banner").style.display = r.restart_needed ? "" : "none";
+  }
 }
 
 $("#restart-btn").onclick = async () => {
@@ -678,6 +700,8 @@ $("#restart-btn").onclick = async () => {
     if (r && r.ok) {
       toast("服务器正在重启...");
       btn.textContent = "已重启";
+      // Banner should disappear — restart is done, server will confirm on next poll
+      $("#restart-banner").style.display = "none";
     } else if (r && r.confirm_required) {
       toast(`有 ${r.players} 名玩家在线，请确认`, false);
       btn.disabled = false; btn.textContent = "重启服务器";
