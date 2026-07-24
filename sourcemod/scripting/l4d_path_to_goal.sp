@@ -117,6 +117,7 @@ public void OnPluginStart()
 	HookEvent("finale_start", 			  evtFinaleStart,    EventHookMode_PostNoCopy);
 	HookEvent("finale_radio_start", 	  evtFinaleStart,    EventHookMode_PostNoCopy);
     HookEvent("finale_vehicle_ready", 	  evtFinaleVehicle,  EventHookMode_PostNoCopy);
+    HookEvent("player_first_spawn",       evtFirstSpawn,     EventHookMode_PostNoCopy);
     if (g_bL4D2)
     {
     HookEvent("gauntlet_finale_start", 	  evtGauntletStart,  EventHookMode_PostNoCopy);
@@ -551,7 +552,7 @@ Action Timer_AutoCheck(Handle timer)
     // This way !ptg is instant when a player uses it.
     if (!guide_ready && !guide_prep && g_iFallbackStage < 2)
     {
-        if (g_iPrepAttempts >= 10 && g_iFallbackStage == 0)
+        if (g_iPrepAttempts >= 5 && g_iFallbackStage == 0)
         {
             LogMessage("[PTG] Standard prep failed after %d attempts. Trying fallback nav collection...", g_iPrepAttempts);
             g_iFallbackStage = 1;
@@ -688,10 +689,10 @@ void AutoGuideDrawPath(int client = -1)
 {
     if (g_GuideCells == null || g_GuideCells.Length < 2) return;
 
-    // Bold golden trail — high visibility from third-person view
-    // Full opacity, saturated amber that stands out against most floor textures
-    int color_trail[4]   = {255, 180, 40, 255};  // deep amber, fully opaque
-    int color_chevron[4] = {255, 140, 20, 255};  // richer orange for arrows
+    // Trail: thin, semi-transparent amber — subtle guide that doesn't block the view
+    int color_trail[4]   = {255, 200, 75, 150};
+    // Arrow: brighter, more opaque — direction must be clear
+    int color_chevron[4] = {255, 170, 30, 220};
 
     float duration = g_hCvarAutoDuration.FloatValue;
     int laser = g_iLaserWhite;
@@ -700,8 +701,7 @@ void AutoGuideDrawPath(int client = -1)
 
     int count = g_GuideCells.Length;
 
-    // Ground-hugging trail at ground+5 (slightly above floor to catch light)
-    // Wide beam: 8→14 units, easily visible from standard L4D2 camera distance
+    // Trail: thin 1.0→3.5, close to ground, subtle shimmer
     for (int i = 0; i < count - 1; i++)
     {
         Cell cell1, cell2;
@@ -709,23 +709,20 @@ void AutoGuideDrawPath(int client = -1)
         g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
 
         float distSq = GetVectorDistance(cell1.center, cell2.center, true);
-        if (distSq < 400.0) continue;  // skip only very close cells (< 20 units)
+        if (distSq < 4096.0) continue;
 
-        // Slightly above ground (at ground+5) so beam catches light
         float pos1[3], pos2[3];
-        pos1 = cell1.center; pos1[2] -= 11.0;
-        pos2 = cell2.center; pos2[2] -= 11.0;
+        pos1 = cell1.center; pos1[2] -= 13.0;
+        pos2 = cell2.center; pos2[2] -= 13.0;
 
-        // Wide beam: 8.0→14.0, thin→thick shows direction
-        // amplitude=3.0 adds subtle shimmer to catch the eye
         TE_SetupBeamPoints(pos1, pos2, laser, 0, 0, 0,
-            duration, 8.0, 14.0, 0, 3.0, color_trail, 0);
+            duration, 0.8, 2.5, 0, 0.0, color_trail, 0);
         if (client > 0) TE_SendToClient(client);
         else TE_SendToAll();
     }
 
-    // Large ground chevrons every 3 cells — easy to spot directional arrows
-    int chevronInterval = 3;
+    // Arrows every 5 cells — clear directional indicators
+    int chevronInterval = 5;
     for (int i = 0; i < count - 1; i += chevronInterval)
     {
         Cell cell1, cell2;
@@ -737,42 +734,39 @@ void AutoGuideDrawPath(int client = -1)
         float dist = GetVectorLength(dir);
         if (dist < 1.0) continue;
 
-        // Normalize direction (XY only, keep flat on ground)
         dir[2] = 0.0;
         NormalizeVector(dir, dir);
 
-        // Perpendicular direction
         float perp[3];
         perp[0] = -dir[1];
         perp[1] = dir[0];
         perp[2] = 0.0;
 
-        // Large chevron — 55 long × 30 half-width, clearly visible
         float tip[3], baseLeft[3], baseRight[3];
-        float arrowLen = 55.0;
-        float halfWidth = 30.0;
+        float arrowLen = 28.0;
+        float halfWidth = 16.0;
 
         tip[0] = cell1.center[0] + dir[0] * arrowLen;
         tip[1] = cell1.center[1] + dir[1] * arrowLen;
-        tip[2] = cell1.center[2] - 11.0;
+        tip[2] = cell1.center[2] - 13.0;
 
         baseLeft[0] = cell1.center[0] + perp[0] * halfWidth;
         baseLeft[1] = cell1.center[1] + perp[1] * halfWidth;
-        baseLeft[2] = cell1.center[2] - 11.0;
+        baseLeft[2] = cell1.center[2] - 13.0;
 
         baseRight[0] = cell1.center[0] - perp[0] * halfWidth;
         baseRight[1] = cell1.center[1] - perp[1] * halfWidth;
-        baseRight[2] = cell1.center[2] - 11.0;
+        baseRight[2] = cell1.center[2] - 13.0;
 
-        // Left blade: tip → baseLeft, thick→thin
+        // Left blade
         TE_SetupBeamPoints(tip, baseLeft, laser, 0, 0, 0,
-            duration, 12.0, 4.0, 0, 0.0, color_chevron, 0);
+            duration, 3.5, 1.0, 0, 0.0, color_chevron, 0);
         if (client > 0) TE_SendToClient(client);
         else TE_SendToAll();
 
-        // Right blade: tip → baseRight
+        // Right blade
         TE_SetupBeamPoints(tip, baseRight, laser, 0, 0, 0,
-            duration, 12.0, 4.0, 0, 0.0, color_chevron, 0);
+            duration, 3.5, 1.0, 0, 0.0, color_chevron, 0);
         if (client > 0) TE_SendToClient(client);
         else TE_SendToAll();
     }
@@ -792,16 +786,23 @@ public void OnClientPutInServer(int client)
     if (!IsValidClient(client) || IsFakeClient(client)) return;
     beams_cooldown_reset(client,true); // reset cooldown and last request from client
     g_sCustomKeys[client] = "";
-    // Auto-bind M key for double-tap toggle (delayed so client is fully in-game)
-    CreateTimer(3.0, Timer_AutoBind, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 }
 
-Action Timer_AutoBind(Handle timer, int userid)
+void evtFirstSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+    int userid = event.GetInt("userid");
+    if (userid <= 0) return;
+    // Delay bind until after client config.cfg has executed (~5s after first spawn)
+    CreateTimer(5.0, Timer_FirstSpawnBind, userid, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+Action Timer_FirstSpawnBind(Handle timer, int userid)
 {
     int client = GetClientOfUserId(userid);
     if (client > 0 && IsClientInGame(client) && !IsFakeClient(client))
     {
         ClientCommand(client, "bind m \"say !ptg\"");
+        PrintToChat(client, "\x04[PTG] \x01Press \x05M\x01 or type \x05!ptg\x01 for navigation guide (double-tap to toggle)");
     }
     return Plugin_Stop;
 }

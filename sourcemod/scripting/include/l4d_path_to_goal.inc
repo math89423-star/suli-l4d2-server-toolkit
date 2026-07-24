@@ -1245,12 +1245,12 @@ void OnFramePrep(bool new_frame = true)
                     LogMessage("Initial cell num %d", all_cells.Length);
                 #endif
 
-                if (all_cells.Length <= 1)
+                if (all_cells.Length < 6)
                 {
                     delete all_cells;
                     guide_prep = false;
                     #if DEBUG
-                    LogMessage("WARNING: all_cells has no cells");
+                    LogMessage("WARNING: all_cells insufficient (%d cells)", all_cells.Length);
                     #endif
                     return;
                 }
@@ -1476,7 +1476,8 @@ void OnFramePrep(bool new_frame = true)
                     //        continue;
                     //    }
                     //}
-                    if (triple_valid_ground(cell_before.center,cell_after.center) && twopos_traversable(cell_before.center,cell_after.center))
+                    if (triple_valid_ground(cell_before.center,cell_after.center) && twopos_traversable(cell_before.center,cell_after.center)
+                        && FloatAbs(cell_before.center[2] - cell_after.center[2]) <= 50.0)  // don't erase cells bridging elevation gaps
                     {
                         g_GuideCells.Erase(g_iLoop); // Erase cells with mutual LOS
                         #if DEBUG
@@ -2506,7 +2507,7 @@ stock bool midpoint_valid_ground(float pos1[3], float pos2[3])
 stock bool valid_ground(float pos[3])
 {
     static float pos_down[3];
-    pos_down = pos; pos_down[2] -= 35.0;
+    pos_down = pos; pos_down[2] -= 48.0;
     TR_TraceHullFilter(pos,pos_down,{-GROUND_WIDTH,-GROUND_WIDTH,2.0},{GROUND_WIDTH,GROUND_WIDTH,5.0},MASK_PTG|MASK_WATER,TraceFilterStatic);
     return TR_DidHit(INVALID_HANDLE);
     //if (TR_DidHit(INVALID_HANDLE))
