@@ -5,14 +5,14 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "1.7"
+#define PLUGIN_VERSION "1.8"
 #define CHAT_PREFIX "\x04[队友互助]\x01"
 
 public Plugin myinfo =
 {
     name        = "L4D2 Teammate Support Heal",
     author      = "Claude",
-    description = "+5 temp HP on protect teammate; +20 real HP on heal/revive/defib teammate; SI/Witch kill heal disabled",
+    description = "+5 temp HP (PZDmgMsg protect hook) +20 real HP on heal/revive/defib; SI/Witch/common kill heal disabled",
     version     = PLUGIN_VERSION,
     url         = ""
 };
@@ -27,10 +27,14 @@ public void OnPluginStart()
     g_cvHealPercent = CreateConVar("sm_si_kill_heal_percent", "1.0", "Percentage of SI max HP to heal on kill", _, true, 0.0, true, 100.0);
     g_cvMaxHP       = CreateConVar("sm_si_kill_heal_max",     "100", "Maximum effective HP (real + temp) after heal (standing)", _, true, 1.0, true, 9999.0);
     g_cvMaxBuffer   = CreateConVar("sm_si_kill_heal_buffer",  "300", "Maximum health buffer when incapacitated", _, true, 1.0, true, 9999.0);
-    g_cvProtectHP    = CreateConVar("sm_si_kill_heal_protect", "5",   "Temp HP awarded for protecting a teammate (killing SI that was attacking them)", _, true, 0.0, true, 100.0);
+    g_cvProtectHP    = CreateConVar("sm_si_kill_heal_protect", "5",   "Temp HP awarded for protecting a teammate (via PZDmgMsg hook)", _, true, 0.0, true, 100.0);
 
-    HookEvent("player_death",        Event_PlayerDeath);
-    // HookEvent("witch_killed",        Event_WitchKilled);  // DISABLED v1.7
+    // Hook game's native PZDmgMsg usermessage — fires when the game broadcasts
+    // "A protected B" notifications. We intercept to add +5 temp HP reward.
+    HookUserMessage(GetUserMessageId("PZDmgMsg"), OnPZDmgMsg);
+
+    // HookEvent("player_death",        Event_PlayerDeath);     // DISABLED v1.8
+    // HookEvent("witch_killed",        Event_WitchKilled);     // DISABLED v1.7
     HookEvent("heal_success",        Event_HealSuccess);
     HookEvent("revive_success",      Event_ReviveSuccess);
     HookEvent("defibrillator_used",  Event_DefibrillatorUsed);
@@ -166,94 +170,50 @@ void AddRealHealth(int client, float amount, const char[] reason)
 }
 
 // ============================================================================
-// Event: player_death → Protect teammate reward (SI kill heal DISABLED)
+// PZDmgMsg hook — game's native "protect teammate" system message
+// ============================================================================
+// BitBuffer structure:
+//   1. BfReadByte  → message type (L4D2_ON_AWARD_PROTECTOR = 18)
+//   2. BfReadShort → attacker userid (the protector)
+//   3. BfReadShort → victim userid   (the teammate saved)
+//   4. BfReadShort → unknown
+//   5. BfReadShort → damage
 // ============================================================================
 
-void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+public Action OnPZDmgMsg(UserMsg msg_id, BfRead msg, const int[] players, int playersNum, bool reliable, bool init)
 {
-    int victim   = GetClientOfUserId(event.GetInt("userid"));
-    int attacker = GetClientOfUserId(event.GetInt("attacker"));
+    int msgType = BfReadByte(msg);
+    if (msgType != 18)  // L4D2_ON_AWARD_PROTECTOR
+        return Plugin_Continue;
 
-    if (victim == 0 || attacker == 0)
-        return;
-    if (victim == attacker)
-        return;
-    if (!IsClientInGame(attacker) || GetClientTeam(attacker) != 2)
-        return;
-
-    int victimTeam = GetClientTeam(victim);
-    if (victimTeam != 3)
-        return;
-
-    // === SI kill percentage heal DISABLED (v1.7) ===
-    // int siMaxHP = GetEntProp(victim, Prop_Data, "m_iMaxHealth");
-    // if (siMaxHP <= 0)
-    //     return;
-    // char siName[32];
-    // int zombieClass = GetEntProp(victim, Prop_Send, "m_zombieClass");
-    // ... HealSurvivor(attacker, siMaxHP, siName);
-
-    // === Protect teammate: check if SI was attacking/pinning another survivor ===
     float protectHP = g_cvProtectHP.FloatValue;
     if (protectHP <= 0.0)
-        return;
+        return Plugin_Continue;
 
-    int zombieClass = GetEntProp(victim, Prop_Send, "m_zombieClass");
-    int pinnedClient = -1;
+    int attackerId = BfReadShort(msg);
+    int victimId   = BfReadShort(msg);
+    // BfReadShort(msg); // unknown
+    // BfReadShort(msg); // damage — not needed
 
-    switch (zombieClass)
-    {
-        case 1:  // Smoker
-        {
-            pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_tongueVictim");
-        }
-        case 3:  // Hunter
-        {
-            pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_pounceVictim");
-        }
-        case 5:  // Jockey
-        {
-            pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_jockeyVictim");
-        }
-        case 6:  // Charger
-        {
-            pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_pummelVictim");
-            if (pinnedClient < 1)
-                pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_carryVictim");
-        }
-    }
+    int attacker = GetClientOfUserId(attackerId);
+    int victim   = GetClientOfUserId(victimId);
 
-    // Reward attacker if SI was actively attacking a teammate
-    if (pinnedClient > 0 && pinnedClient <= MaxClients && IsClientInGame(pinnedClient) && GetClientTeam(pinnedClient) == 2)
-    {
-        char reason[64];
-        GetClientName(pinnedClient, reason, sizeof(reason));
-        Format(reason, sizeof(reason), "保护了 \x05%s", reason);
-        AddTempHealth(attacker, protectHP, reason);
-    }
-}
-
-// ============================================================================
-// Event: witch_killed → Witch kill reward DISABLED (v1.7)
-// ============================================================================
-/*
-void Event_WitchKilled(Event event, const char[] name, bool dontBroadcast)
-{
-    int attacker = GetClientOfUserId(event.GetInt("userid"));
     if (attacker == 0 || !IsClientInGame(attacker) || GetClientTeam(attacker) != 2)
-        return;
+        return Plugin_Continue;
+    if (!IsPlayerAlive(attacker))
+        return Plugin_Continue;
 
-    int witchid = event.GetInt("witchid");
-    if (witchid <= 0 || !IsValidEntity(witchid))
-        return;
+    char reason[64];
+    if (victim > 0 && IsClientInGame(victim))
+        GetClientName(victim, reason, sizeof(reason));
+    else
+        reason = "队友";
+    Format(reason, sizeof(reason), "保护了 \x05%s", reason);
 
-    int maxHP = GetEntProp(witchid, Prop_Data, "m_iMaxHealth");
-    if (maxHP <= 0)
-        return;
+    AddTempHealth(attacker, protectHP, reason);
 
-    HealSurvivor(attacker, maxHP, "Witch");
+    return Plugin_Continue;
 }
-*/
 
 // ============================================================================
 // Event: heal_success → +20 real HP for healing a teammate (pills/medkit)
