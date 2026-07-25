@@ -226,16 +226,10 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
     // Reward attacker if SI was actively attacking a teammate
     if (pinnedClient > 0 && pinnedClient <= MaxClients && IsClientInGame(pinnedClient) && GetClientTeam(pinnedClient) == 2)
     {
-        char siName[32];
-        switch (zombieClass)
-        {
-            case 1:  siName = "Smoker";
-            case 3:  siName = "Hunter";
-            case 5:  siName = "Jockey";
-            case 6:  siName = "Charger";
-            default: siName = "特感";
-        }
-        AddTempHealth(attacker, protectHP, siName);
+        char reason[64];
+        GetClientName(pinnedClient, reason, sizeof(reason));
+        Format(reason, sizeof(reason), "保护了 \x05%s", reason);
+        AddTempHealth(attacker, protectHP, reason);
     }
 }
 
