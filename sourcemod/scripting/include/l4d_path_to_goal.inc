@@ -1505,16 +1505,14 @@ void OnFramePrep(bool new_frame = true)
             if (result == 1)
             {
                 // Path found
-                #if DEBUG
-                LogMessage("[PTG] A* path found in %d frames", g_iPrepFrames);
-                #endif
+                LogMessage("[PTG] A* path found — proceeding to smoothing");
                 budget_spent = false; // proceed to next stage immediately
             }
             else if (result == -1)
             {
-                // No path exists — fall back to old flow-sort method
-                LogMessage("[PTG] A* failed: no path found (open set exhausted after exploring %d nodes). Falling back to flow-sort.",
-                    g_hAStarClosed.Length);
+                // No path exists — goal unreachable from start
+                LogMessage("[PTG] A* failed: no path to goal index %d. Falling back to flow-sort.",
+                    g_iAStarGoalIndex);
                 guide_prep = false;
                 g_iPrepStage = STAGE_NONE;
                 return;
@@ -3507,7 +3505,7 @@ stock void AStar_Init()
     delete g_hAStarClosed;
     g_hAStarClosed = new ArrayList(1);
 
-    float inf = view_as<float>(0x7F800000); // positive infinity via float bit pattern
+    float inf = 99999999.0; // large finite sentinel — SourcePawn view_as<float>(0x7F800000) yields 0
     for (int i = 0; i < nodeCount; i++)
     {
         g_hAStarGScore.Push(inf);
@@ -3662,6 +3660,8 @@ stock int AStar_SearchFrame(int maxNodes)
 
                 float fScore = tentativeG + AStar_Heuristic(neighborIdx);
                 Heap_Push(g_hAStarOpen, neighborIdx, fScore, tentativeG);
+
+                // Goal reached — will be popped and detected next frame
             }
         }
 
@@ -3681,16 +3681,26 @@ stock void AStar_ReconstructPath(ArrayList outCells)
     outCells.Clear();
     if (!g_bAStarPathFound) return;
 
-    // Walk backwards from goal to start
+    // Walk backwards from goal to start (safety: max iterations = nodeCount)
     ArrayList reversePath = new ArrayList(2); // nodeIndex, edgeType pairs
 
+    int maxSteps = g_hAStarNodes.Length + 1;
     int currentIdx = g_iAStarGoalIndex;
-    while (currentIdx >= 0)
+    int steps = 0;
+    while (currentIdx >= 0 && steps < maxSteps)
     {
+        if (currentIdx >= g_hAStarNodes.Length) break;
         int edgeType = g_hAStarEdgeType.Get(currentIdx);
         reversePath.Push(currentIdx);
         reversePath.Push(edgeType);
         currentIdx = g_hAStarCameFrom.Get(currentIdx);
+        steps++;
+    }
+    if (steps >= maxSteps)
+    {
+        LogMessage("[PTG] A* reconstruct aborted: path too long (cycle detected)");
+        delete reversePath;
+        return;
     }
 
     // Theta* Funnel-style smoothing pass: remove nodes with mutual LOS
@@ -3720,8 +3730,11 @@ stock void AStar_ReconstructPath(ArrayList outCells)
             // Check if anchor can see candidate
             if (twopos_traversable(anchorCenter, candidateCenter))
             {
-                // Skip intermediate node(s): replace last element with candidate
-                smoothIndices.Set(anchor + 1, candidateIdx);
+                // Skip intermediate node(s): replace last or push
+                if (anchor + 1 < smoothIndices.Length)
+                    smoothIndices.Set(anchor + 1, candidateIdx);
+                else
+                    smoothIndices.Push(candidateIdx);
             }
             else
             {
@@ -3816,63 +3829,68 @@ stock int AStar_IdentifyStart()
 }
 
 // Identify the GOAL nav area for the escape path.
-// Priority: RESCUE_VEHICLE > max flow > farthest from start by Euclidean
+// Priority: RESCUE_VEHICLE > max flow (if flow data valid) > farthest Euclidean from start
+// Always prefers Euclidean fallback when flow data is suspect, since Euclidean is
+// purely geometric and always produces a valid candidate.
 stock int AStar_IdentifyGoal(int startIndex)
 {
     if (g_hAStarNodes == null || g_hAStarNodes.Length == 0) return -1;
-
-    int bestIdx = -1;
-    float bestFlow = -1.0;
-    bool foundRescue = false;
 
     float startCenter[3];
     if (startIndex >= 0)
         g_hAStarCenters.GetArray(startIndex, startCenter, 3);
 
+    // Strategy 1: RESCUE_VEHICLE area
     for (int i = 0; i < g_hAStarNodes.Length; i++)
     {
         int areaInt = g_hAStarNodes.Get(i);
         Address area = view_as<Address>(areaInt);
-
-        float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
-        if (flow < 0.0 || flow > g_fMaxFlow) continue;
-
         int spawnAttrs = L4D_GetNavArea_SpawnAttributes(area);
-        bool isRescue = (spawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) != 0;
-
-        if (isRescue && g_hCvarFinale.IntValue < FINALE_NEVER)
+        if ((spawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) && g_hCvarFinale.IntValue < FINALE_NEVER)
         {
-            if (flow > bestFlow || !foundRescue)
-            {
-                bestFlow = flow;
-                bestIdx = i;
-                foundRescue = true;
-            }
-        }
-
-        if (!foundRescue && flow > bestFlow)
-        {
-            bestFlow = flow;
-            bestIdx = i;
+            LogMessage("[PTG] A* goal: RESCUE_VEHICLE at index %d", i);
+            return i;
         }
     }
 
-    // Fallback: if no flow data, use farthest Euclidean distance from start
-    if (bestIdx < 0 && startIndex >= 0)
+    // Strategy 2: farthest Euclidean distance from start (always valid)
+    // This is more reliable than max-flow on custom/broken nav meshes.
+    if (startIndex >= 0)
     {
+        int farIdx = -1;
         float maxDist = -1.0;
         for (int i = 0; i < g_hAStarNodes.Length; i++)
         {
             float center[3];
             g_hAStarCenters.GetArray(i, center, 3);
-            float dist = GetVectorDistance(startCenter, center, true);
+            float dist = GetVectorDistance(startCenter, center, true); // sq dist
             if (dist > maxDist)
             {
                 maxDist = dist;
-                bestIdx = i;
+                farIdx = i;
             }
         }
+        if (farIdx >= 0)
+        {
+            LogMessage("[PTG] A* goal: farthest Euclidean index %d (dist=%.0f)", farIdx, SquareRoot(maxDist));
+            return farIdx;
+        }
     }
+
+    // Strategy 3: max flow distance (last resort)
+    int bestIdx = -1;
+    float bestFlow = -1.0;
+    for (int i = 0; i < g_hAStarNodes.Length; i++)
+    {
+        float flow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(g_hAStarNodes.Get(i)));
+        if (flow > bestFlow && flow <= g_fMaxFlow)
+        {
+            bestFlow = flow;
+            bestIdx = i;
+        }
+    }
+    if (bestIdx >= 0)
+        LogMessage("[PTG] A* goal: max-flow index %d (flow=%.1f)", bestIdx, bestFlow);
 
     return bestIdx;
 }
