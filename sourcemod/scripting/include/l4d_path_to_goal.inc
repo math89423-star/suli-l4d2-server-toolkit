@@ -83,8 +83,36 @@ enum ConnectionType {
     CONNECTED_NOT = 0,
     CONNECTED_ADJACENT = 1, // dir
     CONNECTED_LADDER = 2, // ladder
-    CONNECTED_ELEVATOR = 3 // elevator
+    CONNECTED_ELEVATOR = 3, // elevator
+    CONNECTED_JUMP_UP = 4, // one-way jump up to higher nav area
+    CONNECTED_JUMP_DOWN = 5, // one-way safe drop down
+    CONNECTED_VAULT = 6, // mantle over waist-high obstacle
+    CONNECTED_GAP_JUMP = 7, // horizontal running jump across gap
+    CONNECTED_CROUCH = 8, // crouch-only passage
+    CONNECTED_STEP_DOWN = 9, // small step down (pipe descent style)
+    CONNECTED_BREAKABLE = 10, // blocked by breakable wall/door
+    CONNECTED_CONDITIONAL = 11 // trigger/gate dependent
 };
+
+// Cost multiplier for each connection type (used in A* edge weights)
+stock float GetConnectionCost(ConnectionType type)
+{
+    switch (type)
+    {
+        case CONNECTED_ADJACENT:   return 1.0;
+        case CONNECTED_LADDER:     return 1.5;
+        case CONNECTED_ELEVATOR:   return 2.0;
+        case CONNECTED_JUMP_UP:    return 1.8;
+        case CONNECTED_JUMP_DOWN:  return 1.2;
+        case CONNECTED_VAULT:      return 2.5;
+        case CONNECTED_GAP_JUMP:   return 3.0;
+        case CONNECTED_CROUCH:     return 1.5;
+        case CONNECTED_STEP_DOWN:  return 1.1;
+        case CONNECTED_BREAKABLE:  return 5.0;
+        case CONNECTED_CONDITIONAL:return 10.0;
+    }
+    return 1.0;
+}
 
 // Connection to navArea
 enum struct NavConnection
@@ -93,14 +121,64 @@ enum struct NavConnection
     ConnectionType connectiontype;
 }
 
+// Non-mesh edge: a player-traversable connection NOT present in the nav mesh
+// Detected by spatial analysis during STAGE_PREP
+enum struct NonMeshEdge
+{
+    int fromArea;          // navArea address (as int)
+    int toArea;            // navArea address (as int)
+    ConnectionType edgeType;
+    float tpA[3];          // optional intermediate trace point A
+    float tpB[3];          // optional intermediate trace point B
+}
+
+// Binary heap entry for A* priority queue
+enum struct HeapEntry
+{
+    int nodeIndex;      // index into g_hAStarNodes
+    float fScore;
+    float gScore;
+}
+
+// ============================================================================
+// A* State — persists across frames during distributed search
+// ============================================================================
+ArrayList g_hAStarNodes;       // all navArea addresses (int) — built once in STAGE_PREP
+ArrayList g_hAStarCenters;     // parallel: float[3] center for each node
+StringMap g_hAStarAreaToIndex; // "navAreaInt" → nodeIndex
+
+// A* search state (indexed by nodeIndex)
+ArrayList g_hAStarGScore;      // float per node
+ArrayList g_hAStarCameFrom;    // int per node (parent nodeIndex, -1 = none)
+ArrayList g_hAStarEdgeType;    // int per node (ConnectionType used)
+ArrayList g_hAStarClosed;      // int per node (0 = open, 1 = closed)
+ArrayList g_hAStarOpen;        // HeapEntry — binary heap priority queue
+
+// A* targets and results
+int g_aAStarGoal;              // goal navArea address (int)
+int g_aAStarStart;             // start navArea address (int)
+int g_iAStarGoalIndex;         // nodeIndex of goal
+bool g_bAStarPathFound;        // true when goal reached
+// int g_iAStarNodesThisFrame;    // unused
+#define ASTAR_NODES_PER_FRAME 48
+
+// Spatial hash for fast nearby-area queries
+StringMap g_hSpatialHash;      // "cx_cy_cz" → ArrayList of {navArea(int), center(float[3])}
+#define SPATIAL_CELL_SIZE 256.0
+
+// Non-mesh connection cache
+ArrayList g_hNonMeshEdges;     // NonMeshEdge — all detected non-mesh connections
+
 // GetNavConnections filter
 #define CON_KEEP_ALL 0 // keep all adjacent connections
 #define CON_KEEP_FORWARD 1 // keep only forward-going adjacent connections
 #define CON_KEEP_BACKWARD 2 // keep only backwards-going adjacent connections
 
 ArrayList g_GuideCells;
+ArrayList g_bBeamWalkable; // hull trace validation: 1=walkable, 0=blocked by world geometry
 ConVar g_hCvarMPGameMode, g_hCvarEnable, g_hCvarMax, g_hCvarSurvivors, g_hCvarInfected, g_hCvarSpec, g_hCvarBudget, g_hCvarDetourBudget, g_hCvarFinaleAuto, g_hCvarZM;
 ConVar g_hCvarAutoEnable, g_hCvarAutoDuration, g_hCvarAutoInterval;
+ConVar g_hCvarGapDzMax, g_hCvarGapXyRatio, g_hCvarBeamMinDist, g_hCvarGapVertical, g_hCvarStitchSteps, g_hCvarTraceHull;
 Handle g_hAutoTimer = null;
 Handle g_hAutoCheckTimer = null;
 bool gamemode_guidable, guide_ready, guide_prep, map_started, nav_started, enable, g_bL4D2, finale, finale_rescue, finale_gauntlet;
@@ -979,20 +1057,28 @@ void Check_Guidable()
 }
 
 #define STAGE_NONE 0 // Prep not running
-#define STAGE_PREP 1 // First frame of Prep
-#define STAGE_COLLECT 2 // Get all ESCAPE_ROUTE, CHECKPOINT, PLAYER_START and RESCUE_VEHICLE navmeshes
-#define STAGE_SORT 3 // Sort ESCAPE_ROUTE by flow
-#define STAGE_FIX 4 // Clean up bad connections between navmeshes. Certified Valve Product Moment (TM)
-#define STAGE_BUILD 5 // Build static g_GuideCells with continuity and line-of-sight.
-#define STAGE_FINALE 6 // If there is RESCUE_VEHICLE
-#define STAGE_VALIDATE 7 // Tighten connections between cells, remove cells with mutual LOS.
-#define STAGE_END 8 // Guide ready.
+#define STAGE_PREP 1 // Initialize, get max flow, build node index, identify start/goal
+#define STAGE_ASTAR 2 // A* search distributed across frames
+#define STAGE_SMOOTH 3 // Reconstruct path, Theta* smooth, output to g_GuideCells
+#define STAGE_JOIN 4 // Connect rescue vehicle to guide path
+#define STAGE_VALIDATE 5 // Hull trace validation — 8-strategy checks against world geometry
+#define STAGE_END 6 // Guide ready.
+// Legacy stages retained for backwards compat with old code paths (kept as aliases)
+#define STAGE_COLLECT 99 // deprecated — was "collect ESCAPE_ROUTE areas"
+#define STAGE_SORT 99    // deprecated — was "sort by flow"
+#define STAGE_FIX 99     // deprecated — was "stitch gaps"
+#define STAGE_BUILD 99   // deprecated — was "build guide cells"
+#define STAGE_FINALE STAGE_JOIN // renumbered
 
 int g_iPrepStage, g_iLoop;
-float g_fFlowStart, g_fFlowCheckpoint, g_tFrameStart;
-ArrayList allAreas, all_cells, RescueVehicleCells;
-bool g_bMissingStart, g_bMissingCheckpoint, g_bFoundStart, g_bFoundCheckpoint;
-Address g_aNavStart, g_aNavCheckpoint, g_aNavRescueVehicle;
+float g_tFrameStart;
+ArrayList RescueVehicleCells;
+Address g_aNavRescueVehicle;
+// Legacy pipeline vars (no longer used by A* pipeline, retained for compat)
+// float g_fFlowStart, g_fFlowCheckpoint;
+// ArrayList allAreas, all_cells;
+// bool g_bMissingStart, g_bMissingCheckpoint, g_bFoundStart, g_bFoundCheckpoint;
+// Address g_aNavStart, g_aNavCheckpoint;
 
 
 #if DEBUG
@@ -1025,7 +1111,241 @@ void Guide_Cleanup()
         #endif
         guide_ready = false;
         delete g_GuideCells;
+        delete g_bBeamWalkable;
     }
+}
+
+// ==========================================================================================
+// v2.2 Hull Trace Validation — Multi-strategy with edge-case fallbacks
+//
+// Simulates a player navigating between nav cells. Uses a cascading series of
+// progressively more permissive hull traces to handle edge cases:
+//
+//   1. MID HULL  (44h,  lift 28) — default crouch-walk posture
+//   2. MID HULL  (44h,  lift 48) — steeper lift for staircases
+//   3. LOW HULL  (32h,  lift 28) — vent / crawlspace
+//   4. LOW HULL  (32h,  lift 48) — crawl + stair combo
+//   5. SIDE A    (44h,  lift 28, offset +18u right)
+//   6. SIDE B    (44h,  lift 28, offset -18u left)
+//   7. SUBDIVIDE — split into 3 shorter segments, trace mid hull each
+//
+// Only world BSP geometry (entity==0) blocks; doors/breakables pass through.
+// First success = walkable. All seven fail = beam blocked (real wall).
+//
+// Performance: one-time computation when guide cells are built. Typical map
+// of 75 beams × avg 2 traces = ~150 hull traces total (~3ms).
+// ==========================================================================================
+
+public bool TraceFilter_WorldOnly(int entity, int contentsMask, any data)
+{
+    return (entity == 0); // only collide with world BSP geometry
+}
+
+// Single hull test helper — returns true if walkable
+bool TryHull(float start[3], float end[3], const float mins[3], const float maxs[3])
+{
+    TR_TraceHullFilter(start, end, mins, maxs, MASK_PLAYERSOLID, TraceFilter_WorldOnly);
+    return !TR_DidHit();
+}
+
+// Offset a point perpendicular to the travel direction
+void OffsetPerpendicular(float start[3], float end[3], float offset, float result[3])
+{
+    float dir[3], perp[3];
+    dir[0] = end[0] - start[0];
+    dir[1] = end[1] - start[1];
+    dir[2] = 0.0;
+    float len = SquareRoot(dir[0] * dir[0] + dir[1] * dir[1]);
+    if (len < 1.0) { result = start; return; }
+    perp[0] = -dir[1] / len * offset;
+    perp[1] =  dir[0] / len * offset;
+    perp[2] = 0.0;
+    result[0] = start[0] + perp[0];
+    result[1] = start[1] + perp[1];
+    result[2] = start[2];
+}
+
+// Async hull trace state — shared between Guide_ValidateWalkable and its frame callback.
+// Processing in batches of BATCH_SIZE per frame avoids main-thread stalls on
+// maps with thousands of nav cells (fallback path can collect 5000+ cells).
+#define VALIDATE_BATCH 15
+int g_vi;          // current beam index
+int g_vBlocked;    // blocked count
+int g_vStair;      // passed via stair-lift
+int g_vLow;        // passed via vent/crawl hull
+int g_vSide;       // passed via side offset
+int g_vSubdiv;     // passed via subdivision
+int g_vVault;      // passed via vault/climb
+
+void Guide_ValidateWalkable()
+{
+    delete g_bBeamWalkable;
+    if (g_GuideCells == null || g_GuideCells.Length < 2) return;
+    if (g_hCvarTraceHull == null || !g_hCvarTraceHull.BoolValue) return;
+
+    g_bBeamWalkable = new ArrayList(1);
+    g_vi = 0;
+    g_vBlocked = g_vStair = g_vLow = g_vSide = g_vSubdiv = g_vVault = 0;
+
+    RequestFrame(Guide_ValidateWalkable_Frame, 0);
+}
+
+void Guide_ValidateWalkable_Frame(any unused)
+{
+    if (g_GuideCells == null || g_vi >= g_GuideCells.Length - 1)
+    {
+        int total = (g_GuideCells != null) ? (g_GuideCells.Length - 1) : 0;
+        if (total > 0)
+        {
+            LogMessage("[PTG] Hull validation: %d/%d walkable — vault:%d stair:%d low:%d side:%d subdiv:%d — blocked:%d",
+                total - g_vBlocked, total, g_vVault, g_vStair, g_vLow, g_vSide, g_vSubdiv, g_vBlocked);
+        }
+        return;
+    }
+
+    int count = g_GuideCells.Length;
+
+    // Hull definitions
+    float midMins[3] = {-14.0, -14.0, 0.0};
+    float midMaxs[3] = { 14.0,  14.0, 44.0};
+    float lowMins[3] = {-10.0, -10.0, 0.0};
+    float lowMaxs[3] = { 10.0,  10.0, 32.0};
+
+    for (int batch = 0; batch < VALIDATE_BATCH && g_vi < count - 1; batch++, g_vi++)
+    {
+        int i = g_vi;
+        Cell cell1, cell2;
+        g_GuideCells.GetArray(i, cell1, sizeof(Cell));
+        g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
+
+        bool walkable = false;
+
+        float baseStart[3], baseEnd[3];
+        baseStart = cell1.center;
+        baseEnd   = cell2.center;
+
+        float dz = FloatAbs(cell2.center[2] - cell1.center[2]);
+        float dist = GetVectorDistance(cell1.center, cell2.center, false);
+        float distXY = GetVectorDistance(cell1.center, cell2.center, true);
+
+        // Strategy 0: Ladder / elevator / vertical drop
+        if (dz > 80.0 && distXY < 40.0)
+        {
+            g_bBeamWalkable.Push(1);
+            continue;
+        }
+
+        // Strategy 0.5: Vault / climb — moderate-height obstacle to jump over
+        // Two cells close horizontally but with a box/crate/ledge between them.
+        // The player can vault: step up onto the higher cell, walk across, drop down.
+        // Trace at the higher cell's level (+10u clearance) with low hull.
+        if (dz >= 30.0 && dz <= 100.0 && distXY < 120.0)
+        {
+            float vaultZ = (cell1.center[2] > cell2.center[2] ? cell1.center[2] : cell2.center[2]) + 10.0;
+            float sv[3], ev[3];
+            sv = baseStart; sv[2] = vaultZ;
+            ev = baseEnd;   ev[2] = vaultZ;
+            // Only the higher-level horizontal trace needs to clear — player steps up naturally
+            if (TryHull(sv, ev, lowMins, lowMaxs))
+            {
+                g_vVault++;
+                g_bBeamWalkable.Push(1);
+                continue;
+            }
+        }
+
+        // Strategy 1: Mid hull (44h), normal lift (28u)
+        float s1[3], e1[3];
+        s1 = baseStart; s1[2] += 28.0;
+        e1 = baseEnd;   e1[2] += 28.0;
+        walkable = TryHull(s1, e1, midMins, midMaxs);
+
+        // Strategy 2: Mid hull, steep lift (48u) — stairs
+        if (!walkable && dz > 30.0 && dist < 150.0)
+        {
+            float s2[3], e2[3];
+            s2 = baseStart; s2[2] += 48.0;
+            e2 = baseEnd;   e2[2] += 48.0;
+            walkable = TryHull(s2, e2, midMins, midMaxs);
+            if (walkable) g_vStair++;
+        }
+
+        // Strategy 3: Low hull (32h), normal lift — vent/crawl
+        if (!walkable)
+        {
+            float s3[3], e3[3];
+            s3 = baseStart; s3[2] += 28.0;
+            e3 = baseEnd;   e3[2] += 28.0;
+            walkable = TryHull(s3, e3, lowMins, lowMaxs);
+            if (walkable) g_vLow++;
+        }
+
+        // Strategy 4: Low hull, steep lift — crawl + stair
+        if (!walkable && dz > 30.0 && dist < 150.0)
+        {
+            float s4[3], e4[3];
+            s4 = baseStart; s4[2] += 48.0;
+            e4 = baseEnd;   e4[2] += 48.0;
+            walkable = TryHull(s4, e4, lowMins, lowMaxs);
+            if (walkable) { g_vLow++; g_vStair++; }
+        }
+
+        // Strategy 5+6: Offset left/right (±18u)
+        if (!walkable)
+        {
+            for (int side = 0; side < 2 && !walkable; side++)
+            {
+                float so[3], eo[3];
+                float offset = (side == 0) ? 18.0 : -18.0;
+                OffsetPerpendicular(s1, e1, offset, so);
+                OffsetPerpendicular(e1, s1, -offset, eo);
+                so[2] = s1[2]; eo[2] = e1[2];
+                walkable = TryHull(so, eo, midMins, midMaxs);
+            }
+            if (walkable) g_vSide++;
+        }
+
+        // Strategy 7: Subdivide (3 segments)
+        if (!walkable && dist > 200.0)
+        {
+            float segStart[3], segEnd[3];
+            bool allClear = true;
+            for (int seg = 0; seg < 3 && allClear; seg++)
+            {
+                float t0 = float(seg) / 3.0;
+                float t1 = float(seg + 1) / 3.0;
+                for (int j = 0; j < 3; j++)
+                {
+                    segStart[j] = baseStart[j] + (baseEnd[j] - baseStart[j]) * t0;
+                    segEnd[j]   = baseStart[j] + (baseEnd[j] - baseStart[j]) * t1;
+                }
+                segStart[2] += 28.0;
+                segEnd[2]   += 28.0;
+                if (!TryHull(segStart, segEnd, midMins, midMaxs))
+                    allClear = false;
+            }
+            walkable = allClear;
+            if (walkable) g_vSubdiv++;
+        }
+
+        // Strategy 8: Jump arc (parabolic, 60u apex)
+        if (!walkable && dist < 250.0)
+        {
+            float sj[3], ej[3], mj[3];
+            sj = baseStart; sj[2] += 28.0;
+            ej = baseEnd;   ej[2] += 28.0;
+            mj[0] = (sj[0] + ej[0]) / 2.0;
+            mj[1] = (sj[1] + ej[1]) / 2.0;
+            mj[2] = (sj[2] + ej[2]) / 2.0 + 60.0;
+            walkable = TryHull(sj, mj, lowMins, lowMaxs)
+                    && TryHull(mj, ej, lowMins, lowMaxs);
+        }
+
+        g_bBeamWalkable.Push(walkable ? 1 : 0);
+        if (!walkable) g_vBlocked++;
+    }
+
+    RequestFrame(Guide_ValidateWalkable_Frame, 0);
 }
 
 bool frame_budget_exceeded()
@@ -1048,9 +1368,7 @@ void OnFramePrep(bool new_frame = true)
         return;
     }
     static float pos[3];
-    float flow;
     static Cell cell, cell_before, cell_after;
-    Address navArea;
     bool budget_spent = false; // same variable for all stages
     if (new_frame)
     {
@@ -1066,9 +1384,8 @@ void OnFramePrep(bool new_frame = true)
     {
         case STAGE_PREP:
         {
-
             g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
-            if (g_fMaxFlow<=0.0)
+            if (g_fMaxFlow <= 0.0)
             {
                 guide_prep = false;
                 g_iPrepStage = STAGE_NONE;
@@ -1078,283 +1395,189 @@ void OnFramePrep(bool new_frame = true)
                 return;
             }
 
-            delete allAreas;
-            allAreas = new ArrayList();
-            L4D_GetAllNavAreas(allAreas);
-            if (allAreas.Length<=1)
+            // Build the A* node index from all nav areas
+            AStar_BuildNodeIndex();
+            if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
             {
-                delete allAreas;
                 guide_prep = false;
-                #if DEBUG
-                    LogMessage("WARNING: L4D_GetAllNavAreas returned no areas");
-                #endif
+                g_iPrepStage = STAGE_NONE;
+                LogMessage("[PTG] A* node index failed: too few nav areas");
                 return;
             }
 
-
-            g_fFlowRescueVehicle = -1.0;
-            g_bFoundRescueVehicle = false;
-
-            delete all_cells;
-            all_cells = new ArrayList(sizeof(Cell)); // Collect nav areas in survivor path
-            
+            // Initialize guide cells
             delete g_GuideCells;
             g_GuideCells = new ArrayList(sizeof(Cell));
 
             delete RescueVehicleCells;
             RescueVehicleCells = new ArrayList(sizeof(Cell));
 
-            g_bMissingStart = true; // do we have a confirmed start area navmesh in g_GuideCells?
-            g_bMissingCheckpoint = true; // do we have a confirmed end area navmesh in g_GuideCells?
-            
-            g_bFoundStart = false;
-            g_bFoundCheckpoint = false;
-            
-            g_fFlowStart = g_fMaxFlow;
-            g_fFlowCheckpoint = 0.0;
+            // Track rescue vehicle
+            g_fFlowRescueVehicle = -1.0;
+            g_bFoundRescueVehicle = false;
+            g_aNavRescueVehicle = Address_Null;
+
+            for (int i = 0; i < g_hAStarNodes.Length; i++)
+            {
+                int areaInt = g_hAStarNodes.Get(i);
+                Address area = view_as<Address>(areaInt);
+                float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
+                int spawnAttrs = L4D_GetNavArea_SpawnAttributes(area);
+
+                if ((spawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) && g_hCvarFinale.IntValue < FINALE_NEVER)
+                {
+                    if (flow > g_fFlowRescueVehicle)
+                    {
+                        g_bFoundRescueVehicle = true;
+                        g_fFlowRescueVehicle = flow;
+                        g_aNavRescueVehicle = area;
+                    }
+                }
+            }
+
+            // Populate RescueVehicleCells for STAGE_JOIN
+            if (g_bFoundRescueVehicle)
+            {
+                Cell rvc;
+                rvc.navArea = g_aNavRescueVehicle;
+                rvc.flow = g_fFlowRescueVehicle;
+                float rpos[3];
+                L4D_GetNavAreaCenter(g_aNavRescueVehicle, rpos);
+                rpos[2] += 16.0;
+                if (pos_underwater(rpos)) rpos[2] += 16.0;
+                rvc.center = rpos;
+                RescueVehicleCells.PushArray(rvc);
+            }
 
             finale_stitched = false;
             finale_backwards = false;
 
-            g_iLoop = 0;
+            // Identify start and goal
+            int startIdx = AStar_IdentifyStart();
+            int goalIdx = AStar_IdentifyGoal(startIdx);
+
+            if (startIdx < 0 || goalIdx < 0)
+            {
+                LogMessage("[PTG] A* cannot identify start (%d) or goal (%d) — falling back", startIdx, goalIdx);
+                guide_prep = false;
+                g_iPrepStage = STAGE_NONE;
+                return;
+            }
+
+            g_aAStarStart = g_hAStarNodes.Get(startIdx);
+            g_aAStarGoal = g_hAStarNodes.Get(goalIdx);
+            g_iAStarGoalIndex = goalIdx;
+
+            #if DEBUG
+            float startC[3], goalC[3];
+            g_hAStarCenters.GetArray(startIdx, startC, 3);
+            g_hAStarCenters.GetArray(goalIdx, goalC, 3);
+            LogMessage("[PTG] A* start=%d (%.0f,%.0f,%.0f) goal=%d (%.0f,%.0f,%.0f) navAreas=%d",
+                startIdx, startC[0], startC[1], startC[2],
+                goalIdx, goalC[0], goalC[1], goalC[2],
+                g_hAStarNodes.Length);
+            #endif
+
+            // Initialize A* search state
+            AStar_Init();
+            AStar_SetStart(startIdx);
+
+            // Start non-mesh connection detection (continues across frames)
+            DetectNonMeshConnections_Init();
+
             #if DEBUG
             g_fPrepTotalTime = 0.0;
             g_iErased = 0;
             g_iNavBlocked = 0;
-            g_iTotalCollected = 0;
+            g_iTotalCollected = g_hAStarNodes.Length;
             g_iTighten = 0;
             #endif
+            g_iLoop = 0;
         }
-        case STAGE_COLLECT:
+        case STAGE_ASTAR:
         {
-            if (allAreas==null || all_cells==null)
+            // Continue non-mesh detection in parallel with A* (first few frames)
+            DetectNonMeshConnections_Frame();
+
+            // Run A* search for this frame
+            int result = AStar_SearchFrame(ASTAR_NODES_PER_FRAME);
+
+            if (result == 1)
             {
-                guide_prep = false;
-                return;
-            }
-            while (g_iLoop<allAreas.Length)
-            {
-                if (frame_budget_exceeded()) { budget_spent = true; break; }
-                navArea = allAreas.Get(g_iLoop);
-                g_iLoop += 1;
-                if (!navArea) continue;
-                flow = L4D2Direct_GetTerrorNavAreaFlow(navArea);
-                //if (flow>g_fMaxFlow) continue;
-                int navSpawnAttrs = L4D_GetNavArea_SpawnAttributes(navArea);
-                bool rescue = (navSpawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) > 0;
-                //if (rescue && flow <= 0.0)
-                //{
-                //    rescue = false;
-                //    LogMessage("NAV_SPAWN_RESCUE_VEHICLE at <= 0.0 flow! BOOOOOO! THROW TOMATOES AT THE MAPPER!");
-                //}
-
-                if (rescue && g_hCvarFinale.IntValue < FINALE_NEVER) // Rescue navareas might be blocked until rescue vehicle arrives.
-                {
-                    if (flow>g_fFlowRescueVehicle)
-                    {
-                        g_bFoundRescueVehicle = true;
-                        g_fFlowRescueVehicle = flow;
-                        g_aNavRescueVehicle = navArea;
-                    }
-                }
-
-                if (blocked_available && L4D_NavArea_IsBlocked(navArea,TEAM_SURVIVOR,true))
-                {
-                    #if DEBUG
-                    g_iNavBlocked += 1;
-                    #endif
-                    continue;
-                }
-
-                bool checkpoint = navSpawnAttrs & NAV_SPAWN_PLAYER_START || navSpawnAttrs & NAV_SPAWN_CHECKPOINT;
-
-                if (flow >= 0.0 && navSpawnAttrs & NAV_SPAWN_ESCAPE_ROUTE)
-                {
-                    
-                    int i_found = all_cells.FindValue(flow,0);
-                    if (i_found>=0)
-                    {
-                        #if DEBUG
-                        LogMessage("STAGE_COLLECT WARNING: %d flow %f identical to %d", g_iLoop, flow, i_found);
-                        #endif
-                        continue; // if identical flow exists, ignore this cell
-                    }
-                    
-                    L4D_GetNavAreaCenter(navArea,pos);
-                    pos[2] += 16.0;
-                    if (pos_underwater(pos))
-                    {
-                        pos[2] += 16.0;
-                        if (pos_underwater(pos)) pos[2] += 16.0;
-                    }
-                    cell.navArea = navArea;
-                    cell.center = pos;
-                    cell.flow = flow;
-                    all_cells.PushArray(cell);
-                    if (g_bMissingStart && checkpoint && flow<=(g_fMaxFlow*0.1)) g_bMissingStart = false;
-                    if (g_bMissingCheckpoint && (checkpoint || rescue) && flow>=(g_fMaxFlow*0.25)) g_bMissingCheckpoint = false;
-                    //#if DEBUG>2
-                    //    LogMessage("%d %f %f", g_iLoop, flow);
-                    //#endif
-                }
-                
-                if (checkpoint)
-                {
-                    if (flow<g_fFlowStart) // Find smallest flow starting position
-                    {
-                        g_bFoundStart = true;
-                        g_aNavStart = navArea;
-                        g_fFlowStart = flow;
-                    }
-                    if (flow>g_fFlowCheckpoint) // Find biggest flow ending position
-                    {
-                        g_bFoundCheckpoint = true;
-                        g_aNavCheckpoint = navArea;
-                        g_fFlowCheckpoint = flow;
-                    }
-                }
-
-            }
-            
-            if (!budget_spent) // Stage has ended, prep for next stage.
-            {
-                if (g_bMissingStart && g_bFoundStart)
-                {
-                    cell.navArea = g_aNavStart;
-                    L4D_GetNavAreaCenter(g_aNavStart,pos);
-                    pos[2] += 16.0; 
-                    if (pos_underwater(pos)) pos[2] += 16.0;
-                    cell.center = pos;
-                    cell.flow = g_fFlowStart;
-                    all_cells.PushArray(cell);
-                }
-                if (g_bMissingCheckpoint && g_bFoundCheckpoint)
-                {
-                    cell.navArea = g_aNavCheckpoint;
-                    L4D_GetNavAreaCenter(g_aNavCheckpoint,pos);
-                    pos[2] += 16.0;
-                    if (pos_underwater(pos)) pos[2] += 16.0;
-                    cell.center = pos;
-                    cell.flow = g_fFlowCheckpoint;
-                    all_cells.PushArray(cell);
-                }
-
-                delete allAreas;
-
-                #if DEBUG>1
-                    LogMessage("Initial cell num %d", all_cells.Length);
+                // Path found
+                #if DEBUG
+                LogMessage("[PTG] A* path found in %d frames", g_iPrepFrames);
                 #endif
-
-                if (all_cells.Length < 6)
-                {
-                    delete all_cells;
-                    guide_prep = false;
-                    #if DEBUG
-                    LogMessage("WARNING: all_cells insufficient (%d cells)", all_cells.Length);
-                    #endif
-                    return;
-                }
-
-                if (g_bFoundRescueVehicle)
-                {
-                    cell.navArea = g_aNavRescueVehicle;
-                    cell.flow = g_fFlowRescueVehicle;
-                    L4D_GetNavAreaCenter(cell.navArea,pos);
-                    pos[2] += 16.0;
-                    if (pos_underwater(pos)) pos[2] += 16.0;
-                    cell.center = pos;
-                    RescueVehicleCells.PushArray(cell); 
-                }
-
+                budget_spent = false; // proceed to next stage immediately
             }
-        }
-        case STAGE_SORT:
-        {
-            if (all_cells==null || g_GuideCells==null)
+            else if (result == -1)
             {
+                // No path exists — fall back to old flow-sort method
+                LogMessage("[PTG] A* failed: no path found (open set exhausted after exploring %d nodes). Falling back to flow-sort.",
+                    g_hAStarClosed.Length);
                 guide_prep = false;
+                g_iPrepStage = STAGE_NONE;
                 return;
             }
+            else
+            {
+                // Still searching — continue next frame
+                budget_spent = true;
+            }
+        }
+        case STAGE_SMOOTH:
+        {
+            // Reconstruct and smooth the A* path
+            delete g_GuideCells;
+            g_GuideCells = new ArrayList(sizeof(Cell));
+
+            AStar_ReconstructPath(g_GuideCells);
+
             #if DEBUG
-            g_iTotalCollected = all_cells.Length;
+            LogMessage("[PTG] Path reconstructed: %d cells after smoothing", g_GuideCells.Length);
             #endif
-            all_cells.SortCustom(SortFlow);
-            all_cells.GetArray(0,cell,sizeof(Cell));
-            g_GuideCells.PushArray(cell);
+
+            if (g_GuideCells.Length < 2)
+            {
+                LogMessage("[PTG] A* produced <2 guide cells — falling back");
+                delete g_GuideCells;
+                guide_prep = false;
+                g_iPrepStage = STAGE_NONE;
+                return;
+            }
+
+            // Clean up A* state to free memory
+            delete g_hAStarOpen;
+            delete g_hAStarGScore;
+            delete g_hAStarCameFrom;
+            delete g_hAStarEdgeType;
+            delete g_hAStarClosed;
+
+            // Track rescue vehicle relative to guide path
+            if (g_bFoundRescueVehicle)
+            {
+                float maxGuideFlow = g_GuideCells.Get(g_GuideCells.Length - 1, 0);
+                finale_backwards = g_fFlowRescueVehicle < maxGuideFlow;
+                if (explored_finale == null) explored_finale = new ArrayList();
+                explored_finale.Clear();
+            }
+
             g_iLoop = 1;
         }
-        case STAGE_FIX:
+        case STAGE_JOIN:
         {
-            if (all_cells==null)
-            {
-                guide_prep = false;
-                return;
-            }
-            while (all_cells.Length>1 && g_iLoop<all_cells.Length)
-            {
-                if (frame_budget_exceeded()) { budget_spent = true; break; }
-                all_cells.GetArray(g_iLoop,cell,sizeof(Cell));
-                all_cells.GetArray(g_iLoop-1,cell_before,sizeof(Cell));
-                if (!cell_connected(cell_before,cell) && !twopos_traversable(cell_before.center,cell.center))
-                {
-                    #if DEBUG
-                    LogMessage("STAGE_FIX: %d (%.1f) -> %d (%.1f) not connected", g_iLoop-1, cell_before.flow, g_iLoop, cell.flow);
-                    #endif
-                    explore_stitch(all_cells,g_iLoop);
-                }
-                g_iLoop += 1;
-            }
-            if (!budget_spent) g_iLoop = 1;
-        }
-        case STAGE_BUILD:
-        {
-            if (all_cells==null || g_GuideCells==null)
-            {
-                guide_prep = false;
-                return;
-            }
-            while (g_iLoop<all_cells.Length)
-            {
-                if (frame_budget_exceeded()) { budget_spent = true; break; }
-                all_cells.GetArray(g_iLoop,cell,sizeof(Cell));
-                guide_add_cell(g_GuideCells,cell);
-                g_iLoop += 1;
-            }
-            if (!budget_spent) // Stage has ended, prep for next stage
-            {
-                delete all_cells;
-                if (g_GuideCells.Length <= 1)
-                {
-                    delete g_GuideCells;
-                    guide_prep = false;
-                    return;
-                }
-                if (g_bFoundRescueVehicle)
-                {
-                    float max_guide_flow = g_GuideCells.Get(g_GuideCells.Length-1,0);
-                    #if DEBUG
-                    LogMessage("rescue vehicle flow %f max guide flow %f", g_fFlowRescueVehicle, max_guide_flow);
-                    #endif
-                    finale_backwards = g_fFlowRescueVehicle<max_guide_flow;
-                    if (explored_finale==null) explored_finale = new ArrayList();
-                    explored_finale.Clear();
-                }
-                g_iLoop = 1;
-            }
-        }
-        case STAGE_FINALE:
-        {
+            // Connect rescue vehicle to guide path (existing logic)
             if (RescueVehicleCells == null || RescueVehicleCells.Length <= 0 || g_hCvarFinale.IntValue == FINALE_NEVER)
                 g_bFoundRescueVehicle = false;
 
             if (g_bFoundRescueVehicle)
             {
-                RescueVehicleCells.GetArray(RescueVehicleCells.Length-1,cell,sizeof(Cell));
+                RescueVehicleCells.GetArray(RescueVehicleCells.Length-1, cell, sizeof(Cell));
                 static float pos_curr[3];
                 float flow_curr = cell.flow;
                 pos_curr = cell.center;
-                if (ConAdj==null) ConAdj = new ArrayList(sizeof(NavConnection));
-                if (AdjNN==null) AdjNN = new ArrayList(); // nearest neighbor explore for dips in flow when about to climb a ladder
+                if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+                if (AdjNN == null) AdjNN = new ArrayList();
 
                 Address navArea_curr = cell.navArea;
                 float flow_temp, flow_best;
@@ -1362,53 +1585,42 @@ void OnFramePrep(bool new_frame = true)
                 Address navArea_best;
                 float dz, dz_best;
 
-                // when finale is backwards, we start at some flow value and must go to max flow. 
-                // -> when finale_backwards, set increasing=true
-
                 while (navArea_curr != Address_Null)
                 {
                     if (frame_budget_exceeded()) { budget_spent = true; break; }
                     bool found = false;
                     flow_best = flow_curr;
                     bool best_steep = false;
-                    int count = GetNavConnections(navArea_curr,ConAdj,TEAM_SURVIVOR,true,true,true,CON_KEEP_ALL);
+                    int count = GetNavConnections(navArea_curr, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
                     static NavConnection nav_connection;
                     for (int i = 0; i < count; i++)
                     {
-                        ConAdj.GetArray(i,nav_connection,sizeof(NavConnection));
+                        ConAdj.GetArray(i, nav_connection, sizeof(NavConnection));
                         if (nav_connection.navArea == Address_Null || nav_connection.connectiontype <= CONNECTED_NOT) continue;
                         if (nav_connection.navArea == navArea_curr) continue;
-                        if (blocked_available && L4D_NavArea_IsBlocked(nav_connection.navArea,TEAM_SURVIVOR,true)) continue;
-                        if (explored_finale.FindValue(nav_connection.navArea)>=0) continue;
+                        if (blocked_available && L4D_NavArea_IsBlocked(nav_connection.navArea, TEAM_SURVIVOR, true)) continue;
+                        if (explored_finale.FindValue(nav_connection.navArea) >= 0) continue;
                         explored_finale.Push(nav_connection.navArea);
                         flow_temp = L4D2Direct_GetTerrorNavAreaFlow(nav_connection.navArea);
-                        #if DEBUG>1
-                            LogMessage("STAGE_FINALE (%d %.1f) try %d %d %.1f", navArea_curr, flow_curr, nav_connection.connectiontype, nav_connection.navArea, flow_temp);
-                        #endif
-                        int count2 = navArea_ladder_navAreas(nav_connection.navArea,AdjNN,TEAM_SURVIVOR); // ladder intervention. flow dips when stepping onto ladder navmeshes...
+                        int count2 = navArea_ladder_navAreas(nav_connection.navArea, AdjNN, TEAM_SURVIVOR);
                         for (int i2 = 0; i2 < count2; i2++)
                         {
                             Address adjArea = AdjNN.Get(i2);
                             if (adjArea == Address_Null || adjArea == navArea_curr || adjArea == nav_connection.navArea) continue;
                             float new_flow = L4D2Direct_GetTerrorNavAreaFlow(adjArea);
-                            if (flow_better(new_flow,flow_temp,finale_backwards))
-                            {
-                                #if DEBUG>1
-                                LogMessage("STAGE_FINALE Ladder intervention %.1f -> %.1f", flow_temp, new_flow);
-                                #endif
+                            if (flow_better(new_flow, flow_temp, finale_backwards))
                                 flow_temp = new_flow;
-                            }
                         }
-                        if (!flow_better(flow_temp,flow_curr,finale_backwards)) continue; // finale_backwards -> increasing -> from finale vehicle we go up in flow to get to radio.
-                        L4D_GetNavAreaCenter(nav_connection.navArea,pos_temp);
+                        if (!flow_better(flow_temp, flow_curr, finale_backwards)) continue;
+                        L4D_GetNavAreaCenter(nav_connection.navArea, pos_temp);
                         pos_temp[2] += 16.0;
                         dz = pos_curr[2] - pos_temp[2];
-                        bool steep = nav_connection.connectiontype == CONNECTED_ADJACENT && nav_too_steep(navArea_curr,nav_connection.navArea);
+                        bool steep = nav_connection.connectiontype == CONNECTED_ADJACENT && nav_too_steep(navArea_curr, nav_connection.navArea);
                         if (found && steep)
                         {
-                            if (!best_steep || dz>dz_best) continue; // prefer to go down than up
+                            if (!best_steep || dz > dz_best) continue;
                         }
-                        if ( flow_better(flow_temp,flow_best,finale_backwards) || (best_steep && flow_better(flow_temp,flow_curr,finale_backwards)) )
+                        if (flow_better(flow_temp, flow_best, finale_backwards) || (best_steep && flow_better(flow_temp, flow_curr, finale_backwards)))
                         {
                             flow_best = flow_temp;
                             navArea_best = nav_connection.navArea;
@@ -1418,10 +1630,10 @@ void OnFramePrep(bool new_frame = true)
                             dz_best = dz;
                         }
                     }
-                    
+
                     if (!found)
                     {
-                        if (try_ladder(flow_curr,pos_curr,cell,finale_backwards))
+                        if (try_ladder(flow_curr, pos_curr, cell, finale_backwards))
                         {
                             found = true;
                             flow_best = cell.flow;
@@ -1439,7 +1651,7 @@ void OnFramePrep(bool new_frame = true)
                         cell.flow = flow_curr;
                         cell.navArea = navArea_curr;
                         cell.center = pos_curr;
-                        guide_add_cell(RescueVehicleCells,cell);
+                        guide_add_cell(RescueVehicleCells, cell);
                     }
                     else break;
                 }
@@ -1456,66 +1668,54 @@ void OnFramePrep(bool new_frame = true)
         }
         case STAGE_VALIDATE:
         {
-            if (g_GuideCells != null && g_GuideCells.Length>2)
+            if (g_GuideCells != null && g_GuideCells.Length > 2)
             {
-                while (g_iLoop<(g_GuideCells.Length-1))
+                while (g_iLoop < (g_GuideCells.Length - 1))
                 {
                     if (frame_budget_exceeded()) { budget_spent = true; break; }
-                    g_GuideCells.GetArray(g_iLoop+1,cell_after,sizeof(Cell));
-                    g_GuideCells.GetArray(g_iLoop,cell,sizeof(Cell));
-                    g_GuideCells.GetArray(g_iLoop-1,cell_before,sizeof(Cell));
-                    //if ( !midpoint_valid_ground(cell.center,cell_after.center) )
-                    //{
-                    //    if (valid_ground(cell.center) && valid_ground(cell_after.center) && LOS_rescue_cheap(cell.center,cell_after.center,pos,true)) // grounded LOS rescue
-                    //    {
-                    //        g_GuideCells.ShiftUp(g_iLoop+1);
-                    //        cell.center = pos;
-                    //        cell.flow = (cell.flow+cell_after.flow)/2.0;
-                    //        g_GuideCells.SetArray(g_iLoop+1,cell,sizeof(Cell));
-                    //        //g_iLoop += 1;
-                    //        continue;
-                    //    }
-                    //}
-                    if (triple_valid_ground(cell_before.center,cell_after.center) && twopos_traversable(cell_before.center,cell_after.center)
-                        && FloatAbs(cell_before.center[2] - cell_after.center[2]) <= 50.0)  // don't erase cells bridging elevation gaps
+                    g_GuideCells.GetArray(g_iLoop+1, cell_after, sizeof(Cell));
+                    g_GuideCells.GetArray(g_iLoop, cell, sizeof(Cell));
+                    g_GuideCells.GetArray(g_iLoop-1, cell_before, sizeof(Cell));
+                    if (triple_valid_ground(cell_before.center, cell_after.center) && twopos_traversable(cell_before.center, cell_after.center)
+                        && FloatAbs(cell_before.center[2] - cell_after.center[2]) <= 50.0)
                     {
-                        g_GuideCells.Erase(g_iLoop); // Erase cells with mutual LOS
+                        g_GuideCells.Erase(g_iLoop);
                         #if DEBUG
                         g_iErased += 1;
                         #endif
-                        if (g_iLoop>1) g_iLoop -= 1;
+                        if (g_iLoop > 1) g_iLoop -= 1;
                         continue;
                     }
-                    
-                    if (!vecdiff_too_steep(cell_before.center,cell.center))
+
+                    if (!vecdiff_too_steep(cell_before.center, cell.center))
                     {
-                        if (project_forward(cell_before.center,cell.center,cell_after.center,pos) && valid_ground(pos) && twopos_traversable(pos,cell_before.center) && twopos_traversable(pos,cell_after.center))
+                        if (project_forward(cell_before.center, cell.center, cell_after.center, pos) && valid_ground(pos) && twopos_traversable(pos, cell_before.center) && twopos_traversable(pos, cell_after.center))
                         {
-                            cell.center = pos; // Tighten connection
-                            g_GuideCells.SetArray(g_iLoop,cell,sizeof(Cell));
+                            cell.center = pos;
+                            g_GuideCells.SetArray(g_iLoop, cell, sizeof(Cell));
                             #if DEBUG
                             g_iTighten += 1;
                             #endif
-                            if (g_iLoop>1) g_iLoop -= 1;
+                            if (g_iLoop > 1) g_iLoop -= 1;
                             continue;
                         }
-                        if (project_forward(cell.center,cell_after.center,cell_before.center,pos) && valid_ground(pos) && twopos_traversable(pos,cell_before.center) && twopos_traversable(pos,cell_after.center))
+                        if (project_forward(cell.center, cell_after.center, cell_before.center, pos) && valid_ground(pos) && twopos_traversable(pos, cell_before.center) && twopos_traversable(pos, cell_after.center))
                         {
-                            cell.center = pos; // Tighten connection
-                            g_GuideCells.SetArray(g_iLoop,cell,sizeof(Cell));
+                            cell.center = pos;
+                            g_GuideCells.SetArray(g_iLoop, cell, sizeof(Cell));
                             #if DEBUG
                             g_iTighten += 1;
                             #endif
-                            if (g_iLoop>1) g_iLoop -= 1;
+                            if (g_iLoop > 1) g_iLoop -= 1;
                             continue;
                         }
                         else
                         {
-                            get_midpoint(cell_before.center,cell.center,pos);
-                            if (valid_ground(pos) && twopos_traversable(pos,cell_before.center) && twopos_traversable(pos,cell_after.center))
+                            get_midpoint(cell_before.center, cell.center, pos);
+                            if (valid_ground(pos) && twopos_traversable(pos, cell_before.center) && twopos_traversable(pos, cell_after.center))
                             {
-                                cell.center = pos; // Tighten connection
-                                g_GuideCells.SetArray(g_iLoop,cell,sizeof(Cell));
+                                cell.center = pos;
+                                g_GuideCells.SetArray(g_iLoop, cell, sizeof(Cell));
                                 #if DEBUG
                                 g_iTighten += 1;
                                 #endif
@@ -1531,11 +1731,10 @@ void OnFramePrep(bool new_frame = true)
         }
         default:
         {
-            guide_prep = false;
-            return;
+            // Pipeline stage dispatch complete.
         }
     }
-    
+
     if (!budget_spent) g_iPrepStage += 1;
 
     if (g_iPrepStage>STAGE_NONE && g_iPrepStage<STAGE_END)
@@ -1554,13 +1753,12 @@ void OnFramePrep(bool new_frame = true)
     {
         guide_prep = false;
         guide_ready = true;
+        Guide_ValidateWalkable(); // v2.2: hull-trace validate all beams against world geometry
         beams_cooldown_reset(); // reset cooldowns but not requests to draw
-        delete allAreas;
-        delete all_cells;
         #if DEBUG
         g_fPrepTotalTime += (GetEngineTime()-g_tFrameStart);
-        LogMessage("Final cell num %d (%d collected %d erased %d tighten %d blocked) (%f ms %d frames)",
-        g_GuideCells.Length, g_iTotalCollected, g_iErased, g_iTighten, g_iNavBlocked, g_fPrepTotalTime*1000.0, g_iPrepFrames);
+        LogMessage("[PTG] Guide ready: %d cells (%d nav areas) (%f ms %d frames)",
+        g_GuideCells.Length, g_iTotalCollected, g_fPrepTotalTime*1000.0, g_iPrepFrames);
         #endif
         g_iPrepStage = STAGE_NONE;
         timer_nav = null;
@@ -1759,6 +1957,9 @@ ArrayList cells_explore;
 #define STITCH_GAP_OK 2 // how many cells ahead to check for further disjointed navAreas
 stock bool explore_stitch(ArrayList cells, int &i_start, int max_steps = 50)
 {
+    int cvar_steps = g_hCvarStitchSteps.IntValue;
+    if (cvar_steps > max_steps) max_steps = cvar_steps;
+
     if (i_start<=1 || i_start>=cells.Length) return false;
     static Cell cell, cell2;
 
@@ -2129,6 +2330,70 @@ bool cell_rescue(ArrayList cells, Cell cell_old, Cell cell_new, Cell cell_prev2,
         }
     }
 
+    // --- Enhanced 3D terrain candidates (buildings, mountains, highlands) ---
+    // For large elevation gaps, sample z-stepped positions along the path.
+    // This helps navigate multi-floor buildings and steep outdoor terrain where
+    // the simple linear candidates above all fail due to intermediate geometry.
+    float dz_abs = FloatAbs(diff[2]);
+    if (dz_abs > 50.0)
+    {
+        int z_steps = (dz_abs > 200.0) ? 6 : 3;
+        float dz_frac = 1.0 / float(z_steps + 1);
+        for (int zi = 1; zi <= z_steps; zi++)
+        {
+            float frac = zi * dz_frac;
+            pos_candidate[0] = cell_old.center[0] + diff[0] * frac;
+            pos_candidate[1] = cell_old.center[1] + diff[1] * frac;
+            // Center z at proportional height
+            pos_candidate[2] = cell_old.center[2] + diff[2] * frac;
+            pos_candidates.PushArray(pos_candidate);
+            // Try slightly above (next floor up)
+            pos_candidate[2] += 32.0;
+            pos_candidates.PushArray(pos_candidate);
+            // Try slightly below (next floor down)
+            pos_candidate[2] -= 64.0;
+            pos_candidates.PushArray(pos_candidate);
+        }
+
+        // Also try intermediate xy positions with z projected from navmesh of either cell
+        // This helps for sloped outdoor terrain where the ground curves
+        if (cell_old.navArea != Address_Null || cell_new.navArea != Address_Null)
+        {
+            float frac_mid = 0.5;
+            pos_candidate[0] = cell_old.center[0] + diff[0] * frac_mid;
+            pos_candidate[1] = cell_old.center[1] + diff[1] * frac_mid;
+            pos_candidate[2] = cell_old.center[2] + diff[2] * frac_mid;
+
+            // Try projecting onto old cell's navmesh z
+            if (cell_old.navArea != Address_Null)
+            {
+                float proj_z = L4D_NavArea_GetZ(cell_old.navArea, pos_candidate);
+                if (proj_z > -9000.0)
+                {
+                    pos_candidate[2] = proj_z + 16.0;
+                    pos_candidates.PushArray(pos_candidate);
+                    pos_candidate[2] += 24.0;
+                    pos_candidates.PushArray(pos_candidate);
+                }
+            }
+            // Try projecting onto new cell's navmesh z
+            if (cell_new.navArea != Address_Null)
+            {
+                float proj_z = L4D_NavArea_GetZ(cell_new.navArea, pos_candidate);
+                if (proj_z > -9000.0)
+                {
+                    pos_candidate[2] = proj_z + 16.0;
+                    pos_candidates.PushArray(pos_candidate);
+                    pos_candidate[2] += 24.0;
+                    pos_candidates.PushArray(pos_candidate);
+                }
+            }
+            // Try average z (midway between the two cells' z, but at midpoint xy)
+            pos_candidate[2] = (cell_old.center[2] + cell_new.center[2]) * 0.5;
+            pos_candidates.PushArray(pos_candidate);
+        }
+    }
+
     // Priority: projected first, then stragglers.
     ArrayList pos_candidates2 = new ArrayList(3); // lower priority candidates
 
@@ -2319,14 +2584,7 @@ void beams_cooldown_reset(int client = -1, bool request = false)
     }
 }
 
-int SortFlow(int index1, int index2, Handle array, Handle hndl)
-{
-    float flow1 = view_as<ArrayList>(array).Get(index1,0);
-    float flow2 = view_as<ArrayList>(array).Get(index2,0);
-    if (flow1 > flow2) return 1;
-    else if (flow1 < flow2) return -1;
-    return 0;
-}
+// SortFlow removed — no longer needed with A* pipeline
 
 // Test if it's possible to travel to cell position from given position
 bool cell_traversable(int i, float pos[3], bool world_only = true, float max_distance = -1.0)
@@ -2792,6 +3050,882 @@ stock bool IsValidClient(int client, bool replaycheck = true)
 		if (IsClientSourceTV(client) || IsClientReplay(client)) return false;
 	}
 	return true;
+}
+
+// ============================================================================
+// Binary Heap (Min-Heap) for A* Priority Queue
+// Ordered by fScore. Lazy deletion: stale entries are skipped on pop.
+// ============================================================================
+
+// Bubble up from index i
+stock void Heap_BubbleUp(ArrayList heap, int i)
+{
+    if (i <= 0) return;
+    HeapEntry current, parent;
+    while (i > 0)
+    {
+        int pi = (i - 1) / 2;
+        heap.GetArray(i, current, sizeof(HeapEntry));
+        heap.GetArray(pi, parent, sizeof(HeapEntry));
+        if (current.fScore >= parent.fScore) break;
+        // swap
+        heap.SetArray(i, parent, sizeof(HeapEntry));
+        heap.SetArray(pi, current, sizeof(HeapEntry));
+        i = pi;
+    }
+}
+
+// Bubble down from index i
+stock void Heap_BubbleDown(ArrayList heap, int i)
+{
+    int size = heap.Length;
+    if (size <= 1) return;
+    HeapEntry current, child, temp;
+    while (true)
+    {
+        int left = 2 * i + 1;
+        int right = 2 * i + 2;
+        int smallest = i;
+
+        heap.GetArray(i, current, sizeof(HeapEntry));
+
+        if (left < size)
+        {
+            heap.GetArray(left, child, sizeof(HeapEntry));
+            if (child.fScore < current.fScore) smallest = left;
+        }
+        if (right < size)
+        {
+            heap.GetArray(right, child, sizeof(HeapEntry));
+            heap.GetArray(smallest, temp, sizeof(HeapEntry));
+            if (child.fScore < temp.fScore) smallest = right;
+        }
+        if (smallest == i) break;
+
+        // swap
+        heap.GetArray(smallest, child, sizeof(HeapEntry));
+        heap.SetArray(i, child, sizeof(HeapEntry));
+        heap.SetArray(smallest, current, sizeof(HeapEntry));
+        i = smallest;
+    }
+}
+
+stock void Heap_Push(ArrayList heap, int nodeIndex, float fScore, float gScore)
+{
+    HeapEntry entry;
+    entry.nodeIndex = nodeIndex;
+    entry.fScore = fScore;
+    entry.gScore = gScore;
+    heap.PushArray(entry, sizeof(HeapEntry));
+    Heap_BubbleUp(heap, heap.Length - 1);
+}
+
+// Pop the entry with lowest fScore. Returns false if heap is empty.
+stock bool Heap_Pop(ArrayList heap, HeapEntry outEntry)
+{
+    if (heap.Length == 0) return false;
+
+    // Get root
+    heap.GetArray(0, outEntry, sizeof(HeapEntry));
+
+    // Move last to root
+    int last = heap.Length - 1;
+    if (last > 0)
+    {
+        HeapEntry lastEntry;
+        heap.GetArray(last, lastEntry, sizeof(HeapEntry));
+        heap.SetArray(0, lastEntry, sizeof(HeapEntry));
+    }
+    heap.Resize(last);
+
+    if (heap.Length > 0)
+        Heap_BubbleDown(heap, 0);
+
+    return true;
+}
+
+// ============================================================================
+// Spatial Hash — fast O(k) nearby-nav-area queries
+// ============================================================================
+
+stock void SpatialHash_Insert(float center[3], int navAreaInt)
+{
+    int cx = RoundToFloor(center[0] / SPATIAL_CELL_SIZE);
+    int cy = RoundToFloor(center[1] / SPATIAL_CELL_SIZE);
+    int cz = RoundToFloor(center[2] / SPATIAL_CELL_SIZE);
+
+    char key[32];
+    Format(key, sizeof(key), "%d_%d_%d", cx, cy, cz);
+
+    ArrayList cellList;
+    if (!g_hSpatialHash.GetValue(key, cellList))
+    {
+        cellList = new ArrayList(2); // entry: {navArea(int), float[3] center}
+        g_hSpatialHash.SetValue(key, cellList);
+    }
+
+    // Cap cell size to prevent perf issues on dense nav meshes
+    if (cellList.Length >= 64) return;
+
+    cellList.Push(navAreaInt);
+    cellList.PushArray(center, 3);
+}
+
+// Query: fill result with navArea addresses (as int) within range of pos
+// checkRange: how many spatial cells to check in each axis (1 = 3x3x3, 2 = 5x5x5)
+stock void SpatialHash_Query(float pos[3], ArrayList result, float maxDist = 512.0, int checkRange = 1)
+{
+    result.Clear();
+    int cx = RoundToFloor(pos[0] / SPATIAL_CELL_SIZE);
+    int cy = RoundToFloor(pos[1] / SPATIAL_CELL_SIZE);
+    int cz = RoundToFloor(pos[2] / SPATIAL_CELL_SIZE);
+
+    float maxDistSq = maxDist * maxDist;
+
+    for (int dx = -checkRange; dx <= checkRange; dx++)
+    {
+        for (int dy = -checkRange; dy <= checkRange; dy++)
+        {
+            for (int dz = -checkRange; dz <= checkRange; dz++)
+            {
+                char key[32];
+                Format(key, sizeof(key), "%d_%d_%d", cx + dx, cy + dy, cz + dz);
+
+                ArrayList cellList;
+                if (!g_hSpatialHash.GetValue(key, cellList)) continue;
+
+                int count = cellList.Length;
+                for (int i = 0; i < count; i += 2) // stride 2: {int, float[3]}
+                {
+                    int areaInt = cellList.Get(i);
+                    float areaCenter[3];
+                    cellList.GetArray(i + 1, areaCenter, 3);
+
+                    float distSq = GetVectorDistance(pos, areaCenter, true);
+                    if (distSq <= maxDistSq)
+                        result.Push(areaInt);
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Non-Mesh Connection Detection
+// ============================================================================
+
+// Detect all non-mesh connections between nav areas. Called once per map load.
+// Uses spatial hash + nav area attributes (CROUCH, JUMP, BREAKABLEWALL, etc.)
+// Distributed across frames via OnFramePrep for large maps.
+int g_iNonMeshI;               // current scan index for frame distribution
+ArrayList g_hNonMeshNearby;    // reusable nearby query result
+
+stock void DetectNonMeshConnections_Init()
+{
+    delete g_hNonMeshEdges;
+    g_hNonMeshEdges = new ArrayList(sizeof(NonMeshEdge));
+    g_iNonMeshI = 0;
+    if (g_hNonMeshNearby == null)
+        g_hNonMeshNearby = new ArrayList();
+}
+
+// Returns true when detection is complete
+stock bool DetectNonMeshConnections_Frame()
+{
+    if (g_hAStarNodes == null || g_hAStarCenters == null)
+    {
+        LogMessage("[PTG] DetectNonMesh: nodes not built yet");
+        return true;
+    }
+
+    float t = GetEngineTime();
+    int nodeCount = g_hAStarNodes.Length;
+    int processed = 0;
+
+    while (g_iNonMeshI < nodeCount)
+    {
+        if (processed >= 150 && ((GetEngineTime() - t) * 1000.0) > g_hCvarBudget.FloatValue)
+            return false; // continue next frame
+
+        int areaInt = g_hAStarNodes.Get(g_iNonMeshI);
+        float center[3];
+        g_hAStarCenters.GetArray(g_iNonMeshI, center, 3);
+
+        // Query nearby areas via spatial hash
+        SpatialHash_Query(center, g_hNonMeshNearby, 320.0, 1);
+
+        // Track area attributes (for crouch/jump/breakable detection)
+        Address areaAddr = view_as<Address>(areaInt);
+        int attrs = (elevator_available) ? L4D_GetNavArea_AttributeFlags(areaAddr) : 0;
+        bool crouchArea = (attrs & NAV_BASE_CROUCH) != 0;
+        bool noJumpArea = (attrs & NAV_BASE_NO_JUMP) != 0;
+        bool breakableArea = (attrs & NAV_BASE_BREAKABLEWALL) != 0;
+
+        for (int j = 0; j < g_hNonMeshNearby.Length; j++)
+        {
+            int otherInt = g_hNonMeshNearby.Get(j);
+            if (otherInt == areaInt) continue;
+
+            // Skip if already connected via nav mesh
+            if (navArea_connected(areaAddr, view_as<Address>(otherInt))) continue;
+
+            // Find other area's node index
+            char key[16];
+            IntToString(otherInt, key, sizeof(key));
+            int otherIdx = -1;
+            if (!g_hAStarAreaToIndex.GetValue(key, otherIdx)) continue;
+
+            float otherCenter[3];
+            g_hAStarCenters.GetArray(otherIdx, otherCenter, 3);
+
+            float dz = otherCenter[2] - center[2];
+            float dzAbs = FloatAbs(dz);
+            float xyDist = GetVectorDistance(center, otherCenter, false);
+
+            Address otherAddr = view_as<Address>(otherInt);
+            int otherAttrs = (elevator_available) ? L4D_GetNavArea_AttributeFlags(otherAddr) : 0;
+            bool otherCrouch = (otherAttrs & NAV_BASE_CROUCH) != 0;
+            bool otherNoJump = (otherAttrs & NAV_BASE_NO_JUMP) != 0;
+            bool otherBreakable = (otherAttrs & NAV_BASE_BREAKABLEWALL) != 0;
+
+            NonMeshEdge edge;
+            edge.fromArea = areaInt;
+            edge.toArea = otherInt;
+            bool detected = false;
+
+            // --- JUMP_UP: jump from lower to higher ---
+            if (!noJumpArea && !otherNoJump && dz >= 32.0 && dz <= 72.0 && xyDist < 100.0)
+            {
+                // Validate: trace jump arc from lower to higher
+                float mid[3], jumpStart[3], jumpEnd[3];
+                jumpStart = center; jumpStart[2] += 28.0;
+                jumpEnd = otherCenter; jumpEnd[2] += 28.0;
+                mid[0] = (jumpStart[0] + jumpEnd[0]) / 2.0;
+                mid[1] = (jumpStart[1] + jumpEnd[1]) / 2.0;
+                mid[2] = (jumpStart[2] + jumpEnd[2]) / 2.0 + 64.0;
+
+                float lowMins[3] = {-10.0, -10.0, 0.0};
+                float lowMaxs[3] = { 10.0,  10.0, 32.0};
+                if (TryHull(jumpStart, mid, lowMins, lowMaxs) && TryHull(mid, jumpEnd, lowMins, lowMaxs))
+                {
+                    edge.edgeType = CONNECTED_JUMP_UP;
+                    detected = true;
+                }
+            }
+
+            // --- JUMP_DOWN: safe drop from higher to lower ---
+            if (!detected && !noJumpArea && !otherNoJump && dz <= -64.0 && dz >= -250.0 && xyDist < 150.0)
+            {
+                float downStart[3], downEnd[3];
+                downStart = center; downStart[2] -= 4.0;
+                downEnd = center; downEnd[2] = otherCenter[2] + 4.0;
+
+                float slimMins[3] = {-8.0, -8.0, 1.0};
+                float slimMaxs[3] = { 8.0,  8.0, 36.0};
+                if (TryHull(downStart, downEnd, slimMins, slimMaxs))
+                {
+                    edge.edgeType = CONNECTED_JUMP_DOWN;
+                    detected = true;
+                }
+            }
+
+            // --- STEP_DOWN: small step down ---
+            if (!detected && dz >= -72.0 && dz <= -32.0 && xyDist < 80.0)
+            {
+                float sdStart[3], sdEnd[3];
+                sdStart = center; sdStart[2] -= 2.0;
+                sdEnd = center; sdEnd[2] = otherCenter[2] + 8.0;
+
+                float slimMins[3] = {-8.0, -8.0, 1.0};
+                float slimMaxs[3] = { 8.0,  8.0, 36.0};
+                if (TryHull(sdStart, sdEnd, slimMins, slimMaxs))
+                {
+                    edge.edgeType = CONNECTED_STEP_DOWN;
+                    detected = true;
+                }
+            }
+
+            // --- VAULT: mantle over waist-high obstacle ---
+            if (!detected && dzAbs >= 40.0 && dzAbs <= 100.0 && xyDist < 72.0)
+            {
+                float vaultZ = (center[2] > otherCenter[2] ? center[2] : otherCenter[2]) + 10.0;
+                float vs[3], ve[3];
+                vs = center; vs[2] = vaultZ;
+                ve = otherCenter; ve[2] = vaultZ;
+
+                float lowMins[3] = {-10.0, -10.0, 0.0};
+                float lowMaxs[3] = { 10.0,  10.0, 32.0};
+                if (TryHull(vs, ve, lowMins, lowMaxs))
+                {
+                    edge.edgeType = CONNECTED_VAULT;
+                    detected = true;
+                }
+            }
+
+            // --- GAP_JUMP: horizontal running jump across a gap ---
+            if (!detected && dzAbs < 40.0 && xyDist >= 80.0 && xyDist <= 280.0 && !noJumpArea && !otherNoJump)
+            {
+                // Check that midpoint has no ground (it's a real gap)
+                float mid[3];
+                mid[0] = (center[0] + otherCenter[0]) / 2.0;
+                mid[1] = (center[1] + otherCenter[1]) / 2.0;
+                mid[2] = (center[2] + otherCenter[2]) / 2.0;
+
+                float midDown[3];
+                midDown = mid; midDown[2] -= 200.0;
+                TR_TraceRayFilter(mid, midDown, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
+                bool noGround = !TR_DidHit();
+
+                if (noGround)
+                {
+                    // Validate jump arc
+                    float jumpApex[3];
+                    jumpApex[0] = mid[0];
+                    jumpApex[1] = mid[1];
+                    jumpApex[2] = mid[2] + 60.0;
+
+                    float js[3], je[3];
+                    js = center; js[2] += 28.0;
+                    je = otherCenter; je[2] += 28.0;
+
+                    float lowMins[3] = {-10.0, -10.0, 0.0};
+                    float lowMaxs[3] = { 10.0,  10.0, 32.0};
+                    if (TryHull(js, jumpApex, lowMins, lowMaxs) && TryHull(jumpApex, je, lowMins, lowMaxs))
+                    {
+                        edge.edgeType = CONNECTED_GAP_JUMP;
+                        detected = true;
+                    }
+                }
+            }
+
+            // --- CROUCH: passage that requires crouching ---
+            if (!detected && dzAbs < 40.0 && xyDist < 256.0 && (crouchArea || otherCrouch))
+            {
+                float cs[3], ce[3];
+                cs = center; cs[2] += 16.0;
+                ce = otherCenter; ce[2] += 16.0;
+
+                float lowMins[3] = {-10.0, -10.0, 0.0};
+                float lowMaxs[3] = { 10.0,  10.0, 36.0};
+                if (TryHull(cs, ce, lowMins, lowMaxs))
+                {
+                    edge.edgeType = CONNECTED_CROUCH;
+                    detected = true;
+                }
+            }
+
+            // --- BREAKABLE: wall that can be destroyed ---
+            if (!detected && (breakableArea || otherBreakable))
+            {
+                edge.edgeType = CONNECTED_BREAKABLE;
+                detected = true;
+            }
+
+            if (detected)
+            {
+                g_hNonMeshEdges.PushArray(edge, sizeof(NonMeshEdge));
+            }
+        }
+
+        g_iNonMeshI++;
+        processed++;
+    }
+
+    return true; // all done
+}
+
+// Get non-mesh connections FROM a given nav area. Fills conList with NavConnection.
+stock int GetNonMeshConnections(int areaInt, ArrayList conList)
+{
+    conList.Clear();
+    if (g_hNonMeshEdges == null) return 0;
+
+    int count = g_hNonMeshEdges.Length;
+    NavConnection nc;
+    for (int i = 0; i < count; i++)
+    {
+        NonMeshEdge edge;
+        g_hNonMeshEdges.GetArray(i, edge, sizeof(NonMeshEdge));
+        if (edge.fromArea == areaInt)
+        {
+            nc.navArea = view_as<Address>(edge.toArea);
+            nc.connectiontype = edge.edgeType;
+            conList.PushArray(nc, sizeof(NavConnection));
+        }
+        else if (edge.edgeType != CONNECTED_JUMP_UP
+              && edge.edgeType != CONNECTED_JUMP_DOWN
+              && edge.edgeType != CONNECTED_STEP_DOWN
+              && edge.fromArea != areaInt
+              && edge.toArea == areaInt)
+        {
+            // Bidirectional non-mesh edge: add reverse direction
+            nc.navArea = view_as<Address>(edge.fromArea);
+            nc.connectiontype = edge.edgeType;
+            conList.PushArray(nc, sizeof(NavConnection));
+        }
+    }
+    return conList.Length;
+}
+
+// ============================================================================
+// A* Pathfinding Engine
+// ============================================================================
+
+// 3D Euclidean heuristic (admissible and consistent)
+stock float AStar_Heuristic(int nodeIndex)
+{
+    float center[3], goalCenter[3];
+    g_hAStarCenters.GetArray(nodeIndex, center, 3);
+    g_hAStarCenters.GetArray(g_iAStarGoalIndex, goalCenter, 3);
+    return GetVectorDistance(center, goalCenter, false);
+}
+
+// Edge cost between two nav areas with given connection type
+stock float AStar_EdgeCost(int fromIndex, int toIndex, ConnectionType conType)
+{
+    float c1[3], c2[3];
+    g_hAStarCenters.GetArray(fromIndex, c1, 3);
+    g_hAStarCenters.GetArray(toIndex, c2, 3);
+    float dist = GetVectorDistance(c1, c2, false);
+    return dist * GetConnectionCost(conType);
+}
+
+// Initialize A* state. Call once before starting search.
+stock void AStar_Init()
+{
+    delete g_hAStarOpen;
+    g_hAStarOpen = new ArrayList(sizeof(HeapEntry));
+
+    int nodeCount = g_hAStarNodes.Length;
+
+    delete g_hAStarGScore;
+    g_hAStarGScore = new ArrayList(1);
+    delete g_hAStarCameFrom;
+    g_hAStarCameFrom = new ArrayList(1);
+    delete g_hAStarEdgeType;
+    g_hAStarEdgeType = new ArrayList(1);
+    delete g_hAStarClosed;
+    g_hAStarClosed = new ArrayList(1);
+
+    float inf = view_as<float>(0x7F800000); // positive infinity via float bit pattern
+    for (int i = 0; i < nodeCount; i++)
+    {
+        g_hAStarGScore.Push(inf);
+        g_hAStarCameFrom.Push(-1);
+        g_hAStarEdgeType.Push(CONNECTED_NOT);
+        g_hAStarClosed.Push(0);
+    }
+
+    g_bAStarPathFound = false;
+}
+
+// Set the start node. Call after AStar_Init.
+stock void AStar_SetStart(int startIndex)
+{
+    g_hAStarGScore.Set(startIndex, 0.0);
+    g_hAStarClosed.Set(startIndex, 0);
+    float fScore = AStar_Heuristic(startIndex);
+    Heap_Push(g_hAStarOpen, startIndex, fScore, 0.0);
+}
+
+// Process up to maxNodes nodes of A*. Returns:
+//   1 = path found (reconstruct from cameFrom)
+//   0 = still searching (continue next frame)
+//  -1 = no path exists (open set empty)
+stock int AStar_SearchFrame(int maxNodes)
+{
+    if (g_hAStarOpen.Length == 0)
+        return -1;
+
+    int processed = 0;
+    HeapEntry entry;
+
+    // Reusable arrays for connections
+    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+    if (AdjNN == null) AdjNN = new ArrayList();
+
+    while (processed < maxNodes && g_hAStarOpen.Length > 0)
+    {
+        // Pop best node, skip stale entries
+        if (!Heap_Pop(g_hAStarOpen, entry))
+            return -1;
+
+        int currentIdx = entry.nodeIndex;
+
+        // Skip if already closed
+        if (g_hAStarClosed.Get(currentIdx) == 1)
+            continue;
+
+        // Skip stale entries (gScore changed since push)
+        float currentG = g_hAStarGScore.Get(currentIdx);
+        if (FloatAbs(entry.gScore - currentG) > 0.1)
+            continue;
+
+        // Goal reached?
+        if (currentIdx == g_iAStarGoalIndex)
+        {
+            g_bAStarPathFound = true;
+            g_hAStarClosed.Set(currentIdx, 1);
+            return 1;
+        }
+
+        // Mark as closed
+        g_hAStarClosed.Set(currentIdx, 1);
+
+        // Get current area
+        int areaInt = g_hAStarNodes.Get(currentIdx);
+        Address areaAddr = view_as<Address>(areaInt);
+
+        // --- Expand neighbors ---
+        // Standard nav connections
+        GetNavConnections(areaAddr, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
+
+        // Non-mesh connections
+        GetNonMeshConnections(areaInt, AdjNN);
+        // Merge AdjNN into ConAdj
+        NavConnection nc;
+        for (int i = 0; i < AdjNN.Length; i++)
+        {
+            AdjNN.GetArray(i, nc, sizeof(NavConnection));
+            ConAdj.PushArray(nc, sizeof(NavConnection));
+        }
+
+        float currentCenter[3];
+        g_hAStarCenters.GetArray(currentIdx, currentCenter, 3);
+
+        // Theta*: check if we can skip current node for some neighbors
+        int parentIdx = g_hAStarCameFrom.Get(currentIdx);
+        bool canTheta = (parentIdx >= 0);
+
+        for (int i = 0; i < ConAdj.Length; i++)
+        {
+            ConAdj.GetArray(i, nc, sizeof(NavConnection));
+            if (nc.navArea == Address_Null) continue;
+
+            int neighborInt = view_as<int>(nc.navArea);
+
+            // Find neighbor's nodeIndex
+            char key[16];
+            IntToString(neighborInt, key, sizeof(key));
+            int neighborIdx = -1;
+            if (!g_hAStarAreaToIndex.GetValue(key, neighborIdx)) continue;
+
+            // Skip if closed
+            if (g_hAStarClosed.Get(neighborIdx) == 1) continue;
+
+            // Check if blocked (unless breakable or conditional)
+            if (nc.connectiontype != CONNECTED_BREAKABLE && nc.connectiontype != CONNECTED_CONDITIONAL)
+            {
+                if (blocked_available && L4D_NavArea_IsBlocked(nc.navArea, TEAM_SURVIVOR, true))
+                    continue;
+            }
+
+            float neighborCenter[3];
+            g_hAStarCenters.GetArray(neighborIdx, neighborCenter, 3);
+
+            // Theta*: try to skip current node
+            float tentativeG;
+            int cameFrom;
+
+            if (canTheta)
+            {
+                int parentAreaInt = g_hAStarNodes.Get(parentIdx);
+                float parentCenter[3];
+                g_hAStarCenters.GetArray(parentIdx, parentCenter, 3);
+
+                // Check LOS from parent to neighbor
+                if (twopos_traversable(parentCenter, neighborCenter))
+                {
+                    float parentG = g_hAStarGScore.Get(parentIdx);
+                    float dist = GetVectorDistance(parentCenter, neighborCenter, false);
+                    tentativeG = parentG + dist;
+                    cameFrom = parentIdx;
+                }
+                else
+                {
+                    tentativeG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
+                    cameFrom = currentIdx;
+                }
+            }
+            else
+            {
+                tentativeG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
+                cameFrom = currentIdx;
+            }
+
+            float neighborG = g_hAStarGScore.Get(neighborIdx);
+            if (tentativeG < neighborG)
+            {
+                g_hAStarGScore.Set(neighborIdx, tentativeG);
+                g_hAStarCameFrom.Set(neighborIdx, cameFrom);
+                g_hAStarEdgeType.Set(neighborIdx, view_as<int>(nc.connectiontype));
+
+                float fScore = tentativeG + AStar_Heuristic(neighborIdx);
+                Heap_Push(g_hAStarOpen, neighborIdx, fScore, tentativeG);
+            }
+        }
+
+        processed++;
+    }
+
+    if (g_hAStarOpen.Length == 0)
+        return -1;
+
+    return 0;
+}
+
+// Reconstruct path from cameFrom chain (goal → start), then reverse.
+// Output: ArrayList of {navArea (Address), center (float[3]), flow (float)}
+stock void AStar_ReconstructPath(ArrayList outCells)
+{
+    outCells.Clear();
+    if (!g_bAStarPathFound) return;
+
+    // Walk backwards from goal to start
+    ArrayList reversePath = new ArrayList(2); // nodeIndex, edgeType pairs
+
+    int currentIdx = g_iAStarGoalIndex;
+    while (currentIdx >= 0)
+    {
+        int edgeType = g_hAStarEdgeType.Get(currentIdx);
+        reversePath.Push(currentIdx);
+        reversePath.Push(edgeType);
+        currentIdx = g_hAStarCameFrom.Get(currentIdx);
+    }
+
+    // Theta* Funnel-style smoothing pass: remove nodes with mutual LOS
+    // Walk the reversePath array (which is goal→start, indices at even positions)
+    int rawLen = reversePath.Length;
+    if (rawLen >= 6) // at least 3 nodes (3 indices + 3 edgeTypes)
+    {
+        ArrayList smoothIndices = new ArrayList();
+
+        // Add start node (last in reversePath)
+        int lastNodeIdx = rawLen - 2;
+        smoothIndices.Push(reversePath.Get(lastNodeIdx)); // start nodeIndex
+
+        // Greedy funnel: from current anchor, try to reach as far as possible with LOS
+        int anchor = 0; // index into smoothIndices (we just pushed start)
+        int smoothCount = 1;
+
+        for (int i = lastNodeIdx - 2; i >= 0; i -= 2) // walk forward through path (skip edgeTypes)
+        {
+            int candidateIdx = reversePath.Get(i);
+
+            float anchorCenter[3], candidateCenter[3];
+            int anchorNodeIdx = smoothIndices.Get(anchor);
+            g_hAStarCenters.GetArray(anchorNodeIdx, anchorCenter, 3);
+            g_hAStarCenters.GetArray(candidateIdx, candidateCenter, 3);
+
+            // Check if anchor can see candidate
+            if (twopos_traversable(anchorCenter, candidateCenter))
+            {
+                // Skip intermediate node(s): replace last element with candidate
+                smoothIndices.Set(anchor + 1, candidateIdx);
+            }
+            else
+            {
+                // Can't see past the last good node: commit it and advance anchor
+                smoothIndices.Push(candidateIdx);
+                anchor++;
+                smoothCount++;
+            }
+        }
+
+        // Build output Cells from smoothIndices, reversing to start→goal order
+        Cell cell;
+        for (int i = 0; i < smoothIndices.Length; i++)
+        {
+            int nodeIdx = smoothIndices.Get(i);
+            int areaInt = g_hAStarNodes.Get(nodeIdx);
+            float center[3];
+            g_hAStarCenters.GetArray(nodeIdx, center, 3);
+
+            cell.navArea = view_as<Address>(areaInt);
+            cell.center = center;
+            cell.flow = (g_fMaxFlow > 0.0) ?
+                (float(i) / float(smoothIndices.Length - 1)) * g_fMaxFlow : float(i);
+            outCells.PushArray(cell, sizeof(Cell));
+        }
+
+        delete smoothIndices;
+    }
+    else
+    {
+        // Path too short for smoothing, just reverse and output
+        Cell cell;
+        int outLen = 0;
+        for (int i = rawLen - 2; i >= 0; i -= 2)
+        {
+            int nodeIdx = reversePath.Get(i);
+            int areaInt = g_hAStarNodes.Get(nodeIdx);
+            float center[3];
+            g_hAStarCenters.GetArray(nodeIdx, center, 3);
+
+            cell.navArea = view_as<Address>(areaInt);
+            cell.center = center;
+            cell.flow = (g_fMaxFlow > 0.0) ?
+                (float(outLen) / float((rawLen / 2) - 1)) * g_fMaxFlow : float(outLen);
+            outCells.PushArray(cell, sizeof(Cell));
+            outLen++;
+        }
+    }
+
+    delete reversePath;
+}
+
+// ============================================================================
+// Start/Goal Identification (multi-strategy fallback)
+// ============================================================================
+
+// Identify the START nav area for the escape path.
+// Returns nodeIndex, or -1 if not found.
+stock int AStar_IdentifyStart()
+{
+    if (g_hAStarNodes == null || g_hAStarNodes.Length == 0) return -1;
+
+    int bestIdx = -1;
+    float bestFlow = g_fMaxFlow + 1.0;
+    bool foundPlayerStart = false;
+
+    for (int i = 0; i < g_hAStarNodes.Length; i++)
+    {
+        int areaInt = g_hAStarNodes.Get(i);
+        Address area = view_as<Address>(areaInt);
+
+        float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
+        if (flow < 0.0 || flow > g_fMaxFlow) continue;
+
+        int spawnAttrs = L4D_GetNavArea_SpawnAttributes(area);
+        bool isPlayerStart = (spawnAttrs & NAV_SPAWN_PLAYER_START) != 0;
+
+        if (isPlayerStart && flow < bestFlow)
+        {
+            bestFlow = flow;
+            bestIdx = i;
+            foundPlayerStart = true;
+        }
+        else if (!foundPlayerStart && flow < bestFlow)
+        {
+            bestFlow = flow;
+            bestIdx = i;
+        }
+    }
+
+    return bestIdx;
+}
+
+// Identify the GOAL nav area for the escape path.
+// Priority: RESCUE_VEHICLE > max flow > farthest from start by Euclidean
+stock int AStar_IdentifyGoal(int startIndex)
+{
+    if (g_hAStarNodes == null || g_hAStarNodes.Length == 0) return -1;
+
+    int bestIdx = -1;
+    float bestFlow = -1.0;
+    bool foundRescue = false;
+
+    float startCenter[3];
+    if (startIndex >= 0)
+        g_hAStarCenters.GetArray(startIndex, startCenter, 3);
+
+    for (int i = 0; i < g_hAStarNodes.Length; i++)
+    {
+        int areaInt = g_hAStarNodes.Get(i);
+        Address area = view_as<Address>(areaInt);
+
+        float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
+        if (flow < 0.0 || flow > g_fMaxFlow) continue;
+
+        int spawnAttrs = L4D_GetNavArea_SpawnAttributes(area);
+        bool isRescue = (spawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) != 0;
+
+        if (isRescue && g_hCvarFinale.IntValue < FINALE_NEVER)
+        {
+            if (flow > bestFlow || !foundRescue)
+            {
+                bestFlow = flow;
+                bestIdx = i;
+                foundRescue = true;
+            }
+        }
+
+        if (!foundRescue && flow > bestFlow)
+        {
+            bestFlow = flow;
+            bestIdx = i;
+        }
+    }
+
+    // Fallback: if no flow data, use farthest Euclidean distance from start
+    if (bestIdx < 0 && startIndex >= 0)
+    {
+        float maxDist = -1.0;
+        for (int i = 0; i < g_hAStarNodes.Length; i++)
+        {
+            float center[3];
+            g_hAStarCenters.GetArray(i, center, 3);
+            float dist = GetVectorDistance(startCenter, center, true);
+            if (dist > maxDist)
+            {
+                maxDist = dist;
+                bestIdx = i;
+            }
+        }
+    }
+
+    return bestIdx;
+}
+
+// Build the node index from all nav areas. Call once per map load.
+stock void AStar_BuildNodeIndex()
+{
+    delete g_hAStarNodes;
+    delete g_hAStarCenters;
+    delete g_hAStarAreaToIndex;
+    delete g_hSpatialHash;
+
+    ArrayList areaList = new ArrayList();
+    L4D_GetAllNavAreas(areaList);
+
+    int count = areaList.Length;
+    g_hAStarNodes = new ArrayList(1);
+    g_hAStarCenters = new ArrayList(3);
+    g_hAStarAreaToIndex = new StringMap();
+    g_hSpatialHash = new StringMap();
+
+    float center[3];
+    char key[16];
+
+    for (int i = 0; i < count; i++)
+    {
+        Address area = areaList.Get(i);
+        if (area == Address_Null) continue;
+
+        L4D_GetNavAreaCenter(area, center);
+        center[2] += 16.0;
+        if (pos_underwater(center))
+        {
+            center[2] += 16.0;
+            if (pos_underwater(center)) center[2] += 16.0;
+        }
+
+        int areaInt = view_as<int>(area);
+        g_hAStarNodes.Push(areaInt);
+        g_hAStarCenters.PushArray(center, 3);
+
+        IntToString(areaInt, key, sizeof(key));
+        g_hAStarAreaToIndex.SetValue(key, i);
+
+        // Spatial hash
+        SpatialHash_Insert(center, areaInt);
+    }
+
+    delete areaList;
+
+    #if DEBUG
+    LogMessage("[PTG] A* node index built: %d nav areas in spatial hash", count);
+    #endif
 }
 
 ///////////// SDK

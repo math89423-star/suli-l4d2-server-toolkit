@@ -17,7 +17,7 @@
 #include <dhooks>
 #include <l4d_path_to_goal>
 
-#define PLUGIN_VERSION 			"1.53 2026-07-19"
+#define PLUGIN_VERSION 			"1.55 2026-07-24"
 
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
 // Per-client: each player toggles their own guide independently
@@ -101,6 +101,24 @@ public void OnPluginStart()
 
     g_hCvarAutoInterval = CreateConVar("l4d_path_to_goal_auto_interval", "25.0",
     "Seconds between auto guide beam pulses.",FCVAR_NOTIFY, true, 5.0, true, 300.0);
+
+    g_hCvarGapDzMax = CreateConVar("l4d_path_to_goal_gap_dz_max", "200.0",
+    "Max vertical (Z) gap between guide cells before a beam is suppressed. 0=disable filter (draw all beams).",FCVAR_NOTIFY, true, 0.0, true, 2000.0);
+
+    g_hCvarGapXyRatio = CreateConVar("l4d_path_to_goal_gap_xy_ratio", "2.0",
+    "When Z gap exceeds gap_dz_max, draw beam only if horizontal distance >= Z_gap * this ratio.",FCVAR_NOTIFY, true, 0.5, true, 10.0);
+
+    g_hCvarBeamMinDist = CreateConVar("l4d_path_to_goal_beam_min_dist", "32.0",
+    "Minimum distance (units) between guide cells to draw a beam. Increase to reduce visual clutter on dense nav meshes.",FCVAR_NOTIFY, true, 0.0, true, 256.0);
+
+    g_hCvarGapVertical = CreateConVar("l4d_path_to_goal_gap_vertical", "1",
+    "When a beam is suppressed due to Z gap, draw a vertical bridge line instead: 0=skip entirely, 1=draw vertical indicator.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarStitchSteps = CreateConVar("l4d_path_to_goal_stitch_steps", "75",
+    "Max steps for nav mesh exploration when stitching gaps between disconnected escape route cells.",FCVAR_NOTIFY, true, 20.0, true, 500.0);
+
+    g_hCvarTraceHull = CreateConVar("l4d_path_to_goal_trace_hull", "1",
+    "Use player-sized hull trace to skip beams blocked by world geometry (walls). 0=draw all beams including through walls.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
   	g_hCvarMPGameMode = FindConVar("mp_gamemode");
   	g_hCvarMPGameMode.AddChangeHook(ConVarGameMode);
@@ -244,7 +262,14 @@ Action CmdRequestGuide(int client, int args)
     if (gap > 0.5)
         return Plugin_Continue; // ignore single press, wait for double-tap
 
-    // Double-tap detected — force guide prep if needed
+    // Double-tap detected — check if flow is broken first
+    if (L4D2Direct_GetMapMaxFlowDistance() <= 0.0)
+    {
+        ReplyToCommand(client, "[PTG] \x04%t", "ptg_flow_broken");
+        return Plugin_Continue;
+    }
+
+    // Force guide prep if needed
     if (!guide_ready)
     {
         Guide_Prep();
@@ -494,6 +519,8 @@ public void OnMapStart()
 // Global state for auto-guide fallback
 int g_iPrepAttempts = 0;
 int g_iFallbackStage = 0; // 0=normal, 1=fallback pending, 2=fallback done
+int g_iFallbackRetries = 0;
+#define MAX_FALLBACK_RETRIES 2
 
 void MapStarted()
 {
@@ -502,6 +529,7 @@ void MapStarted()
     timer_nav = null;
     g_iPrepAttempts = 0;
     g_iFallbackStage = 0;
+    g_iFallbackRetries = 0;
 
     // Re-create check timer on every map load (OnPluginStart only fires once;
     // OnMapEnd kills it, so we must recreate here after each map change)
@@ -552,7 +580,7 @@ Action Timer_AutoCheck(Handle timer)
     // This way !ptg is instant when a player uses it.
     if (!guide_ready && !guide_prep && g_iFallbackStage < 2)
     {
-        if (g_iPrepAttempts >= 5 && g_iFallbackStage == 0)
+        if (g_iPrepAttempts >= 2 && g_iFallbackStage == 0)
         {
             LogMessage("[PTG] Standard prep failed after %d attempts. Trying fallback nav collection...", g_iPrepAttempts);
             g_iFallbackStage = 1;
@@ -562,6 +590,29 @@ Action Timer_AutoCheck(Handle timer)
         {
             g_iPrepAttempts++;
             Guide_Prep();
+        }
+        return Plugin_Stop;
+    }
+
+    // Fallback pipeline failure recovery: if fallback was attempted (stage==2),
+    // but neither prep nor ready, the pipeline errored out. Retry a few times.
+    if (!guide_ready && !guide_prep && g_iFallbackStage >= 2)
+    {
+        if (g_iFallbackRetries < MAX_FALLBACK_RETRIES)
+        {
+            g_iFallbackRetries++;
+            LogMessage("[PTG] Fallback pipeline failed, retry %d/%d...", g_iFallbackRetries, MAX_FALLBACK_RETRIES);
+            g_iFallbackStage = 1;
+            g_iPrepAttempts = 0;
+            Guide_Prep_Fallback();
+        }
+        else
+        {
+            // Give up on fallback, try standard prep again from scratch
+            LogMessage("[PTG] Fallback pipeline exhausted retries. Resetting to standard prep attempts.");
+            g_iFallbackStage = 0;
+            g_iFallbackRetries = 0;
+            g_iPrepAttempts = 0;
         }
         return Plugin_Stop;
     }
@@ -580,104 +631,110 @@ Action Timer_AutoCheck(Handle timer)
         }
         g_iPrepAttempts = 0;
         g_iFallbackStage = 0;
+        g_iFallbackRetries = 0;
     }
 
     return Plugin_Stop;
 }
 
-// Fallback: collect ALL nav areas sorted by flow (skip ESCAPE_ROUTE requirement)
-// Works on custom maps where the nav mesh lacks proper spawn attributes
+// Fallback: Use A* over all nav areas (skip ESCAPE_ROUTE requirement).
+// If A* fails, falls through to old flow-sort method as last resort.
 void Guide_Prep_Fallback()
 {
     if (!enable || !gamemode_guidable || !map_started || !nav_started) return;
 
-    float maxFlow = L4D2Direct_GetMapMaxFlowDistance();
-    if (maxFlow <= 0.0)
+    g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
+    if (g_fMaxFlow <= 0.0)
     {
-        LogMessage("[PTG] Fallback failed: MapMaxFlowDistance = %.1f", maxFlow);
+        LogMessage("[PTG] Fallback failed: MapMaxFlowDistance = %.1f", g_fMaxFlow);
         g_iFallbackStage = 2;
         return;
     }
 
-    ArrayList fbAreas = new ArrayList();
-    L4D_GetAllNavAreas(fbAreas);
-    if (fbAreas.Length <= 1)
+    // Build A* node index if not already done
+    if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
     {
-        LogMessage("[PTG] Fallback failed: L4D_GetAllNavAreas returned %d areas", fbAreas.Length);
-        delete fbAreas;
+        AStar_BuildNodeIndex();
+    }
+
+    if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
+    {
+        LogMessage("[PTG] Fallback failed: A* node index is empty");
         g_iFallbackStage = 2;
         return;
     }
 
-    ArrayList fallbackCells = new ArrayList(sizeof(Cell));
-    Cell cell;
-    float pos[3];
-
-    for (int i = 0; i < fbAreas.Length; i++)
+    // Track rescue vehicle
+    g_fFlowRescueVehicle = -1.0;
+    g_bFoundRescueVehicle = false;
+    g_aNavRescueVehicle = Address_Null;
+    for (int i = 0; i < g_hAStarNodes.Length; i++)
     {
-        Address navArea = fbAreas.Get(i);
-        if (navArea == Address_Null) continue;
-        if (blocked_available && L4D_NavArea_IsBlocked(navArea, TEAM_SURVIVOR, true)) continue;
+        int areaInt = g_hAStarNodes.Get(i);
+        Address area = view_as<Address>(areaInt);
+        float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
+        int spawnAttrs = L4D_GetNavArea_SpawnAttributes(area);
 
-        float flow = L4D2Direct_GetTerrorNavAreaFlow(navArea);
-        if (flow < 0.0) continue;
-
-        L4D_GetNavAreaCenter(navArea, pos);
-        pos[2] += 16.0;
-        // Skip underwater positions
-        if (pos[2] < -1000.0) continue;
-
-        cell.navArea = navArea;
-        cell.center = pos;
-        cell.flow = flow;
-        fallbackCells.PushArray(cell);
+        if ((spawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) && g_hCvarFinale.IntValue < FINALE_NEVER)
+        {
+            if (flow > g_fFlowRescueVehicle)
+            {
+                g_bFoundRescueVehicle = true;
+                g_fFlowRescueVehicle = flow;
+                g_aNavRescueVehicle = area;
+            }
+        }
     }
 
-    delete fbAreas;
-
-    if (fallbackCells.Length < 2)
+    // Set up rescue vehicle cells
+    delete RescueVehicleCells;
+    RescueVehicleCells = new ArrayList(sizeof(Cell));
+    if (g_bFoundRescueVehicle)
     {
-        LogMessage("[PTG] Fallback failed: only %d cells with valid flow collected", fallbackCells.Length);
-        delete fallbackCells;
+        Cell rvc;
+        rvc.navArea = g_aNavRescueVehicle;
+        rvc.flow = g_fFlowRescueVehicle;
+        float rpos[3];
+        L4D_GetNavAreaCenter(g_aNavRescueVehicle, rpos);
+        rpos[2] += 16.0;
+        if (pos_underwater(rpos)) rpos[2] += 16.0;
+        rvc.center = rpos;
+        RescueVehicleCells.PushArray(rvc);
+    }
+
+    finale_stitched = false;
+    finale_backwards = false;
+
+    // Identify start and goal
+    int startIdx = AStar_IdentifyStart();
+    int goalIdx = AStar_IdentifyGoal(startIdx);
+
+    if (startIdx < 0 || goalIdx < 0)
+    {
+        LogMessage("[PTG] Fallback A*: cannot identify start (%d) or goal (%d)", startIdx, goalIdx);
         g_iFallbackStage = 2;
         return;
     }
 
-    // Sort by flow (ascending: start → end)
-    fallbackCells.SortCustom(SortFlow);
+    g_aAStarStart = g_hAStarNodes.Get(startIdx);
+    g_aAStarGoal = g_hAStarNodes.Get(goalIdx);
+    g_iAStarGoalIndex = goalIdx;
 
-    // Build g_GuideCells (dedup identical flows)
-    delete g_GuideCells;
-    g_GuideCells = new ArrayList(sizeof(Cell));
+    LogMessage("[PTG] Fallback A*: %d nav areas, start=%d goal=%d",
+        g_hAStarNodes.Length, startIdx, goalIdx);
 
-    Cell cellPrev;
-    fallbackCells.GetArray(0, cell, sizeof(Cell));
-    g_GuideCells.PushArray(cell);
-    cellPrev = cell;
+    // Initialize A* and start search
+    AStar_Init();
+    AStar_SetStart(startIdx);
+    DetectNonMeshConnections_Init();
 
-    for (int i = 1; i < fallbackCells.Length; i++)
-    {
-        fallbackCells.GetArray(i, cell, sizeof(Cell));
-        // Skip if same flow as previous (duplicate)
-        if (cell.flow == cellPrev.flow) continue;
-        g_GuideCells.PushArray(cell);
-        cellPrev = cell;
-    }
-
-    delete fallbackCells;
-
-    if (g_GuideCells.Length < 2)
-    {
-        LogMessage("[PTG] Fallback failed: only %d unique flow cells after dedup", g_GuideCells.Length);
-        delete g_GuideCells;
-        g_iFallbackStage = 2;
-        return;
-    }
-
-    guide_ready = true;
-    guide_prep = false;
+    // Jump into pipeline at STAGE_ASTAR
+    g_iPrepStage = STAGE_ASTAR;
+    g_iLoop = 0;
+    guide_prep = true;
     g_iFallbackStage = 2;
-    LogMessage("[PTG] Fallback success: %d guide cells built (bypassing ESCAPE_ROUTE requirement)", g_GuideCells.Length);
+
+    RequestFrame(OnFramePrep, true);
 }
 
 // Wrapper: expose SortFlow from include to our fallback code
@@ -701,15 +758,108 @@ void AutoGuideDrawPath(int client = -1)
 
     int count = g_GuideCells.Length;
 
-    // Trail: thin 1.0→3.5, close to ground, subtle shimmer
-    for (int i = 0; i < count - 1; i++)
+    // v2.2: For per-client requests, start drawing from the nearest cell to the player
+    // instead of from the map start. This auto-updates as the player moves because
+    // the redraw timer fires every 0.6s. Each redraw finds the new nearest cell.
+    int startIndex = 0;
+    if (client > 0 && IsValidClient(client) && IsPlayerAlive(client))
+    {
+        float clientPos[3];
+        GetClientAbsOrigin(client, clientPos);
+        float bestDist = -1.0;
+        int bestIdx = 0;
+        for (int j = 0; j < count; j++)
+        {
+            Cell cell;
+            g_GuideCells.GetArray(j, cell, sizeof(Cell));
+            float d = GetVectorDistance(clientPos, cell.center, true); // sq dist
+            if (bestDist < 0.0 || d < bestDist)
+            {
+                bestDist = d;
+                bestIdx = j;
+            }
+        }
+        // Start 1-2 cells before nearest so the player can see the immediate next step
+        startIndex = bestIdx > 1 ? bestIdx - 2 : 0;
+    }
+
+    // On very dense nav meshes (complex 3rd-party maps), subsample to avoid
+    // overwhelming the client's temp-entity buffer and to keep beams readable.
+    int maxBeams = g_hCvarMax.IntValue;
+    int step = 1;
+    if (count > maxBeams && maxBeams > 0)
+    {
+        step = count / maxBeams;
+        if (step < 1) step = 1;
+    }
+
+    // Trail: thin, close to ground, subtle amber shimmer
+    int trailDrawn = 0;
+    for (int i = startIndex; i < count - 1 && trailDrawn < maxBeams; i += step)
     {
         Cell cell1, cell2;
         g_GuideCells.GetArray(i, cell1, sizeof(Cell));
         g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
 
+        // v2.2: Skip beams blocked by world geometry (hull trace validation).
+        // Doors, breakables, and trigger barriers are entity-based and pass through.
+        // Draw a small beacon dot at the break point so players know the path continues.
+        if (g_bBeamWalkable != null && i < g_bBeamWalkable.Length && g_bBeamWalkable.Get(i) == 0)
+        {
+            // Beacon: bright small dot at the blocked cell position — "path continues here"
+            float beaconPos[3], beaconEnd[3];
+            beaconPos = cell1.center;
+            beaconEnd = cell1.center;
+            beaconEnd[2] += 6.0; // tiny vertical line as marker
+            int color_beacon[4] = {255, 100, 50, 255}; // bright red-orange
+            TE_SetupBeamPoints(beaconPos, beaconEnd, laser, 0, 0, 0,
+                duration * 0.5, 2.0, 4.0, 0, 0.0, color_beacon, 0);
+            if (client > 0) TE_SendToClient(client);
+            else TE_SendToAll();
+            trailDrawn++;
+            continue;
+        }
+
         float distSq = GetVectorDistance(cell1.center, cell2.center, true);
-        if (distSq < 4096.0) continue;
+        float minDist = g_hCvarBeamMinDist.FloatValue;
+        if (minDist > 0.0 && distSq < minDist * minDist) continue;
+
+        // Skip or bridge beams between cells at drastically different heights.
+        // On multi-floor buildings this prevents confusing diagonal beams through walls.
+        float dz = FloatAbs(cell1.center[2] - cell2.center[2]);
+        float dzMax = g_hCvarGapDzMax.FloatValue;
+        float xyRatio = g_hCvarGapXyRatio.FloatValue;
+        float distXY = GetVectorDistance(cell1.center, cell2.center, false);
+
+        if (dzMax > 0.0 && dz > dzMax && distXY < dz * xyRatio)
+        {
+            // Draw vertical bridge instead of skipping entirely
+            if (g_hCvarGapVertical.BoolValue)
+            {
+                float vpos[3];
+                vpos[0] = cell1.center[0];
+                vpos[1] = cell1.center[1];
+                vpos[2] = cell2.center[2];
+
+                // Vertical segment: thin, cool blue-white tint
+                int color_vert[4] = {200, 220, 255, 180};
+                TE_SetupBeamPoints(cell1.center, vpos, laser, 0, 0, 0,
+                    duration, 0.3, 3.0, 0, 0.0, color_vert, 0);
+                if (client > 0) TE_SendToClient(client);
+                else TE_SendToAll();
+
+                // Horizontal bridge to next cell
+                float pos1_bridge[3], pos2_bridge[3];
+                pos1_bridge = vpos; pos1_bridge[2] -= 13.0;
+                pos2_bridge = cell2.center; pos2_bridge[2] -= 13.0;
+                TE_SetupBeamPoints(pos1_bridge, pos2_bridge, laser, 0, 0, 0,
+                    duration, 0.6, 2.0, 0, 0.0, color_trail, 0);
+                if (client > 0) TE_SendToClient(client);
+                else TE_SendToAll();
+                trailDrawn += 2;
+            }
+            continue;
+        }
 
         float pos1[3], pos2[3];
         pos1 = cell1.center; pos1[2] -= 13.0;
@@ -719,11 +869,13 @@ void AutoGuideDrawPath(int client = -1)
             duration, 0.8, 2.5, 0, 0.0, color_trail, 0);
         if (client > 0) TE_SendToClient(client);
         else TE_SendToAll();
+        trailDrawn++;
     }
 
-    // Arrows every 5 cells — clear directional indicators
-    int chevronInterval = 5;
-    for (int i = 0; i < count - 1; i += chevronInterval)
+    // Arrows — clear directional indicators, subsampled for dense meshes
+    int chevronInterval = 5 * step;
+    if (chevronInterval < 5) chevronInterval = 5;
+    for (int i = startIndex; i < count - 1; i += chevronInterval)
     {
         Cell cell1, cell2;
         g_GuideCells.GetArray(i, cell1, sizeof(Cell));
@@ -769,6 +921,13 @@ void AutoGuideDrawPath(int client = -1)
             duration, 3.5, 1.0, 0, 0.0, color_chevron, 0);
         if (client > 0) TE_SendToClient(client);
         else TE_SendToAll();
+    }
+
+    // Warn if beam cap was hit (indicates subsampling may be hiding cells)
+    if (trailDrawn >= maxBeams && count > maxBeams)
+    {
+        LogMessage("[PTG] Beam cap reached: %d trails drawn out of %d cells (max %d, step %d). Increase l4d_path_to_goal_max or adjust filter cvars.",
+            trailDrawn, count, maxBeams, step);
     }
 }
 
