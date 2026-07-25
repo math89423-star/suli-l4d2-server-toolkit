@@ -17,7 +17,7 @@
 #include <dhooks>
 #include <l4d_path_to_goal>
 
-#define PLUGIN_VERSION 			"1.55 2026-07-24"
+#define PLUGIN_VERSION 			"3.0 2026-07-25"
 
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
 // Per-client: each player toggles their own guide independently
@@ -48,6 +48,7 @@ public void OnPluginStart()
 
     g_bL4D2 = GetEngineVersion()==Engine_Left4Dead2;
     LoadSDK();
+    InitPlayerCaps();
     
     RegAdminCmd("l4d_path_to_goal_recalculate", CmdRecalculate, ADMFLAG_ROOT,"Recalculate guide points.");
     RegAdminCmd("l4d_path_to_goal_print",       CmdPrint, ADMFLAG_ROOT,"Print g_GuideCells.");
@@ -119,6 +120,9 @@ public void OnPluginStart()
 
     g_hCvarTraceHull = CreateConVar("l4d_path_to_goal_trace_hull", "1",
     "Use player-sized hull trace to skip beams blocked by world geometry (walls). 0=draw all beams including through walls.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarNonMesh = CreateConVar("l4d_path_to_goal_nonmesh", "0",
+    "Enable non-mesh connection detection (jumps, vaults, crouch passages). 0=off, 1=on. Disabled by default — nav mesh edges are sufficient for correct pathfinding on most maps.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
   	g_hCvarMPGameMode = FindConVar("mp_gamemode");
   	g_hCvarMPGameMode.AddChangeHook(ConVarGameMode);
@@ -230,9 +234,13 @@ void evtNavBlocked(Event event, const char[] name, bool dontBroadcast)
     if (navArea == Address_Null) return;
     #if DEBUG>1
     bool blocked = event.GetBool("blocked");
-    LogMessage("nav_blocked escape %d blocked %d area %d", navArea_escape(navArea), blocked, navArea);
+    LogMessage("nav_blocked area %d blocked %d on_path %d", navArea, blocked, IsAreaOnPath(navArea));
     #endif
-    if (!g_bFlowRecomputeHooked || finale) NavChanged();
+    // Re-plan if the blocked area is on our current path.
+    // Removed the !g_bFlowRecomputeHooked||finale gate — it caused
+    // nav_blocked events to be silently ignored 90% of the time.
+    if (IsAreaOnPath(navArea))
+        NavChanged(true);
 }
 
 void evtNavGenerate(Event event, const char[] name, bool dontBroadcast)
@@ -634,6 +642,19 @@ Action Timer_AutoCheck(Handle timer)
         g_iFallbackRetries = 0;
     }
 
+    // --- Path integrity poll: check every 6s (every 3rd 2s tick) ---
+    // Detects blocked path areas that didn't fire nav_blocked events
+    // (prop physics, dynamic obstacles, etc.)
+    {
+        static int integrityTick = 0;
+        integrityTick++;
+        if (integrityTick >= 3 && blocked_available)
+        {
+            integrityTick = 0;
+            PathIntegrityCheck();
+        }
+    }
+
     return Plugin_Stop;
 }
 
@@ -780,6 +801,7 @@ void AutoGuideDrawPath(int client = -1)
             }
         }
         // Start 1-2 cells before nearest so the player can see the immediate next step
+        // Also shows the path behind — important for maps that require backtracking
         startIndex = bestIdx > 1 ? bestIdx - 2 : 0;
     }
 

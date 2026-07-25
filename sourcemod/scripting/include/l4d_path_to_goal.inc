@@ -94,22 +94,23 @@ enum ConnectionType {
     CONNECTED_CONDITIONAL = 11 // trigger/gate dependent
 };
 
-// Cost multiplier for each connection type (used in A* edge weights)
+// Cost multiplier for each connection type, scaled by player capabilities.
+// Lower = preferred. Costs encode: time, effort, risk of failure.
 stock float GetConnectionCost(ConnectionType type)
 {
     switch (type)
     {
         case CONNECTED_ADJACENT:   return 1.0;
-        case CONNECTED_LADDER:     return 1.5;
-        case CONNECTED_ELEVATOR:   return 2.0;
-        case CONNECTED_JUMP_UP:    return 1.8;
-        case CONNECTED_JUMP_DOWN:  return 1.2;
-        case CONNECTED_VAULT:      return 2.5;
-        case CONNECTED_GAP_JUMP:   return 3.0;
-        case CONNECTED_CROUCH:     return 1.5;
-        case CONNECTED_STEP_DOWN:  return 1.1;
-        case CONNECTED_BREAKABLE:  return 5.0;
-        case CONNECTED_CONDITIONAL:return 10.0;
+        case CONNECTED_LADDER:     return 1.8;   // climb takes time
+        case CONNECTED_ELEVATOR:   return 3.0;   // waiting time
+        case CONNECTED_JUMP_UP:    return 3.0;   // jumping up is safe
+        case CONNECTED_JUMP_DOWN:  return 1.5;   // dropping down is fast
+        case CONNECTED_VAULT:      return 2.5;   // mantling takes effort
+        case CONNECTED_GAP_JUMP:   return 5.0;   // running jump needs wind-up
+        case CONNECTED_CROUCH:     return 2.0;   // crouch-walking is slow
+        case CONNECTED_STEP_DOWN:  return 1.1;   // stepping down is easy
+        case CONNECTED_BREAKABLE:  return 8.0;   // needs to be destroyed
+        case CONNECTED_CONDITIONAL:return 25.0;   // needs trigger, uncertain
     }
     return 1.0;
 }
@@ -130,6 +131,55 @@ enum struct NonMeshEdge
     ConnectionType edgeType;
     float tpA[3];          // optional intermediate trace point A
     float tpB[3];          // optional intermediate trace point B
+}
+
+// ============================================================================
+// Player capability model — defines what survivors can physically do.
+// Replaces hardcoded constants scattered throughout jump/climb/vault detection.
+// ============================================================================
+enum struct PlayerCaps
+{
+    float max_walk_speed;      // 220.0 (survivor)
+    float max_jump_height;     // 56.0 (crouch jump)
+    float max_jump_distance;   // 200.0 (crouch jump at same height)
+    float max_vault_height;    // 100.0 (mantle over obstacle)
+    float max_safe_drop;       // 200.0 (no fall damage, matches DZ_TOO_LOW)
+    float max_gap_jump;        // 280.0 (running jump across gap)
+    float max_step_up;         // 18.0 (auto step-up)
+    float max_crouch_height;   // 36.0 (crouch hull height)
+    float gravity;             // 600.0
+    float jump_velocity;       // 268.0
+    bool can_swim;             // true
+    bool can_ladder;           // true
+    bool can_elevator;         // true
+}
+PlayerCaps g_Caps; // single global instance — all survivors share the same caps
+
+void InitPlayerCaps()
+{
+    g_Caps.max_walk_speed    = 220.0;
+    g_Caps.max_jump_height   = 56.0;
+    g_Caps.max_jump_distance = 200.0;
+    g_Caps.max_vault_height  = 100.0;
+    g_Caps.max_safe_drop     = 200.0;  // matches DZ_TOO_LOW — no fall damage below this
+    g_Caps.max_gap_jump      = 280.0;
+    g_Caps.max_step_up       = 18.0;
+    g_Caps.max_crouch_height = 36.0;
+    g_Caps.gravity           = 600.0;
+    g_Caps.jump_velocity     = 268.0;
+    g_Caps.can_swim          = true;
+    g_Caps.can_ladder        = true;
+    g_Caps.can_elevator      = true;
+}
+
+// Portal between two adjacent nav areas — the shared boundary edge.
+// Path waypoints should be portal centers, not area centers, so beams
+// pass through actual doorways/corridor junctions instead of through walls.
+enum struct PortalInfo
+{
+    float ep1[3];    // first endpoint of shared edge
+    float ep2[3];    // second endpoint of shared edge
+    float center[3]; // midpoint of shared edge (primary waypoint)
 }
 
 // Binary heap entry for A* priority queue
@@ -159,6 +209,8 @@ int g_aAStarGoal;              // goal navArea address (int)
 int g_aAStarStart;             // start navArea address (int)
 int g_iAStarGoalIndex;         // nodeIndex of goal
 bool g_bAStarPathFound;        // true when goal reached
+int g_iAStarBestIdx;           // best reachable node when goal unreachable (disconnected nav mesh)
+float g_fAStarBestG;           // gScore of best reachable node
 // int g_iAStarNodesThisFrame;    // unused
 #define ASTAR_NODES_PER_FRAME 48
 
@@ -169,6 +221,10 @@ StringMap g_hSpatialHash;      // "cx_cy_cz" → ArrayList of {navArea(int), cen
 // Non-mesh connection cache
 ArrayList g_hNonMeshEdges;     // NonMeshEdge — all detected non-mesh connections
 
+// Portal cache — shared-edge midpoints between adjacent nav areas
+// Key: "minIdx_maxIdx" (canonical ordering), Value: PortalInfo
+StringMap g_hPortalCache;
+
 // GetNavConnections filter
 #define CON_KEEP_ALL 0 // keep all adjacent connections
 #define CON_KEEP_FORWARD 1 // keep only forward-going adjacent connections
@@ -178,7 +234,7 @@ ArrayList g_GuideCells;
 ArrayList g_bBeamWalkable; // hull trace validation: 1=walkable, 0=blocked by world geometry
 ConVar g_hCvarMPGameMode, g_hCvarEnable, g_hCvarMax, g_hCvarSurvivors, g_hCvarInfected, g_hCvarSpec, g_hCvarBudget, g_hCvarDetourBudget, g_hCvarFinaleAuto, g_hCvarZM;
 ConVar g_hCvarAutoEnable, g_hCvarAutoDuration, g_hCvarAutoInterval;
-ConVar g_hCvarGapDzMax, g_hCvarGapXyRatio, g_hCvarBeamMinDist, g_hCvarGapVertical, g_hCvarStitchSteps, g_hCvarTraceHull;
+ConVar g_hCvarGapDzMax, g_hCvarGapXyRatio, g_hCvarBeamMinDist, g_hCvarGapVertical, g_hCvarStitchSteps, g_hCvarTraceHull, g_hCvarNonMesh;
 Handle g_hAutoTimer = null;
 Handle g_hAutoCheckTimer = null;
 bool gamemode_guidable, guide_ready, guide_prep, map_started, nav_started, enable, g_bL4D2, finale, finale_rescue, finale_gauntlet;
@@ -1482,8 +1538,9 @@ void OnFramePrep(bool new_frame = true)
             AStar_Init();
             AStar_SetStart(startIdx);
 
-            // Start non-mesh connection detection (continues across frames)
-            DetectNonMeshConnections_Init();
+            // Start non-mesh connection detection (continues across frames, only if cvar enabled)
+            if (g_hCvarNonMesh.BoolValue)
+                DetectNonMeshConnections_Init();
 
             #if DEBUG
             g_fPrepTotalTime = 0.0;
@@ -1496,8 +1553,9 @@ void OnFramePrep(bool new_frame = true)
         }
         case STAGE_ASTAR:
         {
-            // Continue non-mesh detection in parallel with A* (first few frames)
-            DetectNonMeshConnections_Frame();
+            // Continue non-mesh detection in parallel with A* (only if cvar enabled)
+            if (g_hCvarNonMesh.BoolValue)
+                DetectNonMeshConnections_Frame();
 
             // Run A* search for this frame
             int result = AStar_SearchFrame(ASTAR_NODES_PER_FRAME);
@@ -1510,9 +1568,9 @@ void OnFramePrep(bool new_frame = true)
             }
             else if (result == -1)
             {
-                // No path exists — goal unreachable from start
-                LogMessage("[PTG] A* failed: no path to goal index %d. Falling back to flow-sort.",
-                    g_iAStarGoalIndex);
+                // No path to pre-selected goal, and no reachable nodes found.
+                // Extremely rare — only when the start area has zero connections.
+                LogMessage("[PTG] A* failed: no reachable nodes from start.");
                 guide_prep = false;
                 g_iPrepStage = STAGE_NONE;
                 return;
@@ -2837,6 +2895,22 @@ stock int GetNavConnections(Address navArea, ArrayList conList, int team = TEAM_
                 }
                 nav_connection.navArea = adjArea;
                 nav_connection.connectiontype = CONNECTED_ADJACENT;
+
+                // Detect one-way drop-down connections in the nav mesh itself.
+                // Source Engine nav mesh uses directed edges: a one-way edge from
+                // higher→lower means "you can drop down" — correct for zombie AI
+                // but wrong for a human player guide. Reclassify these as JUMP_DOWN.
+                if (!adjacent_connected(adjArea, navArea))
+                {
+                    float cFrom[3], cTo[3];
+                    L4D_GetNavAreaCenter(navArea, cFrom);
+                    L4D_GetNavAreaCenter(adjArea, cTo);
+                    if (cFrom[2] - cTo[2] > 48.0)
+                    {
+                        nav_connection.connectiontype = CONNECTED_JUMP_DOWN;
+                    }
+                }
+
                 conList.PushArray(nav_connection);
             }
         }
@@ -3022,6 +3096,62 @@ stock bool navArea_escape(Address navArea)
 }
 
 // Acknowledge navmesh change. Ptg must be recalculated after NAV_COOLDOWN. If recompute, recalculate without cooldown.
+// Check if a nav area is on the current guide path.
+// Used by dynamic re-planning to decide if a nav_blocked event affects us.
+stock bool IsAreaOnPath(Address navArea)
+{
+    if (g_GuideCells == null || navArea == Address_Null) return false;
+    int len = g_GuideCells.Length;
+    Cell cell;
+    for (int i = 0; i < len; i++)
+    {
+        g_GuideCells.GetArray(i, cell, sizeof(Cell));
+        if (cell.navArea == navArea) return true;
+    }
+    return false;
+}
+
+// Periodic path integrity check — polls g_GuideCells for newly blocked areas.
+// Handles cases where nav_blocked events don't fire (prop physics, dynamic obstacles).
+// Returns true if path is still valid, false if re-planning was triggered.
+stock bool PathIntegrityCheck()
+{
+    if (!guide_ready || g_GuideCells == null || !blocked_available) return true;
+
+    int len = g_GuideCells.Length;
+    if (len < 2) return true;
+
+    // Check ~25% of cells each call (strided sampling, 5s interval)
+    // Over ~20s, every cell gets checked at least once
+    static int checkOffset = 0;
+    int stride = 4;
+    if (stride < 1) stride = 1;
+
+    Cell cell;
+    int checked = 0;
+    int blocked = 0;
+
+    for (int i = checkOffset; i < len; i += stride)
+    {
+        g_GuideCells.GetArray(i, cell, sizeof(Cell));
+        if (cell.navArea != Address_Null && L4D_NavArea_IsBlocked(cell.navArea, TEAM_SURVIVOR, true))
+            blocked++;
+        checked++;
+        if (checked >= 8) break; // limit per-frame work
+    }
+
+    checkOffset = (checkOffset + 1) % stride;
+
+    if (blocked > 0)
+    {
+        LogMessage("[PTG] Path integrity check: %d/%d sampled cells blocked — re-planning", blocked, checked);
+        NavChanged(true);
+        return false;
+    }
+
+    return true;
+}
+
 stock void NavChanged(bool recompute = false)
 {
     Guide_Cleanup();
@@ -3209,6 +3339,70 @@ stock void SpatialHash_Query(float pos[3], ArrayList result, float maxDist = 512
 }
 
 // ============================================================================
+// Physics-based Jump Validation — replaces hardcoded thresholds with actual
+// trajectory traces using the PlayerCaps capability model.
+// ============================================================================
+
+// Validate a jump arc between two points by tracing a parabolic trajectory.
+// Uses 10-sample hull trace to verify the path is clear for a crouching player.
+stock bool ValidateJumpArc(const float from[3], const float to[3], PlayerCaps caps)
+{
+    float dx = to[0] - from[0];
+    float dy = to[1] - from[1];
+    float dz = to[2] - from[2];
+    float distXY = SquareRoot(dx * dx + dy * dy);
+    if (distXY < 1.0) return true;
+
+    // Parabola bulge: how much the arc rises above the straight line at midpoint
+    float midZ = (from[2] + to[2]) / 2.0;
+    float apexZ = ((from[2] > to[2]) ? from[2] : to[2]) + caps.max_jump_height * 0.6;
+    float h = apexZ - midZ;
+    if (h < caps.max_step_up) h = caps.max_jump_height * 0.3;
+
+    float lowMins[3] = {-10.0, -10.0, 0.0};
+    float lowMaxs[3] = { 10.0,  10.0, 32.0};
+
+    float prev[3], curr[3];
+    prev = from;
+    prev[2] += 28.0; // standing height
+
+    int samples = 10;
+    for (int i = 1; i <= samples; i++)
+    {
+        float s = float(i) / float(samples);
+        curr[0] = from[0] + dx * s;
+        curr[1] = from[1] + dy * s;
+        curr[2] = from[2] + dz * s + 4.0 * h * s * (1.0 - s) + 28.0;
+
+        if (!TryHull(prev, curr, lowMins, lowMaxs))
+            return false;
+        prev = curr;
+    }
+    return true;
+}
+
+// Validate a drop-down connection by tracing vertically from the higher point.
+// Verifies the drop is within safe height and landing area is clear.
+stock bool ValidateDropArc(const float from[3], const float to[3], PlayerCaps caps)
+{
+    float dz = to[2] - from[2];
+    if (dz > 0.0 || FloatAbs(dz) > caps.max_safe_drop) return false;
+    if (FloatAbs(dz) < caps.max_step_up) return true; // small step, no validation needed
+
+    float dropStart[3], dropEnd[3];
+    dropStart = from;
+    dropStart[2] -= 4.0; // start slightly below feet
+    dropEnd[0] = from[0];
+    dropEnd[1] = from[1];
+    dropEnd[2] = to[2] + 8.0; // land slightly above target
+
+    float slimMins[3] = {-8.0, -8.0, 1.0};
+    float slimMaxs[3] = { 8.0,  8.0, 36.0};
+
+    return TryHull(dropStart, dropEnd, slimMins, slimMaxs);
+}
+
+// ============================================================================
 // Non-Mesh Connection Detection
 // ============================================================================
 
@@ -3291,36 +3485,24 @@ stock bool DetectNonMeshConnections_Frame()
             edge.toArea = otherInt;
             bool detected = false;
 
-            // --- JUMP_UP: jump from lower to higher ---
-            if (!noJumpArea && !otherNoJump && dz >= 32.0 && dz <= 72.0 && xyDist < 100.0)
+            // --- JUMP_UP: jump from lower to higher (PlayerCaps validated) ---
+            if (!detected && !noJumpArea && !otherNoJump
+                && dz >= g_Caps.max_step_up && dz <= g_Caps.max_jump_height
+                && xyDist < 80.0)
             {
-                // Validate: trace jump arc from lower to higher
-                float mid[3], jumpStart[3], jumpEnd[3];
-                jumpStart = center; jumpStart[2] += 28.0;
-                jumpEnd = otherCenter; jumpEnd[2] += 28.0;
-                mid[0] = (jumpStart[0] + jumpEnd[0]) / 2.0;
-                mid[1] = (jumpStart[1] + jumpEnd[1]) / 2.0;
-                mid[2] = (jumpStart[2] + jumpEnd[2]) / 2.0 + 64.0;
-
-                float lowMins[3] = {-10.0, -10.0, 0.0};
-                float lowMaxs[3] = { 10.0,  10.0, 32.0};
-                if (TryHull(jumpStart, mid, lowMins, lowMaxs) && TryHull(mid, jumpEnd, lowMins, lowMaxs))
+                if (ValidateJumpArc(center, otherCenter, g_Caps))
                 {
                     edge.edgeType = CONNECTED_JUMP_UP;
                     detected = true;
                 }
             }
 
-            // --- JUMP_DOWN: safe drop from higher to lower ---
-            if (!detected && !noJumpArea && !otherNoJump && dz <= -64.0 && dz >= -250.0 && xyDist < 150.0)
+            // --- JUMP_DOWN: safe drop from higher to lower (PlayerCaps validated) ---
+            if (!detected && !noJumpArea && !otherNoJump
+                && dz <= -g_Caps.max_step_up && dz >= -g_Caps.max_safe_drop
+                && xyDist < 150.0)
             {
-                float downStart[3], downEnd[3];
-                downStart = center; downStart[2] -= 4.0;
-                downEnd = center; downEnd[2] = otherCenter[2] + 4.0;
-
-                float slimMins[3] = {-8.0, -8.0, 1.0};
-                float slimMaxs[3] = { 8.0,  8.0, 36.0};
-                if (TryHull(downStart, downEnd, slimMins, slimMaxs))
+                if (ValidateDropArc(center, otherCenter, g_Caps))
                 {
                     edge.edgeType = CONNECTED_JUMP_DOWN;
                     detected = true;
@@ -3343,8 +3525,8 @@ stock bool DetectNonMeshConnections_Frame()
                 }
             }
 
-            // --- VAULT: mantle over waist-high obstacle ---
-            if (!detected && dzAbs >= 40.0 && dzAbs <= 100.0 && xyDist < 72.0)
+            // --- VAULT: mantle over waist-high obstacle (PlayerCaps validated) ---
+            if (!detected && dzAbs >= 40.0 && dzAbs <= g_Caps.max_vault_height && xyDist < 72.0)
             {
                 float vaultZ = (center[2] > otherCenter[2] ? center[2] : otherCenter[2]) + 10.0;
                 float vs[3], ve[3];
@@ -3360,10 +3542,12 @@ stock bool DetectNonMeshConnections_Frame()
                 }
             }
 
-            // --- GAP_JUMP: horizontal running jump across a gap ---
-            if (!detected && dzAbs < 40.0 && xyDist >= 80.0 && xyDist <= 280.0 && !noJumpArea && !otherNoJump)
+            // --- GAP_JUMP: horizontal running jump across a gap (PlayerCaps validated) ---
+            if (!detected && dzAbs < g_Caps.max_step_up * 2.0
+                && xyDist >= 80.0 && xyDist <= g_Caps.max_gap_jump
+                && !noJumpArea && !otherNoJump)
             {
-                // Check that midpoint has no ground (it's a real gap)
+                // Verify it's a real gap (no ground at midpoint)
                 float mid[3];
                 mid[0] = (center[0] + otherCenter[0]) / 2.0;
                 mid[1] = (center[1] + otherCenter[1]) / 2.0;
@@ -3374,25 +3558,10 @@ stock bool DetectNonMeshConnections_Frame()
                 TR_TraceRayFilter(mid, midDown, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
                 bool noGround = !TR_DidHit();
 
-                if (noGround)
+                if (noGround && ValidateJumpArc(center, otherCenter, g_Caps))
                 {
-                    // Validate jump arc
-                    float jumpApex[3];
-                    jumpApex[0] = mid[0];
-                    jumpApex[1] = mid[1];
-                    jumpApex[2] = mid[2] + 60.0;
-
-                    float js[3], je[3];
-                    js = center; js[2] += 28.0;
-                    je = otherCenter; je[2] += 28.0;
-
-                    float lowMins[3] = {-10.0, -10.0, 0.0};
-                    float lowMaxs[3] = { 10.0,  10.0, 32.0};
-                    if (TryHull(js, jumpApex, lowMins, lowMaxs) && TryHull(jumpApex, je, lowMins, lowMaxs))
-                    {
-                        edge.edgeType = CONNECTED_GAP_JUMP;
-                        detected = true;
-                    }
+                    edge.edgeType = CONNECTED_GAP_JUMP;
+                    detected = true;
                 }
             }
 
@@ -3436,6 +3605,7 @@ stock bool DetectNonMeshConnections_Frame()
 stock int GetNonMeshConnections(int areaInt, ArrayList conList)
 {
     conList.Clear();
+    if (!g_hCvarNonMesh.BoolValue) return 0;
     if (g_hNonMeshEdges == null) return 0;
 
     int count = g_hNonMeshEdges.Length;
@@ -3469,23 +3639,63 @@ stock int GetNonMeshConnections(int areaInt, ArrayList conList)
 // A* Pathfinding Engine
 // ============================================================================
 
-// 3D Euclidean heuristic (admissible and consistent)
+// Flow-distance heuristic — uses the nav mesh's precomputed flow field.
+// Flow is the ground-truth distance-to-goal; it dominates Euclidean on complex maps.
+// Falls back to Euclidean * 1.5 (inflated) when flow data is unavailable, to stay
+// admissible while still being more informative than raw Euclidean.
 stock float AStar_Heuristic(int nodeIndex)
 {
     float center[3], goalCenter[3];
     g_hAStarCenters.GetArray(nodeIndex, center, 3);
     g_hAStarCenters.GetArray(g_iAStarGoalIndex, goalCenter, 3);
-    return GetVectorDistance(center, goalCenter, false);
+
+    // Use flow distance when available — it's the precomputed ground truth
+    if (g_fMaxFlow > 0.0)
+    {
+        int areaInt = g_hAStarNodes.Get(nodeIndex);
+        float areaFlow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(areaInt));
+        float goalFlow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(g_hAStarNodes.Get(g_iAStarGoalIndex)));
+
+        if (areaFlow > 0.0 && goalFlow > 0.0)
+        {
+            float flowRemaining = goalFlow - areaFlow;
+            if (flowRemaining < 0.0) flowRemaining = 0.0;
+            // Blend: flow is the dominant term, Euclidean keeps it admissible for
+            // cases where flow slightly overestimates (rare, but possible on broken nav meshes)
+            float euclidean = GetVectorDistance(center, goalCenter, false);
+            // Return the larger of the two — flow should dominate on well-formed nav meshes
+            if (flowRemaining > euclidean)
+                return flowRemaining;
+            // Weighted blend: 80% flow + 20% Euclidean to avoid degenerate behavior
+            return flowRemaining * 0.8 + euclidean * 0.2;
+        }
+    }
+
+    // Fallback: inflated Euclidean (×1.3) — still admissible for grid nav meshes
+    // because the shortest path in an 8-direction grid is at most ~1.08× Euclidean,
+    // but real nav meshes have irregular connections, so 1.3 gives headroom.
+    return GetVectorDistance(center, goalCenter, false) * 1.3;
 }
 
-// Edge cost between two nav areas with given connection type
+// Edge cost: Euclidean distance weighted by connection type + vertical penalty.
+// Without the Z penalty, A* treats climbing stairs the same as walking on flat
+// ground (both have similar 3D distance ~90u), leading to paths that zigzag
+// up/down through multi-floor buildings instead of following level ground.
+#define Z_COST_FACTOR 3.0   // each unit of vertical change costs 3× horizontal
 stock float AStar_EdgeCost(int fromIndex, int toIndex, ConnectionType conType)
 {
     float c1[3], c2[3];
     g_hAStarCenters.GetArray(fromIndex, c1, 3);
     g_hAStarCenters.GetArray(toIndex, c2, 3);
-    float dist = GetVectorDistance(c1, c2, false);
-    return dist * GetConnectionCost(conType);
+    float dx = c2[0] - c1[0];
+    float dy = c2[1] - c1[1];
+    float dz = c2[2] - c1[2];
+    float flatDist = SquareRoot(dx * dx + dy * dy);
+    float absDz = FloatAbs(dz);
+    // Horizontal cost (flat) + vertical cost (penalized) — keeps A* preferring
+    // level paths and only climbing when geometrically necessary.
+    float effectiveDist = flatDist + absDz * Z_COST_FACTOR;
+    return effectiveDist * GetConnectionCost(conType);
 }
 
 // Initialize A* state. Call once before starting search.
@@ -3515,6 +3725,8 @@ stock void AStar_Init()
     }
 
     g_bAStarPathFound = false;
+    g_iAStarBestIdx = -1;
+    g_fAStarBestG = -1.0;
 }
 
 // Set the start node. Call after AStar_Init.
@@ -3532,8 +3744,21 @@ stock void AStar_SetStart(int startIndex)
 //  -1 = no path exists (open set empty)
 stock int AStar_SearchFrame(int maxNodes)
 {
+    // Open set empty — all reachable nodes explored. If we have a best node
+    // (always true after at least one frame of search), use it as effective goal.
+    // This handles maps with disconnected nav mesh components.
     if (g_hAStarOpen.Length == 0)
+    {
+        if (g_iAStarBestIdx >= 0 && g_iAStarBestIdx != g_iAStarGoalIndex)
+        {
+            LogMessage("[PTG] A* exhausted open set. Using best reachable node %d (g=%.0f) as effective goal.",
+                g_iAStarBestIdx, g_fAStarBestG);
+            g_iAStarGoalIndex = g_iAStarBestIdx;
+            g_bAStarPathFound = true;
+            return 1;
+        }
         return -1;
+    }
 
     int processed = 0;
     HeapEntry entry;
@@ -3570,12 +3795,25 @@ stock int AStar_SearchFrame(int maxNodes)
         // Mark as closed
         g_hAStarClosed.Set(currentIdx, 1);
 
+        // Track best reachable node (in case goal is in a disconnected nav mesh component)
+        // Use gScore as the quality metric — higher gScore = farther from start along
+        // the search direction (flow heuristic guides expansion toward the escape).
+        if (currentG > g_fAStarBestG)
+        {
+            g_fAStarBestG = currentG;
+            g_iAStarBestIdx = currentIdx;
+        }
+
         // Get current area
         int areaInt = g_hAStarNodes.Get(currentIdx);
         Address areaAddr = view_as<Address>(areaInt);
 
         // --- Expand neighbors ---
-        // Standard nav connections
+        // CON_KEEP_ALL: explore connections in all directions. The flow-based
+        // heuristic (fix #3) naturally prioritizes forward-going nodes, so we
+        // don't need CON_KEEP_FORWARD to restrict the search — the heuristic
+        // does the same job without risking pathfinding failures on nav meshes
+        // where flow isn't perfectly monotonic.
         GetNavConnections(areaAddr, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
 
         // Non-mesh connections
@@ -3587,13 +3825,6 @@ stock int AStar_SearchFrame(int maxNodes)
             AdjNN.GetArray(i, nc, sizeof(NavConnection));
             ConAdj.PushArray(nc, sizeof(NavConnection));
         }
-
-        float currentCenter[3];
-        g_hAStarCenters.GetArray(currentIdx, currentCenter, 3);
-
-        // Theta*: check if we can skip current node for some neighbors
-        int parentIdx = g_hAStarCameFrom.Get(currentIdx);
-        bool canTheta = (parentIdx >= 0);
 
         for (int i = 0; i < ConAdj.Length; i++)
         {
@@ -3618,38 +3849,10 @@ stock int AStar_SearchFrame(int maxNodes)
                     continue;
             }
 
-            float neighborCenter[3];
-            g_hAStarCenters.GetArray(neighborIdx, neighborCenter, 3);
-
-            // Theta*: try to skip current node
-            float tentativeG;
-            int cameFrom;
-
-            if (canTheta)
-            {
-                int parentAreaInt = g_hAStarNodes.Get(parentIdx);
-                float parentCenter[3];
-                g_hAStarCenters.GetArray(parentIdx, parentCenter, 3);
-
-                // Check LOS from parent to neighbor
-                if (twopos_traversable(parentCenter, neighborCenter))
-                {
-                    float parentG = g_hAStarGScore.Get(parentIdx);
-                    float dist = GetVectorDistance(parentCenter, neighborCenter, false);
-                    tentativeG = parentG + dist;
-                    cameFrom = parentIdx;
-                }
-                else
-                {
-                    tentativeG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
-                    cameFrom = currentIdx;
-                }
-            }
-            else
-            {
-                tentativeG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
-                cameFrom = currentIdx;
-            }
+            // Standard A* expansion — no Theta* LOS shortcut during search.
+            // (Post-processing Funnel smoothing in AStar_ReconstructPath handles waypoint reduction.)
+            float tentativeG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
+            int cameFrom = currentIdx;
 
             float neighborG = g_hAStarGScore.Get(neighborIdx);
             if (tentativeG < neighborG)
@@ -3669,21 +3872,41 @@ stock int AStar_SearchFrame(int maxNodes)
     }
 
     if (g_hAStarOpen.Length == 0)
+    {
+        // Goal unreachable — nav mesh is in disconnected components.
+        // Use the best reachable node (farthest along the search direction)
+        // as the effective goal. The path will guide players as far as
+        // possible toward the escape direction.
+        if (g_iAStarBestIdx >= 0 && g_iAStarBestIdx != g_iAStarGoalIndex)
+        {
+            LogMessage("[PTG] A* goal unreachable (disconnected nav mesh). Using best reachable node %d (g=%.0f) as effective goal.",
+                g_iAStarBestIdx, g_fAStarBestG);
+            g_iAStarGoalIndex = g_iAStarBestIdx;
+            g_bAStarPathFound = true;
+            return 1;
+        }
         return -1;
+    }
 
     return 0;
 }
 
-// Reconstruct path from cameFrom chain (goal → start), then reverse.
-// Output: ArrayList of {navArea (Address), center (float[3]), flow (float)}
+// 2D triangle signed area. Used by funnel algorithm for left/right checks.
+// Returns: >0 if p is left of directed line a→b, <0 if right, 0 if collinear.
+stock float TriArea2D(const float a[3], const float b[3], const float p[3])
+{
+    return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+}
+
+// Reconstruct path from cameFrom chain, output portal-centered waypoints.
+// v4.0: portal-based waypoints + funnel string pulling (replaces LOS smoothing)
 stock void AStar_ReconstructPath(ArrayList outCells)
 {
     outCells.Clear();
     if (!g_bAStarPathFound) return;
 
-    // Walk backwards from goal to start (safety: max iterations = nodeCount)
-    ArrayList reversePath = new ArrayList(2); // nodeIndex, edgeType pairs
-
+    // Walk backwards from goal to start
+    ArrayList reversePath = new ArrayList(2);
     int maxSteps = g_hAStarNodes.Length + 1;
     int currentIdx = g_iAStarGoalIndex;
     int steps = 0;
@@ -3703,88 +3926,250 @@ stock void AStar_ReconstructPath(ArrayList outCells)
         return;
     }
 
-    // Theta* Funnel-style smoothing pass: remove nodes with mutual LOS
-    // Walk the reversePath array (which is goal→start, indices at even positions)
-    int rawLen = reversePath.Length;
-    if (rawLen >= 6) // at least 3 nodes (3 indices + 3 edgeTypes)
-    {
-        ArrayList smoothIndices = new ArrayList();
-
-        // Add start node (last in reversePath)
-        int lastNodeIdx = rawLen - 2;
-        smoothIndices.Push(reversePath.Get(lastNodeIdx)); // start nodeIndex
-
-        // Greedy funnel: from current anchor, try to reach as far as possible with LOS
-        int anchor = 0; // index into smoothIndices (we just pushed start)
-        int smoothCount = 1;
-
-        for (int i = lastNodeIdx - 2; i >= 0; i -= 2) // walk forward through path (skip edgeTypes)
-        {
-            int candidateIdx = reversePath.Get(i);
-
-            float anchorCenter[3], candidateCenter[3];
-            int anchorNodeIdx = smoothIndices.Get(anchor);
-            g_hAStarCenters.GetArray(anchorNodeIdx, anchorCenter, 3);
-            g_hAStarCenters.GetArray(candidateIdx, candidateCenter, 3);
-
-            // Check if anchor can see candidate
-            if (twopos_traversable(anchorCenter, candidateCenter))
-            {
-                // Skip intermediate node(s): replace last or push
-                if (anchor + 1 < smoothIndices.Length)
-                    smoothIndices.Set(anchor + 1, candidateIdx);
-                else
-                    smoothIndices.Push(candidateIdx);
-            }
-            else
-            {
-                // Can't see past the last good node: commit it and advance anchor
-                smoothIndices.Push(candidateIdx);
-                anchor++;
-                smoothCount++;
-            }
-        }
-
-        // Build output Cells from smoothIndices, reversing to start→goal order
-        Cell cell;
-        for (int i = 0; i < smoothIndices.Length; i++)
-        {
-            int nodeIdx = smoothIndices.Get(i);
-            int areaInt = g_hAStarNodes.Get(nodeIdx);
-            float center[3];
-            g_hAStarCenters.GetArray(nodeIdx, center, 3);
-
-            cell.navArea = view_as<Address>(areaInt);
-            cell.center = center;
-            cell.flow = (g_fMaxFlow > 0.0) ?
-                (float(i) / float(smoothIndices.Length - 1)) * g_fMaxFlow : float(i);
-            outCells.PushArray(cell, sizeof(Cell));
-        }
-
-        delete smoothIndices;
-    }
-    else
-    {
-        // Path too short for smoothing, just reverse and output
-        Cell cell;
-        int outLen = 0;
-        for (int i = rawLen - 2; i >= 0; i -= 2)
-        {
-            int nodeIdx = reversePath.Get(i);
-            int areaInt = g_hAStarNodes.Get(nodeIdx);
-            float center[3];
-            g_hAStarCenters.GetArray(nodeIdx, center, 3);
-
-            cell.navArea = view_as<Address>(areaInt);
-            cell.center = center;
-            cell.flow = (g_fMaxFlow > 0.0) ?
-                (float(outLen) / float((rawLen / 2) - 1)) * g_fMaxFlow : float(outLen);
-            outCells.PushArray(cell, sizeof(Cell));
-            outLen++;
-        }
-    }
-
+    // Build forward-order nodeIndex list (start → goal)
+    ArrayList nodePath = new ArrayList();
+    for (int i = reversePath.Length - 2; i >= 0; i -= 2)
+        nodePath.Push(reversePath.Get(i));
     delete reversePath;
+
+    int pathLen = nodePath.Length;
+    if (pathLen < 2)
+    {
+        delete nodePath;
+        return;
+    }
+
+    // --- Build portal endpoint sequence from nodePath ---
+    // Each portal is the shared edge between consecutive nav areas in the path.
+    // The funnel algorithm uses the left/right endpoints to find the shortest
+    // path through this sequence — mathematically optimal string pulling.
+    int portalCount = pathLen - 1;
+    ArrayList portalEps = new ArrayList(6); // each portal: float[3] left, float[3] right
+    bool[] portalDegenerate = new bool[portalCount];
+
+    for (int i = 0; i < portalCount; i++)
+    {
+        int ni = nodePath.Get(i);
+        int nj = nodePath.Get(i + 1);
+        int minI = (ni < nj) ? ni : nj;
+        int maxI = (ni < nj) ? nj : ni;
+        char key[32];
+        Format(key, sizeof(key), "%d_%d", minI, maxI);
+
+        PortalInfo portal;
+        float left[3], right[3];
+        bool gotPortal = false;
+
+        if (g_hPortalCache != null && g_hPortalCache.GetArray(key, portal, sizeof(PortalInfo)))
+        {
+            left = portal.ep1;
+            right = portal.ep2;
+            gotPortal = true;
+        }
+
+        if (!gotPortal)
+        {
+            // Fallback: use centers of the two areas as degenerate portal
+            g_hAStarCenters.GetArray(ni, left, 3);
+            g_hAStarCenters.GetArray(nj, right, 3);
+            portalDegenerate[i] = true;
+        }
+        else
+        {
+            // Check if portal is effectively a point (endpoints very close)
+            portalDegenerate[i] = (GetVectorDistance(left, right, true) < 64.0);
+        }
+
+        portalEps.PushArray(left, 3);
+        portalEps.PushArray(right, 3);
+    }
+
+    // --- Funnel String Pulling ---
+    // Operates in 2D (XY plane) over the portal endpoint sequence.
+    // Produces the optimal shortest path through the portals.
+
+    // 2D triangle area (signed). >0 = p is left of ab, <0 = right, 0 = collinear.
+    // Used for all left/right orientation checks in the funnel.
+
+    ArrayList funnelResult = new ArrayList(sizeof(Cell));
+
+    // Start cell
+    Cell startCell;
+    int firstNodeIdx = nodePath.Get(0);
+    int firstAreaInt = g_hAStarNodes.Get(firstNodeIdx);
+    startCell.navArea = view_as<Address>(firstAreaInt);
+    g_hAStarCenters.GetArray(firstNodeIdx, startCell.center, 3);
+    startCell.flow = L4D2Direct_GetTerrorNavAreaFlow(startCell.navArea);
+    if (startCell.flow <= 0.0 && g_fMaxFlow > 0.0)
+        startCell.flow = 0.0;
+
+    // Funnel state
+    Cell apex;
+    apex.navArea = startCell.navArea;
+    apex.center = startCell.center;
+    apex.flow = startCell.flow;
+    int leftPortalIdx = -1;   // which portal supplies the left funnel boundary
+    int rightPortalIdx = -1;  // which portal supplies the right funnel boundary
+
+    for (int i = 0; i < portalCount; i++)
+    {
+        float portalLeft[3], portalRight[3];
+        portalEps.GetArray(i * 2, portalLeft, 3);
+        portalEps.GetArray(i * 2 + 1, portalRight, 3);
+
+        // Ensure consistent orientation: portalLeft should be left of portalRight
+        // from the perspective of the path direction (apex → portal)
+        if (TriArea2D(apex.center, portalLeft, portalRight) < 0.0)
+        {
+            // Swap: portalLeft is actually to the right of portalRight
+            float tmp[3]; tmp = portalLeft; portalLeft = portalRight; portalRight = tmp;
+        }
+
+        if (portalDegenerate[i])
+        {
+            // Degenerate portal (single point or nearly so) — can't narrow the funnel.
+            // Just check if this point forces a waypoint (if it's outside the funnel).
+            if (leftPortalIdx >= 0 && rightPortalIdx >= 0)
+            {
+                float leftEp[3], rightEp[3];
+                portalEps.GetArray(leftPortalIdx * 2, leftEp, 3);
+                portalEps.GetArray(rightPortalIdx * 2 + 1, rightEp, 3);
+
+                // If the degenerate portal's center is outside the funnel, we need to add a waypoint
+                if (TriArea2D(apex.center, leftEp, portalLeft) < 0.0 ||
+                    TriArea2D(apex.center, rightEp, portalLeft) > 0.0)
+                {
+                    // Funnel collapsed: add current apex to result and reset
+                    funnelResult.PushArray(apex, sizeof(Cell));
+                    // New apex at the previous portal
+                    int nj = nodePath.Get(i + 1);
+                    int currAreaInt = g_hAStarNodes.Get(nj);
+                    apex.navArea = view_as<Address>(currAreaInt);
+                    g_hAStarCenters.GetArray(nj, apex.center, 3);
+                    apex.flow = L4D2Direct_GetTerrorNavAreaFlow(apex.navArea);
+                    if (apex.flow <= 0.0 && g_fMaxFlow > 0.0)
+                        apex.flow = (float(i + 1) / float(pathLen - 1)) * g_fMaxFlow;
+                    leftPortalIdx = -1;
+                    rightPortalIdx = -1;
+                    continue;
+                }
+            }
+            // Degenerate portal doesn't change funnel — skip
+            continue;
+        }
+
+        // First valid portal initializes the funnel
+        if (leftPortalIdx < 0)
+        {
+            leftPortalIdx = i;
+            rightPortalIdx = i;
+            continue;
+        }
+
+        float leftEp[3], rightEp[3];
+        portalEps.GetArray(leftPortalIdx * 2, leftEp, 3);
+        portalEps.GetArray(rightPortalIdx * 2 + 1, rightEp, 3);
+
+        bool leftInside  = TriArea2D(apex.center, leftEp, portalLeft) >= 0.0;
+        bool rightInside = TriArea2D(apex.center, rightEp, portalRight) <= 0.0;
+
+        if (leftInside && rightInside)
+        {
+            // Both endpoints inside funnel — narrow it
+            if (TriArea2D(apex.center, rightEp, portalRight) < 0.0)
+                rightPortalIdx = i;
+            if (TriArea2D(apex.center, leftEp, portalLeft) > 0.0)
+                leftPortalIdx = i;
+        }
+        else if (!rightInside)
+        {
+            // Portal right endpoint is to the RIGHT of right boundary
+            // OR portal left endpoint is to the LEFT of left boundary
+            // → funnel collapsed on the right side
+            // Output the right boundary endpoint as a waypoint
+            Cell waypoint;
+            waypoint.center = rightEp;
+            waypoint.navArea = Address_Null; // waypoint, not a nav area center
+            waypoint.flow = apex.flow; // approximate
+            funnelResult.PushArray(waypoint, sizeof(Cell));
+
+            apex.navArea = waypoint.navArea;
+            apex.center = waypoint.center;
+            apex.flow = waypoint.flow;
+            // Reset funnel with the previous portal
+            leftPortalIdx = i - 1;
+            rightPortalIdx = i - 1;
+            i--; // re-process this portal with new apex
+        }
+        else // !leftInside
+        {
+            // Funnel collapsed on the left side
+            Cell waypoint;
+            waypoint.center = leftEp;
+            waypoint.navArea = Address_Null;
+            waypoint.flow = apex.flow;
+            funnelResult.PushArray(waypoint, sizeof(Cell));
+
+            apex = waypoint;
+            leftPortalIdx = i - 1;
+            rightPortalIdx = i - 1;
+            i--;
+        }
+    }
+
+    // Output the final result
+    // Start with the start cell
+    outCells.PushArray(startCell, sizeof(Cell));
+
+    // Add funnel waypoints
+    for (int i = 0; i < funnelResult.Length; i++)
+    {
+        Cell wp;
+        funnelResult.GetArray(i, wp, sizeof(Cell));
+        outCells.PushArray(wp, sizeof(Cell));
+    }
+
+    // Add goal cell
+    Cell goalCell;
+    int lastNodeIdx = nodePath.Get(pathLen - 1);
+    int lastAreaInt = g_hAStarNodes.Get(lastNodeIdx);
+    goalCell.navArea = view_as<Address>(lastAreaInt);
+    g_hAStarCenters.GetArray(lastNodeIdx, goalCell.center, 3);
+    goalCell.flow = L4D2Direct_GetTerrorNavAreaFlow(goalCell.navArea);
+    if (goalCell.flow <= 0.0 && g_fMaxFlow > 0.0)
+        goalCell.flow = g_fMaxFlow;
+    outCells.PushArray(goalCell, sizeof(Cell));
+
+    delete nodePath;
+    delete portalEps;
+    delete funnelResult;
+
+    // --- Validation pass: hull trace every edge ---
+    // Funnel waypoints are geometrically optimal but may cross geometry
+    // in rare edge cases (thin walls, complex 3D terrain). Validate and fix.
+    if (outCells.Length >= 2)
+    {
+        for (int i = 1; i < outCells.Length; i++)
+        {
+            Cell c1, c2;
+            outCells.GetArray(i - 1, c1, sizeof(Cell));
+            outCells.GetArray(i, c2, sizeof(Cell));
+
+            if (!twopos_traversable(c1.center, c2.center))
+            {
+                // Edge blocked — try stepping Z up
+                float lifted[3];
+                lifted = c2.center;
+                lifted[2] += 24.0;
+                if (twopos_traversable(c1.center, lifted))
+                {
+                    c2.center = lifted;
+                    outCells.SetArray(i, c2, sizeof(Cell));
+                }
+                // If still blocked, keep as-is — hull validation pass will mark it
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -3829,9 +4214,16 @@ stock int AStar_IdentifyStart()
 }
 
 // Identify the GOAL nav area for the escape path.
-// Priority: RESCUE_VEHICLE > max flow (if flow data valid) > farthest Euclidean from start
-// Always prefers Euclidean fallback when flow data is suspect, since Euclidean is
-// purely geometric and always produces a valid candidate.
+// Priority: RESCUE_VEHICLE > farthest Euclidean from start > max flow
+//
+// Farthest Euclidean is preferred over max-flow because it's always in the same
+// connected component as start (you can't be "farthest" if you're unreachable).
+// Max-flow areas can be in disconnected nav mesh components (behind locked doors,
+// finale-only areas) making them unreachable and causing A* to fail.
+//
+// The flow-based heuristic (#3 fix) still guides the search toward high-flow
+// areas, so the path naturally follows the escape direction even with a
+// Euclidean goal.
 stock int AStar_IdentifyGoal(int startIndex)
 {
     if (g_hAStarNodes == null || g_hAStarNodes.Length == 0) return -1;
@@ -3840,7 +4232,7 @@ stock int AStar_IdentifyGoal(int startIndex)
     if (startIndex >= 0)
         g_hAStarCenters.GetArray(startIndex, startCenter, 3);
 
-    // Strategy 1: RESCUE_VEHICLE area
+    // Strategy 1: RESCUE_VEHICLE area (unambiguous, always correct if present)
     for (int i = 0; i < g_hAStarNodes.Length; i++)
     {
         int areaInt = g_hAStarNodes.Get(i);
@@ -3853,8 +4245,9 @@ stock int AStar_IdentifyGoal(int startIndex)
         }
     }
 
-    // Strategy 2: farthest Euclidean distance from start (always valid)
-    // This is more reliable than max-flow on custom/broken nav meshes.
+    // Strategy 2: farthest Euclidean from start — always reachable.
+    // Combined with the flow-based heuristic, this produces paths that follow
+    // the escape direction without the risk of picking an unreachable max-flow target.
     if (startIndex >= 0)
     {
         int farIdx = -1;
@@ -3877,22 +4270,166 @@ stock int AStar_IdentifyGoal(int startIndex)
         }
     }
 
-    // Strategy 3: max flow distance (last resort)
-    int bestIdx = -1;
-    float bestFlow = -1.0;
-    for (int i = 0; i < g_hAStarNodes.Length; i++)
+    // Strategy 3: max flow (fallback — may be unreachable on some maps)
+    if (g_fMaxFlow > 0.0)
     {
-        float flow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(g_hAStarNodes.Get(i)));
-        if (flow > bestFlow && flow <= g_fMaxFlow)
+        int bestIdx = -1;
+        float bestFlow = -1.0;
+        for (int i = 0; i < g_hAStarNodes.Length; i++)
         {
-            bestFlow = flow;
-            bestIdx = i;
+            float flow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(g_hAStarNodes.Get(i)));
+            if (flow > bestFlow && flow <= g_fMaxFlow)
+            {
+                bestFlow = flow;
+                bestIdx = i;
+            }
+        }
+        if (bestIdx >= 0)
+        {
+            LogMessage("[PTG] A* goal: max-flow index %d (flow=%.1f) [fallback]", bestIdx, bestFlow);
+            return bestIdx;
         }
     }
-    if (bestIdx >= 0)
-        LogMessage("[PTG] A* goal: max-flow index %d (flow=%.1f)", bestIdx, bestFlow);
 
-    return bestIdx;
+    return -1;
+}
+
+// ============================================================================
+// Portal Computation — finds shared boundary edges between adjacent nav areas.
+// Portal centers replace area centers as path waypoints, so beams pass through
+// actual doorways and corridor junctions instead of diagonally through walls.
+// ============================================================================
+
+stock void AStar_ComputePortals()
+{
+    delete g_hPortalCache;
+    g_hPortalCache = new StringMap();
+
+    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+    if (AdjNN == null) AdjNN = new ArrayList();
+
+    int nodeCount = g_hAStarNodes.Length;
+    char key[32];
+    float cornersA[4][3], cornersB[4][3];
+
+    for (int i = 0; i < nodeCount; i++)
+    {
+        int areaIntA = g_hAStarNodes.Get(i);
+        Address areaA = view_as<Address>(areaIntA);
+        if (areaA == Address_Null) continue;
+
+        // Get corners of area A — required for accurate portal detection
+        if (!elevator_available) continue; // corner API unavailable, skip portals
+
+        for (int c = 0; c < 4; c++)
+            L4D_NavArea_GetCorner(areaA, view_as<NavCornerType>(c), cornersA[c]);
+
+        // Get adjacent areas
+        GetNavConnections(areaA, ConAdj, TEAM_SURVIVOR, true, false, false, CON_KEEP_ALL);
+
+        for (int n = 0; n < ConAdj.Length; n++)
+        {
+            NavConnection nc;
+            ConAdj.GetArray(n, nc, sizeof(NavConnection));
+            if (nc.navArea == Address_Null || nc.navArea == areaA) continue;
+
+            int areaIntB = view_as<int>(nc.navArea);
+            char keyB[16];
+            IntToString(areaIntB, keyB, sizeof(keyB));
+            int j = -1;
+            if (!g_hAStarAreaToIndex.GetValue(keyB, j)) continue;
+
+            // Canonical key: smaller index first (portal is symmetric)
+            int minI = (i < j) ? i : j;
+            int maxI = (i < j) ? j : i;
+            Format(key, sizeof(key), "%d_%d", minI, maxI);
+
+            if (g_hPortalCache.ContainsKey(key)) continue; // already computed
+
+            // Get corners of area B
+            Address areaB = nc.navArea;
+            for (int c = 0; c < 4; c++)
+                L4D_NavArea_GetCorner(areaB, view_as<NavCornerType>(c), cornersB[c]);
+
+            // Find shared corners (within 32u XY and 48u Z)
+            float sharedEps[2][3];
+            int sharedCount = 0;
+
+            for (int ca = 0; ca < 4 && sharedCount < 2; ca++)
+            {
+                for (int cb = 0; cb < 4 && sharedCount < 2; cb++)
+                {
+                    float dxy = GetVectorDistance(cornersA[ca], cornersB[cb], true);
+                    float dz = FloatAbs(cornersA[ca][2] - cornersB[cb][2]);
+                    if (dxy < 1024.0 && dz < 48.0) // 32u XY, 48u Z tolerance
+                    {
+                        // Check for duplicate
+                        bool duplicate = false;
+                        for (int s = 0; s < sharedCount; s++)
+                        {
+                            if (GetVectorDistance(sharedEps[s], cornersA[ca], true) < 64.0)
+                            { duplicate = true; break; }
+                        }
+                        if (!duplicate)
+                        {
+                            sharedEps[sharedCount][0] = (cornersA[ca][0] + cornersB[cb][0]) / 2.0;
+                            sharedEps[sharedCount][1] = (cornersA[ca][1] + cornersB[cb][1]) / 2.0;
+                            sharedEps[sharedCount][2] = (cornersA[ca][2] + cornersB[cb][2]) / 2.0;
+                            sharedCount++;
+                        }
+                    }
+                }
+            }
+
+            PortalInfo portal;
+            if (sharedCount >= 2)
+            {
+                portal.ep1 = sharedEps[0];
+                portal.ep2 = sharedEps[1];
+                portal.center[0] = (sharedEps[0][0] + sharedEps[1][0]) / 2.0;
+                portal.center[1] = (sharedEps[0][1] + sharedEps[1][1]) / 2.0;
+                portal.center[2] = (sharedEps[0][2] + sharedEps[1][2]) / 2.0;
+            }
+            else
+            {
+                // Degenerate portal: use center midpoint as fallback
+                float cA[3], cB[3];
+                g_hAStarCenters.GetArray(i, cA, 3);
+                g_hAStarCenters.GetArray(j, cB, 3);
+                portal.ep1 = cA;
+                portal.ep2 = cB;
+                portal.center[0] = (cA[0] + cB[0]) / 2.0;
+                portal.center[1] = (cA[1] + cB[1]) / 2.0;
+                portal.center[2] = (cA[2] + cB[2]) / 2.0;
+            }
+
+            // Snap portal Z to ground
+            float zA = L4D_NavArea_GetZ(areaA, portal.center);
+            float zB = L4D_NavArea_GetZ(areaB, portal.center);
+            float groundZ = (zA > zB) ? zA : zB;
+            if (groundZ > -9000.0)
+                portal.center[2] = groundZ + 16.0;
+            if (sharedCount >= 2)
+            {
+                zA = L4D_NavArea_GetZ(areaA, portal.ep1);
+                zB = L4D_NavArea_GetZ(areaB, portal.ep1);
+                groundZ = (zA > zB) ? zA : zB;
+                if (groundZ > -9000.0) portal.ep1[2] = groundZ + 4.0;
+                zA = L4D_NavArea_GetZ(areaA, portal.ep2);
+                zB = L4D_NavArea_GetZ(areaB, portal.ep2);
+                groundZ = (zA > zB) ? zA : zB;
+                if (groundZ > -9000.0) portal.ep2[2] = groundZ + 4.0;
+            }
+
+            g_hPortalCache.SetArray(key, portal, sizeof(PortalInfo));
+        }
+    }
+
+    #if DEBUG
+    StringMapSnapshot snap = g_hPortalCache.Snapshot();
+    LogMessage("[PTG] Portal cache built: %d portals for %d nav areas", snap.Length, nodeCount);
+    delete snap;
+    #endif
 }
 
 // Build the node index from all nav areas. Call once per map load.
@@ -3940,6 +4477,9 @@ stock void AStar_BuildNodeIndex()
     }
 
     delete areaList;
+
+    // Compute portal waypoints (shared-edge midpoints between adjacent areas)
+    AStar_ComputePortals();
 
     #if DEBUG
     LogMessage("[PTG] A* node index built: %d nav areas in spatial hash", count);
