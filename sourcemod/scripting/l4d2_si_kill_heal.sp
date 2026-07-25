@@ -5,14 +5,14 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "1.6"
-#define CHAT_PREFIX "\x04[杀敌回血]\x01"
+#define PLUGIN_VERSION "1.7"
+#define CHAT_PREFIX "\x04[队友互助]\x01"
 
 public Plugin myinfo =
 {
-    name        = "L4D2 SI Kill Heal",
+    name        = "L4D2 Teammate Support Heal",
     author      = "Claude",
-    description = "Heal temp health (虚血) for X% of killed SI/Witch max HP (halved, ceil, min 1); +20 real HP on heal/revive teammate; extends bleed-out if incapacitated; chat notification",
+    description = "+5 temp HP on protect teammate; +20 real HP on heal/revive/defib teammate; SI/Witch kill heal disabled",
     version     = PLUGIN_VERSION,
     url         = ""
 };
@@ -20,25 +20,28 @@ public Plugin myinfo =
 ConVar g_cvHealPercent;
 ConVar g_cvMaxHP;
 ConVar g_cvMaxBuffer;
+ConVar g_cvProtectHP;
 
 public void OnPluginStart()
 {
     g_cvHealPercent = CreateConVar("sm_si_kill_heal_percent", "1.0", "Percentage of SI max HP to heal on kill", _, true, 0.0, true, 100.0);
     g_cvMaxHP       = CreateConVar("sm_si_kill_heal_max",     "100", "Maximum effective HP (real + temp) after heal (standing)", _, true, 1.0, true, 9999.0);
     g_cvMaxBuffer   = CreateConVar("sm_si_kill_heal_buffer",  "300", "Maximum health buffer when incapacitated", _, true, 1.0, true, 9999.0);
+    g_cvProtectHP    = CreateConVar("sm_si_kill_heal_protect", "5",   "Temp HP awarded for protecting a teammate (killing SI that was attacking them)", _, true, 0.0, true, 100.0);
 
-    HookEvent("player_death",   Event_PlayerDeath);
-    HookEvent("witch_killed",   Event_WitchKilled);
-    HookEvent("heal_success",   Event_HealSuccess);
-    HookEvent("revive_success", Event_ReviveSuccess);
+    HookEvent("player_death",        Event_PlayerDeath);
+    // HookEvent("witch_killed",        Event_WitchKilled);  // DISABLED v1.7
+    HookEvent("heal_success",        Event_HealSuccess);
+    HookEvent("revive_success",      Event_ReviveSuccess);
+    HookEvent("defibrillator_used",  Event_DefibrillatorUsed);
 
     AutoExecConfig(true, "l4d2_si_kill_heal");
 }
 
 // ============================================================================
-// SI / Witch Kill → temp health (虚血)
+// SI / Witch Kill → temp health (虚血) — DISABLED (v1.7)
 // ============================================================================
-
+/*
 void HealSurvivor(int client, int maxHealth, const char[] siName)
 {
     float healPercent = g_cvHealPercent.FloatValue;
@@ -101,6 +104,37 @@ void HealSurvivor(int client, int maxHealth, const char[] siName)
     if (added > 0.0)
         PrintToChat(client, "%s 击杀 \x05%s\x01，获得 \x04+%.0f\x01 虚血", CHAT_PREFIX, siName, added);
 }
+*/
+
+// ============================================================================
+// Protect Teammate → +N temp health (虚血)
+// ============================================================================
+
+void AddTempHealth(int client, float amount, const char[] reason)
+{
+    float curHealth = float(GetClientHealth(client));
+    float curBuffer = GetEntPropFloat(client, Prop_Send, "m_healthBuffer");
+    float curTotal  = curHealth + curBuffer;
+    float maxTotal  = g_cvMaxHP.FloatValue;
+
+    if (curTotal >= maxTotal)
+        return;
+
+    float newTotal = curTotal + amount;
+    if (newTotal > maxTotal)
+        newTotal = maxTotal;
+
+    float newBuffer = newTotal - curHealth;
+    if (newBuffer < 0.0)
+        newBuffer = 0.0;
+
+    float added = newBuffer - curBuffer;
+    SetEntPropFloat(client, Prop_Send, "m_healthBuffer", newBuffer);
+    SetEntPropFloat(client, Prop_Send, "m_healthBufferTime", GetGameTime());
+
+    if (added > 0.0)
+        PrintToChat(client, "%s %s，获得 \x04+%.0f\x01 虚血", CHAT_PREFIX, reason, added);
+}
 
 // ============================================================================
 // Add real health (实体血) — used for teammate heal / revive rewards
@@ -132,7 +166,7 @@ void AddRealHealth(int client, float amount, const char[] reason)
 }
 
 // ============================================================================
-// Event: player_death → SI kill reward
+// Event: player_death → Protect teammate reward (SI kill heal DISABLED)
 // ============================================================================
 
 void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
@@ -151,31 +185,64 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
     if (victimTeam != 3)
         return;
 
-    int siMaxHP = GetEntProp(victim, Prop_Data, "m_iMaxHealth");
-    if (siMaxHP <= 0)
+    // === SI kill percentage heal DISABLED (v1.7) ===
+    // int siMaxHP = GetEntProp(victim, Prop_Data, "m_iMaxHealth");
+    // if (siMaxHP <= 0)
+    //     return;
+    // char siName[32];
+    // int zombieClass = GetEntProp(victim, Prop_Send, "m_zombieClass");
+    // ... HealSurvivor(attacker, siMaxHP, siName);
+
+    // === Protect teammate: check if SI was attacking/pinning another survivor ===
+    float protectHP = g_cvProtectHP.FloatValue;
+    if (protectHP <= 0.0)
         return;
 
-    char siName[32];
     int zombieClass = GetEntProp(victim, Prop_Send, "m_zombieClass");
+    int pinnedClient = -1;
+
     switch (zombieClass)
     {
-        case 1:  siName = "Smoker";
-        case 2:  siName = "Boomer";
-        case 3:  siName = "Hunter";
-        case 4:  siName = "Spitter";
-        case 5:  siName = "Jockey";
-        case 6:  siName = "Charger";
-        case 8:  siName = "Tank";
-        default: siName = "特感";
+        case 1:  // Smoker
+        {
+            pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_tongueVictim");
+        }
+        case 3:  // Hunter
+        {
+            pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_pounceVictim");
+        }
+        case 5:  // Jockey
+        {
+            pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_jockeyVictim");
+        }
+        case 6:  // Charger
+        {
+            pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_pummelVictim");
+            if (pinnedClient < 1)
+                pinnedClient = GetEntPropEnt(victim, Prop_Send, "m_carryVictim");
+        }
     }
 
-    HealSurvivor(attacker, siMaxHP, siName);
+    // Reward attacker if SI was actively attacking a teammate
+    if (pinnedClient > 0 && pinnedClient <= MaxClients && IsClientInGame(pinnedClient) && GetClientTeam(pinnedClient) == 2)
+    {
+        char siName[32];
+        switch (zombieClass)
+        {
+            case 1:  siName = "Smoker";
+            case 3:  siName = "Hunter";
+            case 5:  siName = "Jockey";
+            case 6:  siName = "Charger";
+            default: siName = "特感";
+        }
+        AddTempHealth(attacker, protectHP, siName);
+    }
 }
 
 // ============================================================================
-// Event: witch_killed → Witch kill reward
+// Event: witch_killed → Witch kill reward DISABLED (v1.7)
 // ============================================================================
-
+/*
 void Event_WitchKilled(Event event, const char[] name, bool dontBroadcast)
 {
     int attacker = GetClientOfUserId(event.GetInt("userid"));
@@ -192,6 +259,7 @@ void Event_WitchKilled(Event event, const char[] name, bool dontBroadcast)
 
     HealSurvivor(attacker, maxHP, "Witch");
 }
+*/
 
 // ============================================================================
 // Event: heal_success → +20 real HP for healing a teammate (pills/medkit)
@@ -227,4 +295,21 @@ void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
         return;
 
     AddRealHealth(reviver, 20.0, "救援倒地队友");
+}
+
+// ============================================================================
+// Event: defibrillator_used → +20 real HP for defibbing a dead teammate
+// ============================================================================
+
+void Event_DefibrillatorUsed(Event event, const char[] name, bool dontBroadcast)
+{
+    int reviver = GetClientOfUserId(event.GetInt("userid"));
+    int subject  = GetClientOfUserId(event.GetInt("subject"));
+
+    if (reviver == 0 || subject == 0)
+        return;
+    if (!IsClientInGame(reviver) || GetClientTeam(reviver) != 2)
+        return;
+
+    AddRealHealth(reviver, 20.0, "电击救援队友");
 }
