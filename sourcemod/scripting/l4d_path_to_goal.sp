@@ -307,6 +307,12 @@ Action CmdRequestGuide(int client, int args)
         Guide_Prep();
         if (!guide_ready || g_GuideCells == null)
         {
+            // v4.0: Guide prep is async (batched across frames). Register a
+            // pending one-shot request so beams draw when the pipeline completes.
+            // Timer_CheckRequests polls g_CellRequests[].duration at pipeline end.
+            g_CellRequests[client].duration = 20.0;
+            g_CellRequests[client].backward = false;
+            g_CellRequests[client].join_client = true;
             ReplyToCommand(client, "[PTG] %t", "ptg_wait");
             return Plugin_Continue;
         }

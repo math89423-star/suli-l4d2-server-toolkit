@@ -5079,16 +5079,14 @@ stock void AStar_BuildNodeIndex()
 
     delete areaList;
 
-    // Compute portal waypoints (shared-edge midpoints between adjacent areas)
-    AStar_ComputePortals();
+    // v4.0: Portal computation, HPA* clusters, and bridge detection are
+    // now batched across frames via OnFramePrep sub-phases (g_iBuildPhase 1-3).
+    // AStar_ComputePortalsBatch handles portals; HPA_BuildClusters and
+    // DetectNavMeshBridges are called in phases 2-3 respectively.
 
     #if DEBUG
     LogMessage("[PTG] A* node index built: %d nav areas in spatial hash", count);
     #endif
-
-    // v4.0: HPA* clusters and bridge detection are now batched across
-    // frames via OnFramePrep sub-phases (g_iBuildPhase 1-3).
-    // AStar_ComputePortals is also deferred to AStar_ComputePortalsBatch.
 }
 
 // ============================================================================
