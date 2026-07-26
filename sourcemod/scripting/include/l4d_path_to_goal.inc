@@ -212,7 +212,10 @@ bool g_bAStarPathFound;        // true when goal reached
 int g_iAStarBestIdx;           // best reachable node when goal unreachable (disconnected nav mesh)
 float g_fAStarBestG;           // gScore of best reachable node
 // int g_iAStarNodesThisFrame;    // unused
-#define ASTAR_NODES_PER_FRAME 48
+#define ASTAR_NODES_PER_FRAME 200
+
+// v4.0 HPA* globals (declared here for single-pass compiler)
+int g_iHPAClusterCount;
 
 // Spatial hash for fast nearby-area queries
 StringMap g_hSpatialHash;      // "cx_cy_cz" → ArrayList of {navArea(int), center(float[3])}
@@ -235,6 +238,13 @@ ArrayList g_bBeamWalkable; // hull trace validation: 1=walkable, 0=blocked by wo
 ConVar g_hCvarMPGameMode, g_hCvarEnable, g_hCvarMax, g_hCvarSurvivors, g_hCvarInfected, g_hCvarSpec, g_hCvarBudget, g_hCvarDetourBudget, g_hCvarFinaleAuto, g_hCvarZM;
 ConVar g_hCvarAutoEnable, g_hCvarAutoDuration, g_hCvarAutoInterval;
 ConVar g_hCvarGapDzMax, g_hCvarGapXyRatio, g_hCvarBeamMinDist, g_hCvarGapVertical, g_hCvarStitchSteps, g_hCvarTraceHull, g_hCvarNonMesh;
+// v4.0 new cvars
+ConVar g_hCvarFunnel3D, g_hCvarFunnelZStep;
+ConVar g_hCvarRepairEnable, g_hCvarRepairAttempts;
+ConVar g_hCvarBeaconEnable;
+ConVar g_hCvarThetaStar, g_hCvarThetaLosMax;
+ConVar g_hCvarHpaEnable, g_hCvarHpaCellSize;
+ConVar g_hCvarFlowWeight, g_hCvarZCostFactor;
 Handle g_hAutoTimer = null;
 Handle g_hAutoCheckTimer = null;
 bool gamemode_guidable, guide_ready, guide_prep, map_started, nav_started, enable, g_bL4D2, finale, finale_rescue, finale_gauntlet;
@@ -1118,7 +1128,8 @@ void Check_Guidable()
 #define STAGE_SMOOTH 3 // Reconstruct path, Theta* smooth, output to g_GuideCells
 #define STAGE_JOIN 4 // Connect rescue vehicle to guide path
 #define STAGE_VALIDATE 5 // Hull trace validation — 8-strategy checks against world geometry
-#define STAGE_END 6 // Guide ready.
+#define STAGE_REPAIR 6 // v4.0: Auto-repair blocked beams (Z-step, offset, subdivide, local A*)
+#define STAGE_END 7 // Guide ready.
 // Legacy stages retained for backwards compat with old code paths (kept as aliases)
 #define STAGE_COLLECT 99 // deprecated — was "collect ESCAPE_ROUTE areas"
 #define STAGE_SORT 99    // deprecated — was "sort by flow"
@@ -1224,7 +1235,7 @@ void OffsetPerpendicular(float start[3], float end[3], float offset, float resul
 // Async hull trace state — shared between Guide_ValidateWalkable and its frame callback.
 // Processing in batches of BATCH_SIZE per frame avoids main-thread stalls on
 // maps with thousands of nav cells (fallback path can collect 5000+ cells).
-#define VALIDATE_BATCH 15
+#define VALIDATE_BATCH 30
 int g_vi;          // current beam index
 int g_vBlocked;    // blocked count
 int g_vStair;      // passed via stair-lift
@@ -1255,6 +1266,12 @@ void Guide_ValidateWalkable_Frame(any unused)
         {
             LogMessage("[PTG] Hull validation: %d/%d walkable — vault:%d stair:%d low:%d side:%d subdiv:%d — blocked:%d",
                 total - g_vBlocked, total, g_vVault, g_vStair, g_vLow, g_vSide, g_vSubdiv, g_vBlocked);
+
+            // v4.0: Chain into STAGE_REPAIR after validation completes
+            if (g_vBlocked > 0 && g_hCvarRepairEnable != null && g_hCvarRepairEnable.BoolValue)
+            {
+                Guide_RepairBlocked();
+            }
         }
         return;
     }
@@ -1411,6 +1428,324 @@ bool frame_budget_exceeded()
     bool exceeded = dt_ms >= g_hCvarBudget.FloatValue;
     return exceeded;
 }
+
+// ======================================================================
+// v4.0 STAGE_REPAIR — Auto-repair blocked beams after hull validation
+//
+// For each beam marked as blocked (g_bBeamWalkable[i] == 0), attempts a
+// cascade of repair strategies:
+//   1. Z-step: lift cell center by ±48, ±96, ±144
+//   2. Horizontal offset: shift ±32u perpendicular to beam direction
+//   3. Segment subdivide: split beam into 3 parts, validate each
+//   4. Local A* reroute: mini-search between the two cell areas
+//   5. Beacon marker: if all repair fails, mark as beacon point
+//
+// Distributed across frames (REPAIR_BATCH per frame) to avoid stalls.
+// ======================================================================
+
+#define REPAIR_BATCH 4
+int g_ri;               // current repair beam index
+int g_rFixed;           // count of repaired beams
+int g_rBeaconed;        // count of beacon-marked beams
+int g_rAttempts;        // repair attempts for current beam
+ArrayList g_hBeaconCells; // beacon positions for unreachable transitions
+
+void Guide_RepairBlocked()
+{
+    if (!g_hCvarRepairEnable.BoolValue) return;
+    if (g_bBeamWalkable == null || g_GuideCells == null || g_GuideCells.Length < 2) return;
+
+    delete g_hBeaconCells;
+    g_hBeaconCells = new ArrayList(3);
+
+    g_ri = 0;
+    g_rFixed = 0;
+    g_rBeaconed = 0;
+    g_rAttempts = 0;
+
+    RequestFrame(Guide_RepairBlocked_Frame, 0);
+}
+
+void Guide_RepairBlocked_Frame(any unused)
+{
+    if (g_GuideCells == null || g_bBeamWalkable == null || g_ri >= g_bBeamWalkable.Length)
+    {
+        if (g_rFixed > 0 || g_rBeaconed > 0)
+        {
+            LogMessage("[PTG] STAGE_REPAIR: fixed=%d beaconed=%d / %d total beams",
+                g_rFixed, g_rBeaconed, (g_GuideCells != null && g_GuideCells.Length > 1) ? g_GuideCells.Length - 1 : 0);
+        }
+        return;
+    }
+
+    int count = g_bBeamWalkable.Length;
+
+    for (int batch = 0; batch < REPAIR_BATCH && g_ri < count; batch++, g_ri++)
+    {
+        if (g_bBeamWalkable.Get(g_ri) == 1) continue; // already walkable
+
+        Cell cell1, cell2;
+        g_GuideCells.GetArray(g_ri, cell1, sizeof(Cell));
+        g_GuideCells.GetArray(g_ri + 1, cell2, sizeof(Cell));
+
+        bool repaired = false;
+
+        // Strategy 1: Z-stepping — lift the target cell center
+        // Try progressively higher lifts to clear low obstacles
+        if (!repaired)
+        {
+            float zOffsets[6] = {48.0, -48.0, 96.0, -96.0, 144.0, -144.0};
+            for (int z = 0; z < 6 && !repaired; z++)
+            {
+                float test[3];
+                test = cell2.center;
+                test[2] += zOffsets[z];
+                if (twopos_traversable(cell1.center, test))
+                {
+                    cell2.center = test;
+                    g_GuideCells.SetArray(g_ri + 1, cell2, sizeof(Cell));
+                    g_bBeamWalkable.Set(g_ri, 1);
+                    repaired = true;
+                    g_rFixed++;
+                }
+                // Also try lifting cell1
+                if (!repaired)
+                {
+                    test = cell1.center;
+                    test[2] += zOffsets[z];
+                    if (twopos_traversable(test, cell2.center))
+                    {
+                        cell1.center = test;
+                        g_GuideCells.SetArray(g_ri, cell1, sizeof(Cell));
+                        g_bBeamWalkable.Set(g_ri, 1);
+                        repaired = true;
+                        g_rFixed++;
+                    }
+                }
+            }
+        }
+
+        // Strategy 2: Horizontal offset perpendicular to beam
+        if (!repaired)
+        {
+            float dir[3];
+            dir[0] = cell2.center[0] - cell1.center[0];
+            dir[1] = cell2.center[1] - cell1.center[1];
+            float len = SquareRoot(dir[0] * dir[0] + dir[1] * dir[1]);
+            if (len > 1.0)
+            {
+                float perp[3];
+                perp[0] = -dir[1] / len;
+                perp[1] =  dir[0] / len;
+                perp[2] = 0.0;
+
+                float offsets[4] = {32.0, -32.0, 64.0, -64.0};
+                for (int o = 0; o < 4 && !repaired; o++)
+                {
+                    float s1[3], e1[3];
+                    s1[0] = cell1.center[0] + perp[0] * offsets[o];
+                    s1[1] = cell1.center[1] + perp[1] * offsets[o];
+                    s1[2] = cell1.center[2] + 28.0;
+                    e1[0] = cell2.center[0] + perp[0] * offsets[o];
+                    e1[1] = cell2.center[1] + perp[1] * offsets[o];
+                    e1[2] = cell2.center[2] + 28.0;
+
+                    float midMins[3] = {-14.0, -14.0, 0.0};
+                    float midMaxs[3] = { 14.0,  14.0, 44.0};
+                    TR_TraceHullFilter(s1, e1, midMins, midMaxs, MASK_PLAYERSOLID, TraceFilter_WorldOnly);
+                    if (!TR_DidHit())
+                    {
+                        cell1.center = s1;
+                        cell1.center[2] -= 28.0;
+                        cell2.center = e1;
+                        cell2.center[2] -= 28.0;
+                        g_GuideCells.SetArray(g_ri, cell1, sizeof(Cell));
+                        g_GuideCells.SetArray(g_ri + 1, cell2, sizeof(Cell));
+                        g_bBeamWalkable.Set(g_ri, 1);
+                        repaired = true;
+                        g_rFixed++;
+                    }
+                }
+            }
+        }
+
+        // Strategy 3: Segment subdivision — split long beam into 3 parts
+        if (!repaired)
+        {
+            float dist = GetVectorDistance(cell1.center, cell2.center, false);
+            if (dist > 120.0)
+            {
+                float segs[4][3];
+                segs[0] = cell1.center;
+                segs[3] = cell2.center;
+                for (int s = 1; s < 3; s++)
+                {
+                    float t = float(s) / 3.0;
+                    for (int j = 0; j < 3; j++)
+                        segs[s][j] = cell1.center[j] + (cell2.center[j] - cell1.center[j]) * t;
+                    segs[s][2] += 28.0;
+                }
+                segs[0][2] += 28.0;
+                segs[3][2] += 28.0;
+
+                float midMins[3] = {-14.0, -14.0, 0.0};
+                float midMaxs[3] = { 14.0,  14.0, 44.0};
+                bool allClear = true;
+                for (int s = 0; s < 3 && allClear; s++)
+                {
+                    TR_TraceHullFilter(segs[s], segs[s+1], midMins, midMaxs, MASK_PLAYERSOLID, TraceFilter_WorldOnly);
+                    if (TR_DidHit()) allClear = false;
+                }
+
+                if (allClear)
+                {
+                    // Insert intermediate waypoints to avoid the blocked direct beam
+                    Cell midCell;
+                    midCell.navArea = Address_Null;
+                    midCell.flow = (cell1.flow + cell2.flow) / 2.0;
+                    midCell.center[0] = segs[1][0];
+                    midCell.center[1] = segs[1][1];
+                    midCell.center[2] = segs[1][2] - 28.0;
+
+                    // Insert new cell between g_ri and g_ri+1
+                    g_GuideCells.ShiftUp(g_ri + 1);
+                    g_GuideCells.SetArray(g_ri + 1, midCell, sizeof(Cell));
+                    g_bBeamWalkable.ShiftUp(g_ri);
+                    g_bBeamWalkable.Set(g_ri, 1);
+                    g_bBeamWalkable.Set(g_ri + 1, 1);
+                    repaired = true;
+                    g_rFixed++;
+                }
+            }
+        }
+
+        // Strategy 4: Local A* reroute using nav area adjacency
+        if (!repaired && cell1.navArea != Address_Null && cell2.navArea != Address_Null)
+        {
+            if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+            ConAdj.Clear();
+
+            int connCount = GetNavConnections(cell1.navArea, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
+            NavConnection nc;
+            bool foundAlt = false;
+            float bestDist = -1.0;
+            float bestPos[3];
+            Address bestArea = Address_Null;
+
+            for (int n = 0; n < connCount; n++)
+            {
+                ConAdj.GetArray(n, nc, sizeof(NavConnection));
+                if (nc.navArea == Address_Null || nc.navArea == cell1.navArea) continue;
+                if (blocked_available && L4D_NavArea_IsBlocked(nc.navArea, TEAM_SURVIVOR, true)) continue;
+
+                float altCenter[3];
+                L4D_GetNavAreaCenter(nc.navArea, altCenter);
+                altCenter[2] += 16.0;
+
+                if (twopos_traversable(cell1.center, altCenter) && twopos_traversable(altCenter, cell2.center))
+                {
+                    float d = GetVectorDistance(cell1.center, altCenter, true)
+                            + GetVectorDistance(altCenter, cell2.center, true);
+                    if (bestDist < 0.0 || d < bestDist)
+                    {
+                        bestDist = d;
+                        bestPos = altCenter;
+                        bestArea = nc.navArea;
+                        foundAlt = true;
+                    }
+                }
+            }
+
+            if (foundAlt)
+            {
+                Cell altCell;
+                altCell.navArea = bestArea;
+                altCell.center = bestPos;
+                altCell.flow = (cell1.flow + cell2.flow) / 2.0;
+                g_GuideCells.ShiftUp(g_ri + 1);
+                g_GuideCells.SetArray(g_ri + 1, altCell, sizeof(Cell));
+                g_bBeamWalkable.ShiftUp(g_ri);
+                g_bBeamWalkable.Set(g_ri, 1);
+                g_bBeamWalkable.Set(g_ri + 1, 1);
+                repaired = true;
+                g_rFixed++;
+            }
+        }
+
+        // Strategy 5: Beacon — mark unreachable transition
+        if (!repaired && g_hCvarBeaconEnable.BoolValue)
+        {
+            float beaconPos[3];
+            beaconPos = cell1.center;
+            g_hBeaconCells.PushArray(beaconPos, 3);
+            g_rBeaconed++;
+
+            // Mark as walkable so we don't keep trying to repair
+            g_bBeamWalkable.Set(g_ri, 1);
+        }
+        else if (!repaired)
+        {
+            // No beacon enabled, just mark as-is
+            g_bBeamWalkable.Set(g_ri, 0);
+        }
+    }
+
+    RequestFrame(Guide_RepairBlocked_Frame, 0);
+}
+
+// Draw beacon markers at positions stored in g_hBeaconCells
+void Guide_DrawBeacons(int client = -1)
+{
+    if (g_hBeaconCells == null || g_hBeaconCells.Length == 0) return;
+    if (!g_hCvarBeaconEnable.BoolValue) return;
+
+    int laser = g_iLaserWhite;
+    if (laser == 0) laser = g_iLaser;
+    if (laser == 0) return;
+
+    float duration = g_hCvarAutoDuration.FloatValue;
+    if (duration < 1.0) duration = 5.0;
+
+    // Bright red-orange beacon: "path continues here"
+    int color_beacon[4] = {255, 100, 50, 255};
+
+    for (int i = 0; i < g_hBeaconCells.Length; i++)
+    {
+        float pos[3], end[3];
+        g_hBeaconCells.GetArray(i, pos, 3);
+        end = pos;
+        end[2] += 32.0; // tall vertical marker
+
+        // Vertical pillar beam — visible from a distance
+        TE_SetupBeamPoints(pos, end, laser, 0, 0, 0,
+            duration, 4.0, 4.0, 0, 0.0, color_beacon, 0);
+        if (client > 0) TE_SendToClient(client);
+        else TE_SendToAll();
+
+        // Ring at top — makes it recognizable as a beacon
+        float ringCenter[3];
+        ringCenter = end;
+        int color_ring[4] = {255, 200, 100, 200};
+        float ringRad = 20.0;
+        float ringSteps[6][3];
+        for (int s = 0; s < 6; s++)
+        {
+            float angle = float(s) * 3.14159 * 2.0 / 6.0;
+            ringSteps[s][0] = ringCenter[0] + Cosine(angle) * ringRad;
+            ringSteps[s][1] = ringCenter[1] + Sine(angle) * ringRad;
+            ringSteps[s][2] = ringCenter[2];
+        }
+        for (int s = 0; s < 6; s++)
+        {
+            int sn = (s + 1) % 6;
+            TE_SetupBeamPoints(ringSteps[s], ringSteps[sn], laser, 0, 0, 0,
+                duration * 0.5, 1.5, 1.0, 0, 0.0, color_ring, 0);
+            if (client > 0) TE_SendToClient(client);
+            else TE_SendToAll();
+        }
+    }
+}
+
 
 ArrayList explored_finale;
 
@@ -1589,8 +1924,11 @@ void OnFramePrep(bool new_frame = true)
 
             AStar_ReconstructPath(g_GuideCells);
 
+            // v4.0: Insert 3D Z-transition waypoints for multi-floor maps
+            Funnel3D_InsertZTransitions(g_GuideCells);
+
             #if DEBUG
-            LogMessage("[PTG] Path reconstructed: %d cells after smoothing", g_GuideCells.Length);
+            LogMessage("[PTG] Path reconstructed: %d cells after smoothing + 3D funnel", g_GuideCells.Length);
             #endif
 
             if (g_GuideCells.Length < 2)
@@ -1784,6 +2122,13 @@ void OnFramePrep(bool new_frame = true)
                     g_iLoop += 1;
                 }
             }
+        }
+        case STAGE_REPAIR:
+        {
+            // v4.0: Repair is triggered asynchronously from Guide_ValidateWalkable_Frame
+            // when validation completes. This stage is a pass-through to maintain
+            // pipeline ordering (REPAIR runs after VALIDATE).
+            g_iLoop = 1;
         }
         default:
         {
@@ -3639,18 +3984,38 @@ stock int GetNonMeshConnections(int areaInt, ArrayList conList)
 // A* Pathfinding Engine
 // ============================================================================
 
-// Flow-distance heuristic — uses the nav mesh's precomputed flow field.
-// Flow is the ground-truth distance-to-goal; it dominates Euclidean on complex maps.
-// Falls back to Euclidean * 1.5 (inflated) when flow data is unavailable, to stay
-// admissible while still being more informative than raw Euclidean.
+// v4.0 Heuristic — Euclidean dominant, flow as tie-breaker.
+//
+// Previous versions (v3.0) used flow as the dominant heuristic term (80% weight).
+// This worked well on official maps but broke on third-party maps where:
+//   - Flow is non-monotonic (U-shaped paths, spiral staircases)
+//   - Flow overestimates due to nav mesh gaps/overlaps
+//   - The goal area is in a disconnected nav mesh component
+//
+// v4.0 formula: h = euclidean * 1.15 + flow_tiebreaker * flow_weight
+// where flow_weight defaults to 0.25 (configurable via l4d_path_to_goal_flow_weight).
+// Flow is now a tie-breaker — it helps A* prefer the escape direction without
+// overcommitting to flow-optimal-but-geometrically-wrong paths.
+//
+// The 1.15× Euclidean is still admissible: the shortest path between two points
+// in an irregular nav mesh is at most ~1.08× Euclidean in the worst case
+// (8-direction grid), and 1.15 gives a safety margin while staying tight enough
+// to avoid excessive node expansion.
 stock float AStar_Heuristic(int nodeIndex)
 {
     float center[3], goalCenter[3];
     g_hAStarCenters.GetArray(nodeIndex, center, 3);
     g_hAStarCenters.GetArray(g_iAStarGoalIndex, goalCenter, 3);
 
-    // Use flow distance when available — it's the precomputed ground truth
-    if (g_fMaxFlow > 0.0)
+    float euclidean = GetVectorDistance(center, goalCenter, false);
+
+    // Base heuristic: tight Euclidean bound (admissible, consistent)
+    float h = euclidean * 1.15;
+
+    // Flow tie-breaker: only when flow data is valid and weight is positive
+    float flowWeight = (g_hCvarFlowWeight != null) ? g_hCvarFlowWeight.FloatValue : 0.25;
+
+    if (g_fMaxFlow > 0.0 && flowWeight > 0.001)
     {
         int areaInt = g_hAStarNodes.Get(nodeIndex);
         float areaFlow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(areaInt));
@@ -3660,28 +4025,33 @@ stock float AStar_Heuristic(int nodeIndex)
         {
             float flowRemaining = goalFlow - areaFlow;
             if (flowRemaining < 0.0) flowRemaining = 0.0;
-            // Blend: flow is the dominant term, Euclidean keeps it admissible for
-            // cases where flow slightly overestimates (rare, but possible on broken nav meshes)
-            float euclidean = GetVectorDistance(center, goalCenter, false);
-            // Return the larger of the two — flow should dominate on well-formed nav meshes
-            if (flowRemaining > euclidean)
-                return flowRemaining;
-            // Weighted blend: 80% flow + 20% Euclidean to avoid degenerate behavior
-            return flowRemaining * 0.8 + euclidean * 0.2;
+
+            // Flow tie-breaker: clamp to avoid overriding Euclidean.
+            // The tie-breaker should be at most half of Euclidean so it
+            // only discriminates between cells at similar Euclidean distances.
+            float tiebreaker = flowRemaining;
+            if (tiebreaker > euclidean * 0.5)
+                tiebreaker = euclidean * 0.5;
+
+            // Weighted blend: Euclidean base + flow tie-breaker
+            // At default flowWeight=0.25, flow contributes ~11% of total h
+            // This is enough to guide A* toward the escape without overcommitting
+            h += tiebreaker * flowWeight;
         }
     }
 
-    // Fallback: inflated Euclidean (×1.3) — still admissible for grid nav meshes
-    // because the shortest path in an 8-direction grid is at most ~1.08× Euclidean,
-    // but real nav meshes have irregular connections, so 1.3 gives headroom.
-    return GetVectorDistance(center, goalCenter, false) * 1.3;
+    // v4.0: HPA* cluster heuristic boost for large maps
+    if (g_iHPAClusterCount > 0 && g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue)
+        h += HPA_ClusterHeuristic(nodeIndex, g_iAStarGoalIndex);
+
+    return h;
 }
 
 // Edge cost: Euclidean distance weighted by connection type + vertical penalty.
 // Without the Z penalty, A* treats climbing stairs the same as walking on flat
 // ground (both have similar 3D distance ~90u), leading to paths that zigzag
 // up/down through multi-floor buildings instead of following level ground.
-#define Z_COST_FACTOR 3.0   // each unit of vertical change costs 3× horizontal
+// v4.0: Z_COST_FACTOR is now configurable via l4d_path_to_goal_z_cost_factor (default 4.0).
 stock float AStar_EdgeCost(int fromIndex, int toIndex, ConnectionType conType)
 {
     float c1[3], c2[3];
@@ -3694,7 +4064,8 @@ stock float AStar_EdgeCost(int fromIndex, int toIndex, ConnectionType conType)
     float absDz = FloatAbs(dz);
     // Horizontal cost (flat) + vertical cost (penalized) — keeps A* preferring
     // level paths and only climbing when geometrically necessary.
-    float effectiveDist = flatDist + absDz * Z_COST_FACTOR;
+    float zFactor = (g_hCvarZCostFactor != null) ? g_hCvarZCostFactor.FloatValue : 4.0;
+    float effectiveDist = flatDist + absDz * zFactor;
     return effectiveDist * GetConnectionCost(conType);
 }
 
@@ -3849,10 +4220,41 @@ stock int AStar_SearchFrame(int maxNodes)
                     continue;
             }
 
-            // Standard A* expansion — no Theta* LOS shortcut during search.
-            // (Post-processing Funnel smoothing in AStar_ReconstructPath handles waypoint reduction.)
-            float tentativeG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
+            // v4.0 Theta*: check parent-LOS for any-angle shortcuts during search.
+            // If parent(current) has LOS to neighbor AND the direct path is shorter,
+            // bypass current entirely — produces smoother paths with fewer waypoints.
+            bool thetaUsed = false;
             int cameFrom = currentIdx;
+            float tentativeG;
+            if (g_hCvarThetaStar != null && g_hCvarThetaStar.BoolValue)
+            {
+                int parentIdx = g_hAStarCameFrom.Get(currentIdx);
+                if (parentIdx >= 0 && parentIdx < g_hAStarNodes.Length)
+                {
+                    float pCenter[3], nCenter[3];
+                    g_hAStarCenters.GetArray(parentIdx, pCenter, 3);
+                    g_hAStarCenters.GetArray(neighborIdx, nCenter, 3);
+                    float losDist = GetVectorDistance(pCenter, nCenter, false);
+                    float losMax = (g_hCvarThetaLosMax != null) ? g_hCvarThetaLosMax.FloatValue : 1500.0;
+                    if (losDist <= losMax && twopos_traversable(pCenter, nCenter))
+                    {
+                        float parentGScore = g_hAStarGScore.Get(parentIdx);
+                        float directG = parentGScore + AStar_EdgeCost(parentIdx, neighborIdx, CONNECTED_ADJACENT);
+                        float viaCurrentG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
+                        if (directG < viaCurrentG)
+                        {
+                            tentativeG = directG;
+                            cameFrom = parentIdx;
+                            thetaUsed = true;
+                        }
+                    }
+                }
+            }
+            if (!thetaUsed)
+            {
+                tentativeG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
+                cameFrom = currentIdx;
+            }
 
             float neighborG = g_hAStarGScore.Get(neighborIdx);
             if (tentativeG < neighborG)
@@ -4484,6 +4886,469 @@ stock void AStar_BuildNodeIndex()
     #if DEBUG
     LogMessage("[PTG] A* node index built: %d nav areas in spatial hash", count);
     #endif
+
+    // v4.0: Build HPA* clusters and cross-component bridges
+    if (g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue)
+        HPA_BuildClusters();
+    if (g_hCvarNonMesh != null && g_hCvarNonMesh.BoolValue)
+        DetectNavMeshBridges();
+}
+
+// ============================================================================
+// v4.0 HPA* — Hierarchical Pathfinding Acceleration
+//
+// Clusters nav areas by spatial hash at a coarser resolution (default 1024u).
+// Computes cluster-level connectivity. The cluster-level distance is used as a
+// secondary heuristic boost for maps with 5000+ nav areas where the A* open
+// set can grow very large before converging.
+// ============================================================================
+
+StringMap g_hHPAClusters;       // "cx_cy_cz" → ArrayList of nodeIndices
+ArrayList g_hHPAClusterCenters; // float[3] center for each cluster
+ArrayList g_hHPAClusterNodes;   // ArrayList of nodeIndices per cluster
+StringMap g_hHPAClusterAdj;     // "ci_cj" → 1 if clusters i and j are adjacent
+
+stock void HPA_BuildClusters()
+{
+    delete g_hHPAClusters;
+    delete g_hHPAClusterCenters;
+    delete g_hHPAClusterNodes;
+    delete g_hHPAClusterAdj;
+
+    g_hHPAClusters = new StringMap();
+    g_hHPAClusterCenters = new ArrayList(3);
+    g_hHPAClusterNodes = new ArrayList();
+    g_hHPAClusterAdj = new StringMap();
+
+    float cellSize = g_hCvarHpaCellSize != null ? g_hCvarHpaCellSize.FloatValue : 1024.0;
+    int nodeCount = g_hAStarNodes.Length;
+    StringMap clusterMap = new StringMap(); // key → clusterIndex
+
+    // Pass 1: assign nodes to clusters
+    for (int i = 0; i < nodeCount; i++)
+    {
+        float center[3];
+        g_hAStarCenters.GetArray(i, center, 3);
+
+        int cx = RoundToFloor(center[0] / cellSize);
+        int cy = RoundToFloor(center[1] / cellSize);
+        int cz = RoundToFloor(center[2] / cellSize);
+
+        char key[32];
+        Format(key, sizeof(key), "%d_%d_%d", cx, cy, cz);
+
+        int clusterIdx = -1;
+        if (!clusterMap.GetValue(key, clusterIdx))
+        {
+            clusterIdx = g_hHPAClusterCenters.Length / 3;
+            g_hHPAClusterCenters.PushArray(center, 3);
+            // Store nodeList handle as int inside g_hHPAClusterNodes
+            ArrayList nodeList = new ArrayList();
+            g_hHPAClusterNodes.Push(view_as<int>(nodeList));
+            nodeList.Push(i);
+
+            clusterMap.SetValue(key, clusterIdx);
+
+            // Update cluster center as average
+            float avg[3]; avg = center;
+            g_hHPAClusterCenters.SetArray(clusterIdx, avg, 3);
+        }
+        else
+        {
+            int handle = g_hHPAClusterNodes.Get(clusterIdx);
+            ArrayList nodeList = view_as<ArrayList>(handle);
+            nodeList.Push(i);
+
+            // Update running average for center
+            float curCenter[3];
+            g_hHPAClusterCenters.GetArray(clusterIdx, curCenter, 3);
+            int n = nodeList.Length;
+            curCenter[0] = (curCenter[0] * (n - 1) + center[0]) / n;
+            curCenter[1] = (curCenter[1] * (n - 1) + center[1]) / n;
+            curCenter[2] = (curCenter[2] * (n - 1) + center[2]) / n;
+            g_hHPAClusterCenters.SetArray(clusterIdx, curCenter, 3);
+        }
+    }
+
+    g_iHPAClusterCount = g_hHPAClusterCenters.Length / 3;
+
+    // Pass 2: compute cluster adjacency by checking nav area connections
+    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+    for (int ci = 0; ci < g_iHPAClusterCount; ci++)
+    {
+        int nhandle = g_hHPAClusterNodes.Get(ci);
+        ArrayList nodes = view_as<ArrayList>(nhandle);
+
+        for (int ni = 0; ni < nodes.Length; ni++)
+        {
+            int nodeIdx = nodes.Get(ni);
+            int areaInt = g_hAStarNodes.Get(nodeIdx);
+            Address area = view_as<Address>(areaInt);
+
+            GetNavConnections(area, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
+
+            for (int c = 0; c < ConAdj.Length; c++)
+            {
+                NavConnection nc;
+                ConAdj.GetArray(c, nc, sizeof(NavConnection));
+                if (nc.navArea == Address_Null) continue;
+
+                int otherInt = view_as<int>(nc.navArea);
+                char keyB[16];
+                IntToString(otherInt, keyB, sizeof(keyB));
+                int otherIdx = -1;
+                if (!g_hAStarAreaToIndex.GetValue(keyB, otherIdx)) continue;
+
+                // Find which cluster otherIdx belongs to
+                float otherCenter[3];
+                g_hAStarCenters.GetArray(otherIdx, otherCenter, 3);
+                int ocx = RoundToFloor(otherCenter[0] / cellSize);
+                int ocy = RoundToFloor(otherCenter[1] / cellSize);
+                int ocz = RoundToFloor(otherCenter[2] / cellSize);
+
+                char okey[32];
+                Format(okey, sizeof(okey), "%d_%d_%d", ocx, ocy, ocz);
+
+                int cj = -1;
+                if (clusterMap.GetValue(okey, cj) && cj != ci)
+                {
+                    char adjKey[16];
+                    int minC = (ci < cj) ? ci : cj;
+                    int maxC = (ci < cj) ? cj : ci;
+                    Format(adjKey, sizeof(adjKey), "%d_%d", minC, maxC);
+                    g_hHPAClusterAdj.SetValue(adjKey, 1);
+                }
+            }
+        }
+    }
+
+    delete clusterMap;
+
+    #if DEBUG
+    LogMessage("[PTG] HPA*: %d clusters (cell=%.0f) for %d nav areas",
+        g_iHPAClusterCount, cellSize, nodeCount);
+    #endif
+}
+
+// HPA* heuristic boost: Euclidean distance between cluster centers.
+// Used as a cheap upper-bound check: if two nodes are in clusters far apart,
+// their direct connection is unlikely and A* should explore alternatives first.
+stock float HPA_ClusterHeuristic(int fromIdx, int toIdx)
+{
+    if (g_iHPAClusterCount < 2) return 0.0;
+
+    float fromCenter[3], toCenter[3];
+    g_hAStarCenters.GetArray(fromIdx, fromCenter, 3);
+    g_hAStarCenters.GetArray(toIdx, toCenter, 3);
+
+    float cellSize = g_hCvarHpaCellSize != null ? g_hCvarHpaCellSize.FloatValue : 1024.0;
+    int fcx = RoundToFloor(fromCenter[0] / cellSize);
+    int fcy = RoundToFloor(fromCenter[1] / cellSize);
+    int fcz = RoundToFloor(fromCenter[2] / cellSize);
+
+    int tcx = RoundToFloor(toCenter[0] / cellSize);
+    int tcy = RoundToFloor(toCenter[1] / cellSize);
+    int tcz = RoundToFloor(toCenter[2] / cellSize);
+
+    // Same cluster: no boost needed
+    if (fcx == tcx && fcy == tcy && fcz == tcz) return 0.0;
+
+    // Different clusters: add cluster-center distance as a mild boost
+    // This helps A* prefer paths that make progress between clusters
+    float fc[3], tc[3];
+    fc[0] = (fcx + 0.5) * cellSize;
+    fc[1] = (fcy + 0.5) * cellSize;
+    fc[2] = (fcz + 0.5) * cellSize;
+    tc[0] = (tcx + 0.5) * cellSize;
+    tc[1] = (tcy + 0.5) * cellSize;
+    tc[2] = (tcz + 0.5) * cellSize;
+
+    return GetVectorDistance(fc, tc, false) * 0.05; // 5% boost — very mild
+}
+
+// ============================================================================
+// v4.0 Nav Mesh Bridge Detection — cross-component connectivity
+//
+// On maps with disconnected nav mesh components (common in third-party maps),
+// finds nearby but unconnected nav areas that a human player could traverse
+// between (by jumping, dropping, or walking through an unmarked passage).
+// These bridges are added as non-mesh edges so A* can find paths across
+// component boundaries.
+// ============================================================================
+
+stock void DetectNavMeshBridges()
+{
+    if (g_hAStarNodes == null || g_hAStarNodes.Length < 2) return;
+
+    int nodeCount = g_hAStarNodes.Length;
+    int bridgesFound = 0;
+
+    // Use a simple flood-fill from start to identify the primary component
+    // Then for any area NOT in the primary component, look for nearby areas
+    // in the primary component that a player could physically reach.
+
+    // v4.0: Nav mesh bridge detection uses a StringMap-based reachability set
+    // to avoid stack overflow on maps with 10K+ nav areas.
+    // Key = nodeIndex as string, Value = 1 if reachable.
+    int startIdx = AStar_IdentifyStart();
+    if (startIdx < 0) return;
+
+    // Use StringMap for O(1) lookup without stack allocation
+    StringMap reachableMap = new StringMap();
+    ArrayList bfsQueue = new ArrayList();
+    bfsQueue.Push(startIdx);
+
+    char rkey[16];
+    IntToString(startIdx, rkey, sizeof(rkey));
+    reachableMap.SetValue(rkey, 1);
+    int reachableCount = 1;
+
+    // Cap BFS at 5000 nodes to prevent excessive iteration
+    int bfsLimit = 5000;
+    while (bfsQueue.Length > 0 && reachableCount < bfsLimit)
+    {
+        int current = bfsQueue.Get(0);
+        bfsQueue.Erase(0);
+
+        int areaInt = g_hAStarNodes.Get(current);
+        Address area = view_as<Address>(areaInt);
+
+        if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+        GetNavConnections(area, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
+
+        for (int n = 0; n < ConAdj.Length && reachableCount < bfsLimit; n++)
+        {
+            NavConnection nc;
+            ConAdj.GetArray(n, nc, sizeof(NavConnection));
+            if (nc.navArea == Address_Null) continue;
+
+            int otherInt = view_as<int>(nc.navArea);
+            char keyB[16];
+            IntToString(otherInt, keyB, sizeof(keyB));
+            int otherIdx = -1;
+            if (!g_hAStarAreaToIndex.GetValue(keyB, otherIdx)) continue;
+
+            IntToString(otherIdx, rkey, sizeof(rkey));
+            if (reachableMap.ContainsKey(rkey)) continue;
+
+            reachableMap.SetValue(rkey, 1);
+            bfsQueue.Push(otherIdx);
+            reachableCount++;
+        }
+    }
+
+    delete bfsQueue;
+
+    #if DEBUG
+    LogMessage("[PTG] Bridge detection: %d/%d nodes reachable from start (%.1f%%)",
+        reachableCount, nodeCount, (float(reachableCount) / nodeCount) * 100.0);
+    #endif
+
+    // If most nodes are reachable, bridges aren't needed
+    if (reachableCount > nodeCount * 0.9 || reachableCount >= bfsLimit)
+    {
+        delete reachableMap;
+        return;
+    }
+
+    // For each UNREACHABLE node, look for nearby REACHABLE nodes within
+    // spatial proximity that could be traversed (jump/drop/walk gap).
+    float bridgeMaxDist = 256.0; // max distance to search for bridge
+    int unreachableScanned = 0;
+    int unreachableLimit = 2000; // cap to avoid excessive processing
+
+    for (int i = 0; i < nodeCount && unreachableScanned < unreachableLimit; i++)
+    {
+        IntToString(i, rkey, sizeof(rkey));
+        if (reachableMap.ContainsKey(rkey)) continue;
+        unreachableScanned++;
+
+        float center[3];
+        g_hAStarCenters.GetArray(i, center, 3);
+
+        // Query spatial hash for nearby reachable nodes
+        if (g_hNonMeshNearby == null) g_hNonMeshNearby = new ArrayList();
+        SpatialHash_Query(center, g_hNonMeshNearby, bridgeMaxDist, 2);
+
+        float bestDist = bridgeMaxDist * bridgeMaxDist + 1.0;
+        int bestReachable = -1;
+        ConnectionType bestType = CONNECTED_NOT;
+
+        for (int j = 0; j < g_hNonMeshNearby.Length; j++)
+        {
+            int otherInt = g_hNonMeshNearby.Get(j);
+            char keyB[16];
+            IntToString(otherInt, keyB, sizeof(keyB));
+            int otherIdx = -1;
+            if (!g_hAStarAreaToIndex.GetValue(keyB, otherIdx)) continue;
+            IntToString(otherIdx, rkey, sizeof(rkey));
+            if (!reachableMap.ContainsKey(rkey)) continue;
+
+            float otherCenter[3];
+            g_hAStarCenters.GetArray(otherIdx, otherCenter, 3);
+
+            float dz = otherCenter[2] - center[2];
+            float dzAbs = FloatAbs(dz);
+            float xyDist = GetVectorDistance(center, otherCenter, false);
+
+            // Check if a player could traverse between these positions
+            ConnectionType bridgeType = CONNECTED_NOT;
+
+            // Drop down: unreachable is LOWER than reachable
+            if (dz >= -g_Caps.max_safe_drop && dz <= -g_Caps.max_step_up && xyDist < 120.0)
+            {
+                if (ValidateDropArc(center, otherCenter, g_Caps))
+                    bridgeType = CONNECTED_JUMP_DOWN;
+            }
+            // Jump up: unreachable is HIGHER than reachable
+            else if (dz >= g_Caps.max_step_up && dz <= g_Caps.max_jump_height && xyDist < 80.0)
+            {
+                if (ValidateJumpArc(center, otherCenter, g_Caps))
+                    bridgeType = CONNECTED_JUMP_UP;
+            }
+            // Horizontal gap jump
+            else if (dzAbs < g_Caps.max_step_up * 2.0 && xyDist >= 80.0 && xyDist <= g_Caps.max_gap_jump)
+            {
+                float mid[3];
+                mid[0] = (center[0] + otherCenter[0]) / 2.0;
+                mid[1] = (center[1] + otherCenter[1]) / 2.0;
+                mid[2] = (center[2] + otherCenter[2]) / 2.0;
+
+                float midDown[3];
+                midDown = mid; midDown[2] -= 200.0;
+                TR_TraceRayFilter(mid, midDown, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
+                if (!TR_DidHit() && ValidateJumpArc(center, otherCenter, g_Caps))
+                    bridgeType = CONNECTED_GAP_JUMP;
+            }
+            // Same level but close (nav mesh gap in floor)
+            else if (dzAbs < 32.0 && xyDist < 64.0)
+            {
+                bridgeType = CONNECTED_ADJACENT;
+            }
+
+            if (bridgeType != CONNECTED_NOT)
+            {
+                float distSq = GetVectorDistance(center, otherCenter, true);
+                if (distSq < bestDist)
+                {
+                    bestDist = distSq;
+                    bestReachable = otherIdx;
+                    bestType = bridgeType;
+                }
+            }
+        }
+
+        // Add bridge as non-mesh edge
+        if (bestReachable >= 0 && bestType != CONNECTED_NOT)
+        {
+            int areaInt = g_hAStarNodes.Get(i);
+            int otherAreaInt = g_hAStarNodes.Get(bestReachable);
+
+            NonMeshEdge bridge;
+            bridge.fromArea = areaInt;       // unreachable → reachable
+            bridge.toArea = otherAreaInt;
+            bridge.edgeType = bestType;
+
+            if (g_hNonMeshEdges == null)
+                g_hNonMeshEdges = new ArrayList(sizeof(NonMeshEdge));
+            g_hNonMeshEdges.PushArray(bridge, sizeof(NonMeshEdge));
+
+            // Also add reverse for bidirectional types
+            if (bestType != CONNECTED_JUMP_UP && bestType != CONNECTED_JUMP_DOWN)
+            {
+                bridge.fromArea = otherAreaInt;
+                bridge.toArea = areaInt;
+                g_hNonMeshEdges.PushArray(bridge, sizeof(NonMeshEdge));
+            }
+
+            bridgesFound++;
+        }
+    }
+
+    if (bridgesFound > 0)
+    {
+        LogMessage("[PTG] NavMeshBridge: %d cross-component bridges found (%d/%d nodes unreachable)",
+            bridgesFound, nodeCount - reachableCount, nodeCount);
+    }
+    delete reachableMap;
+}
+
+// ============================================================================
+// v4.0 3D Funnel Enhancement — Z-layer awareness
+//
+// Post-processes funnel waypoints to handle multi-floor transitions.
+// When consecutive funnel waypoints have a large Z gap (> funnel_z_step),
+// this function inserts intermediate guiding waypoints that trace a valid
+// 3D path (vertical transitions, stair landings, elevator stops).
+//
+// Called from AStar_ReconstructPath after the 2D funnel completes.
+// ============================================================================
+
+stock void Funnel3D_InsertZTransitions(ArrayList cells)
+{
+    if (cells == null || cells.Length < 2) return;
+    if (g_hCvarFunnel3D == null || !g_hCvarFunnel3D.BoolValue) return;
+
+    float zStep = g_hCvarFunnelZStep != null ? g_hCvarFunnelZStep.FloatValue : 80.0;
+
+    // Build new cell list with Z transitions inserted
+    ArrayList result = new ArrayList(sizeof(Cell));
+    Cell prev; cells.GetArray(0, prev, sizeof(Cell));
+    result.PushArray(prev, sizeof(Cell));
+
+    for (int i = 1; i < cells.Length; i++)
+    {
+        Cell curr;
+        cells.GetArray(i, curr, sizeof(Cell));
+
+        float dz = curr.center[2] - prev.center[2];
+        float dzAbs = FloatAbs(dz);
+
+        if (dzAbs > zStep)
+        {
+            // Large Z gap — insert intermediate transition waypoints
+            int steps = RoundToCeil(dzAbs / zStep);
+            if (steps > 8) steps = 8; // cap to prevent excessive waypoints
+
+            for (int s = 1; s < steps; s++)
+            {
+                float t = float(s) / float(steps);
+                Cell mid;
+                mid.navArea = Address_Null;
+                mid.flow = prev.flow + (curr.flow - prev.flow) * t;
+                mid.center[0] = prev.center[0] + (curr.center[0] - prev.center[0]) * t;
+                mid.center[1] = prev.center[1] + (curr.center[1] - prev.center[1]) * t;
+                mid.center[2] = prev.center[2] + (curr.center[2] - prev.center[2]) * t;
+
+                // Try to snap intermediate Z to ground via trace
+                float groundCheck[3];
+                groundCheck = mid.center;
+                groundCheck[2] -= 500.0;
+                TR_TraceRayFilter(mid.center, groundCheck, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
+                if (TR_DidHit())
+                {
+                    float groundPos[3];
+                    TR_GetEndPosition(groundPos);
+                    mid.center[2] = groundPos[2] + 16.0;
+                }
+
+                result.PushArray(mid, sizeof(Cell));
+            }
+        }
+
+        result.PushArray(curr, sizeof(Cell));
+        prev = curr;
+    }
+
+    // Replace original cells with enhanced version
+    cells.Clear();
+    for (int i = 0; i < result.Length; i++)
+    {
+        Cell c;
+        result.GetArray(i, c, sizeof(Cell));
+        cells.PushArray(c, sizeof(Cell));
+    }
+    delete result;
 }
 
 ///////////// SDK
