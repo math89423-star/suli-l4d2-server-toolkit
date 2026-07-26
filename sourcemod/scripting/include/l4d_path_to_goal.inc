@@ -255,6 +255,7 @@ Handle g_hAutoTimer = null;
 Handle g_hAutoCheckTimer = null;
 bool gamemode_guidable, guide_ready, guide_prep, map_started, nav_started, enable, g_bL4D2, finale, finale_rescue, finale_gauntlet;
 bool g_bGlobalBeams = false; // When true, DrawBeam sends to all clients (auto-guide mode)
+int g_iMapGeneration = 0; // incremented on each map start; async frame callbacks abort if stale
 
 // Forward-declare optional newer left4dhooks natives (may not be in server's include)
 enum NavCornerType {
@@ -1160,13 +1161,27 @@ float g_fPrepTotalTime;
 int g_iPrepFrames, g_iErased, g_iNavBlocked, g_iTotalCollected, g_iTighten;
 #endif
 
+float g_fPrepStartTime;
+int g_iPrepMapGen = -1; // map generation when Guide_Prep started; OnFramePrep aborts if stale
+
 void Guide_Prep()
 {
+    // Recovery: if a previous prep was aborted by an error (e.g., A* crash on broken nav),
+    // guide_prep may be stuck true forever, blocking all retries. Reset after 30s timeout.
+    if (guide_prep && g_fPrepStartTime > 0.0 && (GetEngineTime() - g_fPrepStartTime) > 30.0)
+    {
+        guide_prep = false;
+        g_iPrepStage = STAGE_NONE;
+        g_fPrepStartTime = 0.0;
+    }
+
     if (!enable || !gamemode_guidable || !map_started || !nav_started || guide_prep || is_prep_cooldown()) return;
     #if DEBUG>1
     LogMessage("Guide_Prep");
     #endif
     guide_prep = true;
+    g_fPrepStartTime = GetEngineTime();
+    g_iPrepMapGen = g_iMapGeneration;
     g_iPrepStage = STAGE_PREP;
     #if DEBUG
     g_iPrepFrames = 0;
@@ -1178,15 +1193,58 @@ void Guide_Prep()
 void Guide_Cleanup()
 {
     g_iPrepStage = STAGE_NONE; // tell guide prep to cancel
+    guide_prep = false;
+    g_iBuildPhase = 0;
+    g_iPortalBatchIdx = 0;
+    g_iHPAClusterCount = 0;
+    g_fPrepStartTime = 0.0;
+
     if (guide_ready)
     {
         #if DEBUG>1
         LogMessage("Guide_Cleanup");
         #endif
         guide_ready = false;
-        delete g_GuideCells;
-        delete g_bBeamWalkable;
     }
+    delete g_GuideCells;
+    delete g_bBeamWalkable;
+
+    // Clean A* search state (may still be open if map changed mid-search)
+    delete g_hAStarOpen;
+    delete g_hAStarGScore;
+    delete g_hAStarCameFrom;
+    delete g_hAStarEdgeType;
+    delete g_hAStarClosed;
+
+    // Clean A* node index for current map
+    delete g_hAStarNodes;
+    delete g_hAStarCenters;
+    delete g_hAStarAreaToIndex;
+    delete g_hSpatialHash;
+    delete g_hPortalCache;
+
+    // Clean non-mesh edges
+    delete g_hNonMeshEdges;
+
+    // Reset globals to clean state
+    g_bAStarPathFound = false;
+    g_iAStarGoalIndex = -1;
+    g_iAStarBestIdx = -1;
+    g_fAStarBestG = -1.0;
+    g_aAStarStart = 0;
+    g_aAStarGoal = 0;
+    g_bFoundRescueVehicle = false;
+    g_aNavRescueVehicle = Address_Null;
+    g_fFlowRescueVehicle = -1.0;
+    g_fMaxFlow = -1.0;
+    finale_stitched = false;
+    finale_backwards = false;
+
+    delete RescueVehicleCells;
+
+    // NOTE: g_hBeaconCells, HPA* cluster variables, and late-declared globals
+    // are cleaned in OnMapEnd (l4d_path_to_goal.sp) since they are declared
+    // after Guide_Cleanup in this file (SourcePawn single-pass compiler).
 }
 
 // ==========================================================================================
@@ -1251,6 +1309,8 @@ int g_vSide;       // passed via side offset
 int g_vSubdiv;     // passed via subdivision
 int g_vVault;      // passed via vault/climb
 
+int g_iValidateMapGen = -1; // map generation when validation started; abort if stale
+
 void Guide_ValidateWalkable()
 {
     delete g_bBeamWalkable;
@@ -1260,12 +1320,15 @@ void Guide_ValidateWalkable()
     g_bBeamWalkable = new ArrayList(1);
     g_vi = 0;
     g_vBlocked = g_vStair = g_vLow = g_vSide = g_vSubdiv = g_vVault = 0;
+    g_iValidateMapGen = g_iMapGeneration;
 
     RequestFrame(Guide_ValidateWalkable_Frame, 0);
 }
 
 void Guide_ValidateWalkable_Frame(any unused)
 {
+    // Abort if map changed since validation started
+    if (g_iValidateMapGen != g_iMapGeneration) return;
     if (g_GuideCells == null || g_vi >= g_GuideCells.Length - 1)
     {
         int total = (g_GuideCells != null) ? (g_GuideCells.Length - 1) : 0;
@@ -1457,6 +1520,8 @@ int g_rBeaconed;        // count of beacon-marked beams
 int g_rAttempts;        // repair attempts for current beam
 ArrayList g_hBeaconCells; // beacon positions for unreachable transitions
 
+int g_iRepairMapGen = -1; // map generation when repair started; abort if stale
+
 void Guide_RepairBlocked()
 {
     if (!g_hCvarRepairEnable.BoolValue) return;
@@ -1469,12 +1534,15 @@ void Guide_RepairBlocked()
     g_rFixed = 0;
     g_rBeaconed = 0;
     g_rAttempts = 0;
+    g_iRepairMapGen = g_iMapGeneration;
 
     RequestFrame(Guide_RepairBlocked_Frame, 0);
 }
 
 void Guide_RepairBlocked_Frame(any unused)
 {
+    // Abort if map changed since repair started
+    if (g_iRepairMapGen != g_iMapGeneration) return;
     if (g_GuideCells == null || g_bBeamWalkable == null || g_ri >= g_bBeamWalkable.Length)
     {
         if (g_rFixed > 0 || g_rBeaconed > 0)
@@ -1758,6 +1826,14 @@ ArrayList explored_finale;
 
 void OnFramePrep(bool new_frame = true)
 {
+    // Abort if map changed since Guide_Prep started (RequestFrame may survive OnMapEnd)
+    if (g_iPrepMapGen != g_iMapGeneration)
+    {
+        guide_prep = false;
+        g_iPrepStage = STAGE_NONE;
+        timer_nav = null;
+        return;
+    }
     if (!enable || guide_ready || !gamemode_guidable || !map_started || !nav_started || g_iPrepStage<=STAGE_NONE || g_iPrepStage>=STAGE_END)
     {
         guide_prep = false;
@@ -1843,14 +1919,14 @@ void OnFramePrep(bool new_frame = true)
             {
                 if (g_hCvarNonMesh != null && g_hCvarNonMesh.BoolValue)
                     DetectNavMeshBridges();
-                g_iBuildPhase = 4;
-                // Do NOT set budget_spent here — we want post-build to run next.
+                g_iBuildPhase = -1; // skip directly to post-build sentinel
+                budget_spent = true; // defer post-build to NEXT frame
+                // DetectNavMeshBridges does a BFS flood-fill + bridge scan across
+                // nav areas. Running it AND post-build init (rescue vehicle scan
+                // + IdentifyStart/Goal + AStar_Init + non-mesh init) in ONE frame
+                // exceeds the Source engine CPU budget → SIGALRM. Splitting them
+                // across frames prevents this without losing functionality.
             }
-
-            // After all batch phases complete (g_iBuildPhase == 4, budget_spent false),
-            // mark as done and proceed to post-build initialization.
-            if (!budget_spent && g_iBuildPhase == 4)
-                g_iBuildPhase = -1; // sentinel: prevents re-entering the batch loop
 
             // --- Post-build initialization (original STAGE_PREP logic) ---
             // Only run when all batch phases are done (budget_spent is false
@@ -4197,6 +4273,10 @@ stock void AStar_SetStart(int startIndex)
 //  -1 = no path exists (open set empty)
 stock int AStar_SearchFrame(int maxNodes)
 {
+    // Guard: bail if A* was not properly initialized (crashed Init, broken nav, third-party map)
+    if (g_hAStarOpen == null || g_hAStarNodes == null)
+        return -1;
+
     // Open set empty — all reachable nodes explored. If we have a best node
     // (always true after at least one frame of search), use it as effective goal.
     // This handles maps with disconnected nav mesh components.
@@ -5159,6 +5239,16 @@ StringMap g_hHPAClusterAdj;     // "ci_cj" → 1 if clusters i and j are adjacen
 
 stock void HPA_BuildClusters()
 {
+    // Clean inner ArrayLists to prevent handle leak
+    if (g_hHPAClusterNodes != null)
+    {
+        for (int i = 0; i < g_hHPAClusterNodes.Length; i++)
+        {
+            int handle = g_hHPAClusterNodes.Get(i);
+            ArrayList innerList = view_as<ArrayList>(handle);
+            delete innerList;
+        }
+    }
     delete g_hHPAClusters;
     delete g_hHPAClusterCenters;
     delete g_hHPAClusterNodes;
