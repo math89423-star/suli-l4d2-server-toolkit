@@ -678,6 +678,7 @@ bool RequestGuide(int client, float duration = 5.0, bool backward = false, bool 
     }
     if (i_draw>0)
     {
+        LogMessage("[PTG] Beams drawn: client %d flow %.1f cells %d start %d", client, flow, i_draw, g_iStart);
         #if DEBUG
         LogMessage("RequestGuide: client %d flow %f cells %d g_iStart %d (%f ms)", client, flow, i_draw, g_iStart, (GetEngineTime()-t)*1000.0);
         #endif
@@ -1787,7 +1788,10 @@ void OnFramePrep(bool new_frame = true)
             // IMPORTANT: use break (not return) to exit inner switch so the
             // post-switch RequestFrame scheduling code still executes.
             // --- Phase 0: Basic init + node index build ---
-            if (g_iBuildPhase == 0)
+            // Each phase is guarded by !budget_spent to prevent running
+            // multiple phases in one frame (which would cause an infinite
+            // build loop when g_iBuildPhase wraps back to 0).
+            if (!budget_spent && g_iBuildPhase == 0)
             {
                 g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
                 if (g_fMaxFlow <= 0.0)
@@ -1812,7 +1816,7 @@ void OnFramePrep(bool new_frame = true)
             }
 
             // --- Phase 1: Batched portal computation ---
-            if (g_iBuildPhase == 1)
+            if (!budget_spent && g_iBuildPhase == 1)
             {
                 if (AStar_ComputePortalsBatch(g_iPortalBatchIdx, PORTALS_PER_FRAME))
                 {
@@ -1826,7 +1830,7 @@ void OnFramePrep(bool new_frame = true)
             }
 
             // --- Phase 2: HPA* clusters ---
-            if (g_iBuildPhase == 2)
+            if (!budget_spent && g_iBuildPhase == 2)
             {
                 if (g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue)
                     HPA_BuildClusters();
@@ -1835,25 +1839,23 @@ void OnFramePrep(bool new_frame = true)
             }
 
             // --- Phase 3: Nav mesh bridge detection ---
-            if (g_iBuildPhase == 3)
+            if (!budget_spent && g_iBuildPhase == 3)
             {
                 if (g_hCvarNonMesh != null && g_hCvarNonMesh.BoolValue)
                     DetectNavMeshBridges();
                 g_iBuildPhase = 4;
-                budget_spent = true;
+                // Do NOT set budget_spent here — we want post-build to run next.
             }
 
-            // --- Phase 4: Transition to post-build init ---
-            if (g_iBuildPhase == 4)
-            {
-                g_iBuildPhase = 0;
-            }
+            // After all batch phases complete (g_iBuildPhase == 4, budget_spent false),
+            // mark as done and proceed to post-build initialization.
+            if (!budget_spent && g_iBuildPhase == 4)
+                g_iBuildPhase = -1; // sentinel: prevents re-entering the batch loop
 
             // --- Post-build initialization (original STAGE_PREP logic) ---
-            // Only run when all batch phases are done (budget_spent is false).
-            // When budget_spent is true, we skip post-build and let the
-            // function reach the post-switch RequestFrame scheduler naturally.
-            if (!budget_spent)
+            // Only run when all batch phases are done (budget_spent is false
+            // and g_iBuildPhase is the sentinel -1).
+            if (!budget_spent && g_iBuildPhase == -1)
             {
 
             // Initialize guide cells
@@ -1945,10 +1947,19 @@ void OnFramePrep(bool new_frame = true)
             g_iTighten = 0;
             #endif
             g_iLoop = 0;
+            budget_spent = true; // v4.0 fix: defer A* search to next frame.
+            // Post-build init (IdentifyStart/Goal + AStar_Init + non-mesh init)
+            // is already expensive on large maps. Running STAGE_ASTAR in the
+            // same frame triggers SIGALRM on 11K+ nav area maps.
+            g_iBuildPhase = -2; // mark post-build as done: prevents re-entry
+            // (g_iBuildPhase==-1 would re-enter post-build every frame;
+            //  -2 ensures no phase matches, so g_iPrepStage advances to STAGE_ASTAR)
             } // if (!budget_spent)
         }
         case STAGE_ASTAR:
         {
+            if (!budget_spent)
+            {
             // Continue non-mesh detection in parallel with A* (only if cvar enabled)
             if (g_hCvarNonMesh.BoolValue)
                 DetectNonMeshConnections_Frame();
@@ -1976,9 +1987,12 @@ void OnFramePrep(bool new_frame = true)
                 // Still searching — continue next frame
                 budget_spent = true;
             }
+            } // if (!budget_spent)
         }
         case STAGE_SMOOTH:
         {
+            if (!budget_spent)
+            {
             // Reconstruct and smooth the A* path
             delete g_GuideCells;
             g_GuideCells = new ArrayList(sizeof(Cell));
@@ -1987,10 +2001,6 @@ void OnFramePrep(bool new_frame = true)
 
             // v4.0: Insert 3D Z-transition waypoints for multi-floor maps
             Funnel3D_InsertZTransitions(g_GuideCells);
-
-            #if DEBUG
-            LogMessage("[PTG] Path reconstructed: %d cells after smoothing + 3D funnel", g_GuideCells.Length);
-            #endif
 
             if (g_GuideCells.Length < 2)
             {
@@ -2018,9 +2028,12 @@ void OnFramePrep(bool new_frame = true)
             }
 
             g_iLoop = 1;
+            } // if (!budget_spent)
         }
         case STAGE_JOIN:
         {
+            if (!budget_spent)
+            {
             // Connect rescue vehicle to guide path (existing logic)
             if (RescueVehicleCells == null || RescueVehicleCells.Length <= 0 || g_hCvarFinale.IntValue == FINALE_NEVER)
                 g_bFoundRescueVehicle = false;
@@ -2120,9 +2133,12 @@ void OnFramePrep(bool new_frame = true)
                 }
             }
             g_iLoop = 1;
+            } // if (!budget_spent)
         }
         case STAGE_VALIDATE:
         {
+            if (!budget_spent)
+            {
             if (g_GuideCells != null && g_GuideCells.Length > 2)
             {
                 while (g_iLoop < (g_GuideCells.Length - 1))
@@ -2183,13 +2199,17 @@ void OnFramePrep(bool new_frame = true)
                     g_iLoop += 1;
                 }
             }
+            } // if (!budget_spent)
         }
         case STAGE_REPAIR:
         {
+            if (!budget_spent)
+            {
             // v4.0: Repair is triggered asynchronously from Guide_ValidateWalkable_Frame
             // when validation completes. This stage is a pass-through to maintain
             // pipeline ordering (REPAIR runs after VALIDATE).
             g_iLoop = 1;
+            } // if (!budget_spent)
         }
         default:
         {
@@ -2215,6 +2235,7 @@ void OnFramePrep(bool new_frame = true)
     {
         guide_prep = false;
         guide_ready = true;
+        LogMessage("[PTG] Pipeline done: %d guide cells ready", g_GuideCells != null ? g_GuideCells.Length : -1);
         Guide_ValidateWalkable(); // v2.2: hull-trace validate all beams against world geometry
         beams_cooldown_reset(); // reset cooldowns but not requests to draw
         #if DEBUG
@@ -4402,13 +4423,36 @@ stock void AStar_ReconstructPath(ArrayList outCells)
         return;
     }
 
-    // --- Build portal endpoint sequence from nodePath ---
+    // v4.0 fix: Direct path conversion instead of portal/funnel algorithm.
+    // The funnel string-pulling code causes SIGALRM crashes even on small maps
+    // (14 portals, 15 nodes). Until the funnel bug is root-caused, we build
+    // guide cells directly from the A* cameFrom node chain.
+    // This produces slightly suboptimal paths but is stable and functional.
+    for (int i = 0; i < pathLen; i++)
+    {
+        int nodeIdx = nodePath.Get(i);
+        int areaInt = g_hAStarNodes.Get(nodeIdx);
+        Cell cell;
+        cell.navArea = view_as<Address>(areaInt);
+        g_hAStarCenters.GetArray(nodeIdx, cell.center, 3);
+        cell.flow = L4D2Direct_GetTerrorNavAreaFlow(cell.navArea);
+        if (cell.flow <= 0.0 && g_fMaxFlow > 0.0)
+            cell.flow = (float(i) / float(pathLen - 1)) * g_fMaxFlow;
+        outCells.PushArray(cell, sizeof(Cell));
+    }
+    delete nodePath;
+    return;
+    /*
+    // --- DISABLED: Portal/funnel code causes SIGALRM crash ---
     // Each portal is the shared edge between consecutive nav areas in the path.
     // The funnel algorithm uses the left/right endpoints to find the shortest
     // path through this sequence — mathematically optimal string pulling.
     int portalCount = pathLen - 1;
+    LogMessage("[PTG] ReconstructPath: portalCount=%d, about to alloc portalEps", portalCount);
     ArrayList portalEps = new ArrayList(6); // each portal: float[3] left, float[3] right
+    LogMessage("[PTG] ReconstructPath: portalEps created, about to alloc bool[%d]", portalCount);
     bool[] portalDegenerate = new bool[portalCount];
+    LogMessage("[PTG] ReconstructPath: bool array OK, about to build portal loop");
 
     for (int i = 0; i < portalCount; i++)
     {
@@ -4447,6 +4491,8 @@ stock void AStar_ReconstructPath(ArrayList outCells)
         portalEps.PushArray(right, 3);
     }
 
+    LogMessage("[PTG] ReconstructPath: portals built, starting funnel");
+    LogMessage("[PTG] ReconstructPath: about to alloc funnelResult ArrayList");
     // --- Funnel String Pulling ---
     // Operates in 2D (XY plane) over the portal endpoint sequence.
     // Produces the optimal shortest path through the portals.
@@ -4455,6 +4501,7 @@ stock void AStar_ReconstructPath(ArrayList outCells)
     // Used for all left/right orientation checks in the funnel.
 
     ArrayList funnelResult = new ArrayList(sizeof(Cell));
+    LogMessage("[PTG] ReconstructPath: funnelResult created, building start cell");
 
     // Start cell
     Cell startCell;
@@ -4473,6 +4520,8 @@ stock void AStar_ReconstructPath(ArrayList outCells)
     apex.flow = startCell.flow;
     int leftPortalIdx = -1;   // which portal supplies the left funnel boundary
     int rightPortalIdx = -1;  // which portal supplies the right funnel boundary
+    LogMessage("[PTG] funnel: apex at (%.1f,%.1f,%.1f), portalCount=%d",
+        apex.center[0], apex.center[1], apex.center[2], portalCount);
 
     for (int i = 0; i < portalCount; i++)
     {
@@ -4603,9 +4652,13 @@ stock void AStar_ReconstructPath(ArrayList outCells)
         goalCell.flow = g_fMaxFlow;
     outCells.PushArray(goalCell, sizeof(Cell));
 
+    LogMessage("[PTG] ReconstructPath: funnel done, %d output cells", outCells.Length);
+    PrintToServer("[PTG] ReconstructPath: funnel done, %d output cells", outCells.Length);
+
     delete nodePath;
     delete portalEps;
     delete funnelResult;
+    */  // END disabled portal/funnel code
 
     // --- Validation pass: hull trace every edge ---
     // Funnel waypoints are geometrically optimal but may cross geometry

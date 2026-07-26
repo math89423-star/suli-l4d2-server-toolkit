@@ -5,7 +5,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "1.8"
+#define PLUGIN_VERSION "1.8.1"
 #define CHAT_PREFIX "\x04[队友互助]\x01"
 
 public Plugin myinfo =
@@ -122,7 +122,10 @@ void AddTempHealth(int client, float amount, const char[] reason)
     float maxTotal  = g_cvMaxHP.FloatValue;
 
     if (curTotal >= maxTotal)
+    {
+        PrintToChat(client, "%s %s，血量已达上限 (%.0fHP)，未获得虚血", CHAT_PREFIX, reason, curTotal);
         return;
+    }
 
     float newTotal = curTotal + amount;
     if (newTotal > maxTotal)
