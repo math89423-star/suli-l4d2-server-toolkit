@@ -217,6 +217,12 @@ float g_fAStarBestG;           // gScore of best reachable node
 // v4.0 HPA* globals (declared here for single-pass compiler)
 int g_iHPAClusterCount;
 
+// v4.0 batched index building — prevents SIGALRM (stack/CPU overflow) on large maps
+// by distributing AStar_BuildNodeIndex work across multiple frames.
+int g_iBuildPhase;              // 0=basic index, 1=portals, 2=HPA, 3=bridges, 4=post-build init
+int g_iPortalBatchIdx;          // current batch position in portal computation
+#define PORTALS_PER_FRAME 250   // nav areas to process per frame for portal computation
+
 // Spatial hash for fast nearby-area queries
 StringMap g_hSpatialHash;      // "cx_cy_cz" → ArrayList of {navArea(int), center(float[3])}
 #define SPATIAL_CELL_SIZE 256.0
@@ -1775,26 +1781,80 @@ void OnFramePrep(bool new_frame = true)
     {
         case STAGE_PREP:
         {
-            g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
-            if (g_fMaxFlow <= 0.0)
+            // v4.0: Batched index construction — spreads expensive operations
+            // (portal computation, HPA clustering, bridge detection) across
+            // multiple frames to avoid SIGALRM on 5K+ nav area maps.
+            switch (g_iBuildPhase)
             {
-                guide_prep = false;
-                g_iPrepStage = STAGE_NONE;
-                #if DEBUG
-                    LogMessage("WARNING: L4D2Direct_GetMapMaxFlowDistance returned <=0.0");
-                #endif
-                return;
+                case 0:
+                {
+                    // --- Phase 0: Basic init + node index build ---
+                    g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
+                    if (g_fMaxFlow <= 0.0)
+                    {
+                        guide_prep = false;
+                        g_iPrepStage = STAGE_NONE;
+                        #if DEBUG
+                            LogMessage("WARNING: L4D2Direct_GetMapMaxFlowDistance returned <=0.0");
+                        #endif
+                        return;
+                    }
+
+                    // Build basic node index (nav areas, centers, spatial hash).
+                    // Portals, HPA, and bridge detection run in later phases.
+                    AStar_BuildNodeIndex();
+                    if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
+                    {
+                        guide_prep = false;
+                        g_iPrepStage = STAGE_NONE;
+                        LogMessage("[PTG] A* node index failed: too few nav areas");
+                        return;
+                    }
+
+                    g_iBuildPhase = 1;
+                    g_iPortalBatchIdx = 0;
+                    budget_spent = true;
+                    return;
+                }
+                case 1:
+                {
+                    // --- Phase 1: Batched portal computation ---
+                    if (AStar_ComputePortalsBatch(g_iPortalBatchIdx, PORTALS_PER_FRAME))
+                    {
+                        g_iPortalBatchIdx += PORTALS_PER_FRAME;
+                        budget_spent = true;
+                        return;
+                    }
+                    g_iBuildPhase = 2;
+                    budget_spent = true;
+                    return;
+                }
+                case 2:
+                {
+                    // --- Phase 2: HPA* clusters ---
+                    if (g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue)
+                        HPA_BuildClusters();
+                    g_iBuildPhase = 3;
+                    budget_spent = true;
+                    return;
+                }
+                case 3:
+                {
+                    // --- Phase 3: Nav mesh bridge detection ---
+                    if (g_hCvarNonMesh != null && g_hCvarNonMesh.BoolValue)
+                        DetectNavMeshBridges();
+                    g_iBuildPhase = 4;
+                    // Fall through to phase 4 (post-build init)
+                }
+                case 4:
+                {
+                    // Reset build phase for next map load
+                    g_iBuildPhase = 0;
+                    // Fall through to post-build initialization below
+                }
             }
 
-            // Build the A* node index from all nav areas
-            AStar_BuildNodeIndex();
-            if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
-            {
-                guide_prep = false;
-                g_iPrepStage = STAGE_NONE;
-                LogMessage("[PTG] A* node index failed: too few nav areas");
-                return;
-            }
+            // --- Post-build initialization (original STAGE_PREP logic) ---
 
             // Initialize guide cells
             delete g_GuideCells;
@@ -4834,6 +4894,145 @@ stock void AStar_ComputePortals()
     #endif
 }
 
+// v4.0: Batched portal computation — processes count nav areas per call,
+// starting from startIdx. Returns true if more areas remain.
+// Called from STAGE_PREP phase 1 to avoid SIGALRM on large maps.
+stock bool AStar_ComputePortalsBatch(int startIdx, int count)
+{
+    int nodeCount = g_hAStarNodes.Length;
+
+    // First call: initialize the portal cache
+    if (startIdx == 0)
+    {
+        delete g_hPortalCache;
+        g_hPortalCache = new StringMap();
+    }
+
+    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+    if (AdjNN == null) AdjNN = new ArrayList();
+
+    char key[32];
+    float cornersA[4][3], cornersB[4][3];
+    int endIdx = startIdx + count;
+    if (endIdx > nodeCount) endIdx = nodeCount;
+
+    for (int i = startIdx; i < endIdx; i++)
+    {
+        int areaIntA = g_hAStarNodes.Get(i);
+        Address areaA = view_as<Address>(areaIntA);
+        if (areaA == Address_Null) continue;
+
+        if (!elevator_available) continue;
+
+        for (int c = 0; c < 4; c++)
+            L4D_NavArea_GetCorner(areaA, view_as<NavCornerType>(c), cornersA[c]);
+
+        GetNavConnections(areaA, ConAdj, TEAM_SURVIVOR, true, false, false, CON_KEEP_ALL);
+
+        for (int n = 0; n < ConAdj.Length; n++)
+        {
+            NavConnection nc;
+            ConAdj.GetArray(n, nc, sizeof(NavConnection));
+            if (nc.navArea == Address_Null || nc.navArea == areaA) continue;
+
+            int areaIntB = view_as<int>(nc.navArea);
+            char keyB[16];
+            IntToString(areaIntB, keyB, sizeof(keyB));
+            int j = -1;
+            if (!g_hAStarAreaToIndex.GetValue(keyB, j)) continue;
+
+            int minI = (i < j) ? i : j;
+            int maxI = (i < j) ? j : i;
+            Format(key, sizeof(key), "%d_%d", minI, maxI);
+
+            if (g_hPortalCache.ContainsKey(key)) continue;
+
+            Address areaB = nc.navArea;
+            for (int c = 0; c < 4; c++)
+                L4D_NavArea_GetCorner(areaB, view_as<NavCornerType>(c), cornersB[c]);
+
+            float sharedEps[2][3];
+            int sharedCount = 0;
+
+            for (int ca = 0; ca < 4 && sharedCount < 2; ca++)
+            {
+                for (int cb = 0; cb < 4 && sharedCount < 2; cb++)
+                {
+                    float dxy = GetVectorDistance(cornersA[ca], cornersB[cb], true);
+                    float dz = FloatAbs(cornersA[ca][2] - cornersB[cb][2]);
+                    if (dxy < 1024.0 && dz < 48.0)
+                    {
+                        bool duplicate = false;
+                        for (int s = 0; s < sharedCount; s++)
+                        {
+                            if (GetVectorDistance(sharedEps[s], cornersA[ca], true) < 64.0)
+                            { duplicate = true; break; }
+                        }
+                        if (!duplicate)
+                        {
+                            sharedEps[sharedCount][0] = (cornersA[ca][0] + cornersB[cb][0]) / 2.0;
+                            sharedEps[sharedCount][1] = (cornersA[ca][1] + cornersB[cb][1]) / 2.0;
+                            sharedEps[sharedCount][2] = (cornersA[ca][2] + cornersB[cb][2]) / 2.0;
+                            sharedCount++;
+                        }
+                    }
+                }
+            }
+
+            PortalInfo portal;
+            if (sharedCount >= 2)
+            {
+                portal.ep1 = sharedEps[0];
+                portal.ep2 = sharedEps[1];
+                portal.center[0] = (sharedEps[0][0] + sharedEps[1][0]) / 2.0;
+                portal.center[1] = (sharedEps[0][1] + sharedEps[1][1]) / 2.0;
+                portal.center[2] = (sharedEps[0][2] + sharedEps[1][2]) / 2.0;
+            }
+            else
+            {
+                float cA[3], cB[3];
+                g_hAStarCenters.GetArray(i, cA, 3);
+                g_hAStarCenters.GetArray(j, cB, 3);
+                portal.ep1 = cA;
+                portal.ep2 = cB;
+                portal.center[0] = (cA[0] + cB[0]) / 2.0;
+                portal.center[1] = (cA[1] + cB[1]) / 2.0;
+                portal.center[2] = (cA[2] + cB[2]) / 2.0;
+            }
+
+            float zA = L4D_NavArea_GetZ(areaA, portal.center);
+            float zB = L4D_NavArea_GetZ(areaB, portal.center);
+            float groundZ = (zA > zB) ? zA : zB;
+            if (groundZ > -9000.0)
+                portal.center[2] = groundZ + 16.0;
+            if (sharedCount >= 2)
+            {
+                zA = L4D_NavArea_GetZ(areaA, portal.ep1);
+                zB = L4D_NavArea_GetZ(areaB, portal.ep1);
+                groundZ = (zA > zB) ? zA : zB;
+                if (groundZ > -9000.0) portal.ep1[2] = groundZ + 4.0;
+                zA = L4D_NavArea_GetZ(areaA, portal.ep2);
+                zB = L4D_NavArea_GetZ(areaB, portal.ep2);
+                groundZ = (zA > zB) ? zA : zB;
+                if (groundZ > -9000.0) portal.ep2[2] = groundZ + 4.0;
+            }
+
+            g_hPortalCache.SetArray(key, portal, sizeof(PortalInfo));
+        }
+    }
+
+    if (endIdx >= nodeCount)
+    {
+        #if DEBUG
+        StringMapSnapshot snap = g_hPortalCache.Snapshot();
+        LogMessage("[PTG] Portal cache built: %d portals for %d nav areas (batched)", snap.Length, nodeCount);
+        delete snap;
+        #endif
+        return false; // done
+    }
+    return true; // more areas remain
+}
+
 // Build the node index from all nav areas. Call once per map load.
 stock void AStar_BuildNodeIndex()
 {
@@ -4887,11 +5086,9 @@ stock void AStar_BuildNodeIndex()
     LogMessage("[PTG] A* node index built: %d nav areas in spatial hash", count);
     #endif
 
-    // v4.0: Build HPA* clusters and cross-component bridges
-    if (g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue)
-        HPA_BuildClusters();
-    if (g_hCvarNonMesh != null && g_hCvarNonMesh.BoolValue)
-        DetectNavMeshBridges();
+    // v4.0: HPA* clusters and bridge detection are now batched across
+    // frames via OnFramePrep sub-phases (g_iBuildPhase 1-3).
+    // AStar_ComputePortals is also deferred to AStar_ComputePortalsBatch.
 }
 
 // ============================================================================
