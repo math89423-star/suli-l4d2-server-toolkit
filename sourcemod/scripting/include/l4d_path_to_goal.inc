@@ -1784,77 +1784,77 @@ void OnFramePrep(bool new_frame = true)
             // v4.0: Batched index construction — spreads expensive operations
             // (portal computation, HPA clustering, bridge detection) across
             // multiple frames to avoid SIGALRM on 5K+ nav area maps.
-            switch (g_iBuildPhase)
+            // IMPORTANT: use break (not return) to exit inner switch so the
+            // post-switch RequestFrame scheduling code still executes.
+            // --- Phase 0: Basic init + node index build ---
+            if (g_iBuildPhase == 0)
             {
-                case 0:
+                g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
+                if (g_fMaxFlow <= 0.0)
                 {
-                    // --- Phase 0: Basic init + node index build ---
-                    g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
-                    if (g_fMaxFlow <= 0.0)
-                    {
-                        guide_prep = false;
-                        g_iPrepStage = STAGE_NONE;
-                        #if DEBUG
-                            LogMessage("WARNING: L4D2Direct_GetMapMaxFlowDistance returned <=0.0");
-                        #endif
-                        return;
-                    }
-
-                    // Build basic node index (nav areas, centers, spatial hash).
-                    // Portals, HPA, and bridge detection run in later phases.
-                    AStar_BuildNodeIndex();
-                    if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
-                    {
-                        guide_prep = false;
-                        g_iPrepStage = STAGE_NONE;
-                        LogMessage("[PTG] A* node index failed: too few nav areas");
-                        return;
-                    }
-
-                    g_iBuildPhase = 1;
-                    g_iPortalBatchIdx = 0;
-                    budget_spent = true;
+                    guide_prep = false;
+                    g_iPrepStage = STAGE_NONE;
                     return;
                 }
-                case 1:
+
+                AStar_BuildNodeIndex();
+                if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
                 {
-                    // --- Phase 1: Batched portal computation ---
-                    if (AStar_ComputePortalsBatch(g_iPortalBatchIdx, PORTALS_PER_FRAME))
-                    {
-                        g_iPortalBatchIdx += PORTALS_PER_FRAME;
-                        budget_spent = true;
-                        return;
-                    }
+                    guide_prep = false;
+                    g_iPrepStage = STAGE_NONE;
+                    LogMessage("[PTG] A* node index failed: too few nav areas");
+                    return;
+                }
+
+                g_iBuildPhase = 1;
+                g_iPortalBatchIdx = 0;
+                budget_spent = true;
+            }
+
+            // --- Phase 1: Batched portal computation ---
+            if (g_iBuildPhase == 1)
+            {
+                if (AStar_ComputePortalsBatch(g_iPortalBatchIdx, PORTALS_PER_FRAME))
+                {
+                    g_iPortalBatchIdx += PORTALS_PER_FRAME;
+                    budget_spent = true;
+                }
+                else
+                {
                     g_iBuildPhase = 2;
-                    budget_spent = true;
-                    return;
-                }
-                case 2:
-                {
-                    // --- Phase 2: HPA* clusters ---
-                    if (g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue)
-                        HPA_BuildClusters();
-                    g_iBuildPhase = 3;
-                    budget_spent = true;
-                    return;
-                }
-                case 3:
-                {
-                    // --- Phase 3: Nav mesh bridge detection ---
-                    if (g_hCvarNonMesh != null && g_hCvarNonMesh.BoolValue)
-                        DetectNavMeshBridges();
-                    g_iBuildPhase = 4;
-                    // Fall through to phase 4 (post-build init)
-                }
-                case 4:
-                {
-                    // Reset build phase for next map load
-                    g_iBuildPhase = 0;
-                    // Fall through to post-build initialization below
                 }
             }
 
+            // --- Phase 2: HPA* clusters ---
+            if (g_iBuildPhase == 2)
+            {
+                if (g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue)
+                    HPA_BuildClusters();
+                g_iBuildPhase = 3;
+                budget_spent = true;
+            }
+
+            // --- Phase 3: Nav mesh bridge detection ---
+            if (g_iBuildPhase == 3)
+            {
+                if (g_hCvarNonMesh != null && g_hCvarNonMesh.BoolValue)
+                    DetectNavMeshBridges();
+                g_iBuildPhase = 4;
+                budget_spent = true;
+            }
+
+            // --- Phase 4: Transition to post-build init ---
+            if (g_iBuildPhase == 4)
+            {
+                g_iBuildPhase = 0;
+            }
+
             // --- Post-build initialization (original STAGE_PREP logic) ---
+            // Only run when all batch phases are done (budget_spent is false).
+            // When budget_spent is true, we skip post-build and let the
+            // function reach the post-switch RequestFrame scheduler naturally.
+            if (!budget_spent)
+            {
 
             // Initialize guide cells
             delete g_GuideCells;
@@ -1945,6 +1945,7 @@ void OnFramePrep(bool new_frame = true)
             g_iTighten = 0;
             #endif
             g_iLoop = 0;
+            } // if (!budget_spent)
         }
         case STAGE_ASTAR:
         {
