@@ -163,7 +163,7 @@ public void OnPluginStart()
 	HookEvent("finale_start", 			  evtFinaleStart,    EventHookMode_PostNoCopy);
 	HookEvent("finale_radio_start", 	  evtFinaleStart,    EventHookMode_PostNoCopy);
     HookEvent("finale_vehicle_ready", 	  evtFinaleVehicle,  EventHookMode_PostNoCopy);
-    HookEvent("player_first_spawn",       evtFirstSpawn,     EventHookMode_PostNoCopy);
+    HookEvent("player_first_spawn",       evtFirstSpawn,     EventHookMode_Post);
     if (g_bL4D2)
     {
     HookEvent("gauntlet_finale_start", 	  evtGauntletStart,  EventHookMode_PostNoCopy);
@@ -562,12 +562,16 @@ int g_iFallbackRetries = 0;
 
 void MapStarted()
 {
+    g_iMapGeneration++;
     map_started = true;
     t_nav = -1.0;
     timer_nav = null;
     g_iPrepAttempts = 0;
     g_iFallbackStage = 0;
     g_iFallbackRetries = 0;
+    g_iBuildPhase = 0;
+    g_iPortalBatchIdx = 0;
+    g_iHPAClusterCount = 0;
 
     // Re-create check timer on every map load (OnPluginStart only fires once;
     // OnMapEnd kills it, so we must recreate here after each map change)
@@ -592,6 +596,24 @@ public void OnMapEnd()
     if (g_hAutoCheckTimer != null) { KillTimer(g_hAutoCheckTimer); g_hAutoCheckTimer = null; }
     if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); g_hToggleTimer = null; }
     for (int i = 1; i <= MaxClients; i++) g_bGuideToggled[i] = false;
+
+    // Clean late-declared globals (declared after Guide_Cleanup in include file)
+    delete g_hBeaconCells;
+
+    // Clean HPA* clusters — must delete inner ArrayLists first to prevent handle leak
+    if (g_hHPAClusterNodes != null)
+    {
+        for (int i = 0; i < g_hHPAClusterNodes.Length; i++)
+        {
+            int handle = g_hHPAClusterNodes.Get(i);
+            ArrayList innerList = view_as<ArrayList>(handle);
+            delete innerList;
+        }
+    }
+    delete g_hHPAClusterNodes;
+    delete g_hHPAClusterCenters;
+    delete g_hHPAClusters;
+    delete g_hHPAClusterAdj;
 }
 
 public void OnClientDisconnect(int client)
@@ -784,6 +806,7 @@ void Guide_Prep_Fallback()
     g_iLoop = 0;
     guide_prep = true;
     g_iFallbackStage = 2;
+    g_iPrepMapGen = g_iMapGeneration;
 
     RequestFrame(OnFramePrep, true);
 }

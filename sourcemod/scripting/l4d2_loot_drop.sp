@@ -279,6 +279,12 @@ void SpawnOne(const char[] classname, float base[3], float off[3])
     DispatchSpawn(ent);
     TeleportEntity(ent, to, NULL_VECTOR, NULL_VECTOR);
 
+    // Give reserve ammo to heavy weapons
+    if (StrEqual(classname, "weapon_grenade_launcher"))
+    {
+        SetEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo", 30);
+    }
+
     // Glow highlight: golden outline visible through walls at close range
     SetEntProp(ent, Prop_Send, "m_iGlowType", 3);
     SetEntProp(ent, Prop_Send, "m_nGlowRange", 800);
