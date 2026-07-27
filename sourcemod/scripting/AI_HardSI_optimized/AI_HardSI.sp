@@ -242,8 +242,11 @@ public Action:Event_AbilityUse(Handle:event, String:name[], bool:dontBroadcast) 
         return Plugin_Handled;
 
     } else if (StrEqual(abilityName, "ability_spit")) {
-        // Smoker/Spitter: suicide after ability use
-        RequestFrame(SuicideFrame, any:client);
+        // Only Smoker suicides after ability use.
+        // Spitter now has post-spit behavior in the BT (approach/retreat).
+        if (GetInfectedClass(client) != L4D2Infected_Spitter) {
+            RequestFrame(SuicideFrame, any:client);
+        }
     }
     return Plugin_Handled;
 }

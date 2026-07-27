@@ -421,4 +421,21 @@ BT_Status ACT_StrafeMoveToTarget(int client) {
     return BT_RUNNING;
 }
 
+// Retreat: move away from the closest survivor.
+// Used by Spitter/Boomer as low-probability post-ability flee behavior.
+BT_Status ACT_Retreat(int client) {
+    float myPos[3];
+    GetClientAbsOrigin(client, myPos);
+    int closest = GetClosestSurvivor(myPos);
+    if (closest > 0) {
+        float sPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(closest, sPos);
+        MakeVectorFromPoints(sPos, myPos, dir);  // away from survivor
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+    BT_AddButton(client, IN_FORWARD);
+    return BT_RUNNING;
+}
+
 // ---------------------------------------------------------------------------
