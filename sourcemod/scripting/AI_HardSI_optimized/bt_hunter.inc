@@ -1,0 +1,252 @@
+// ============================================================================
+// bt_hunter.inc — Hunter Behavior Tree
+// ============================================================================
+// Replaces the old AI_Hunter.sp flat logic with a BT-driven decision tree.
+// Key behaviors preserved from v2.4:
+//   - Zigzag strafe while crouched
+//   - High-pounce positioning (climb to elevated ledges)
+//   - Fast pouncing with cooldown
+//   - Avoid dogpiling pinned survivors
+//   - Missed-pounce escape jump
+//   - Gaussian-angle pounce (via ability_use event hook, unchanged)
+//   - Fake direction (via ability_use event hook, unchanged)
+//   - Wall detection (via ability_use event hook, unchanged)
+// ============================================================================
+
+#if defined _bt_hunter_included
+  #endinput
+#endif
+#define _bt_hunter_included
+
+// ---------------------------------------------------------------------------
+// Hunter-specific state (shared with main plugin via extern)
+// ---------------------------------------------------------------------------
+
+bool g_bHunterJustLunged[MAXPLAYERS + 1];
+float g_fHunterMissEscapeCooldown[MAXPLAYERS + 1];
+
+// Forward declarations for tree builder
+
+// ---------------------------------------------------------------------------
+// Hunter tree builder — called once in OnPluginStart
+// ---------------------------------------------------------------------------
+
+
+// ---------------------------------------------------------------------------
+// Hunter-specific callbacks
+// ---------------------------------------------------------------------------
+
+// Condition: Hunter just missed a pounce and is on the ground
+BT_Status HunterCond_JustMissed(int client) {
+    if (!g_bHunterJustLunged[client]) return BT_FAILURE;
+    if (!(GetEntityFlags(client) & FL_ONGROUND)) return BT_FAILURE;
+
+    // Check if there's a pounce victim (successful pounce)
+    int victim = GetEntPropEnt(client, Prop_Send, "m_pounceVictim");
+    if (victim > 0) {
+        g_bHunterJustLunged[client] = false;  // clear flag on success
+        return BT_FAILURE;
+    }
+
+    // Check cooldown on escape (don't spam escape jumps)
+    float now = GetGameTime();
+    if (g_fHunterMissEscapeCooldown[client] > now) return BT_FAILURE;
+
+    return BT_SUCCESS;
+}
+
+// Action: Jump away in random direction after missed pounce
+BT_Status HunterAct_EscapeJump(int client) {
+    float ang[3];
+    GetClientEyeAngles(client, ang);
+    ang[1] += GetRandomFloat(60.0, 120.0) * (GetRandomInt(0, 1) ? 1.0 : -1.0);
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_AddButton(client, IN_JUMP);
+    g_bHunterJustLunged[client] = false;
+    g_fHunterMissEscapeCooldown[client] = GetGameTime() + 3.0;
+    return BT_SUCCESS;
+}
+
+// Condition: Is there elevated ground within 120 units above the hunter?
+BT_Status HunterCond_HasHighGround(int client) {
+    float hunterPos[3];
+    GetClientAbsOrigin(client, hunterPos);
+
+    // Trace from 120 units above down to find ground
+    float upCheck[3];
+    upCheck[0] = hunterPos[0];
+    upCheck[1] = hunterPos[1];
+    upCheck[2] = hunterPos[2] + 120.0;
+
+    float downCheck[3];
+    downCheck[0] = upCheck[0];
+    downCheck[1] = upCheck[1];
+    downCheck[2] = upCheck[2] - 200.0;
+
+    TR_TraceRayFilter(upCheck, downCheck, MASK_PLAYERSOLID, RayType_EndPoint, TracerayFilter, client);
+    if (!TR_DidHit()) return BT_FAILURE;
+
+    float groundPos[3];
+    TR_GetEndPosition(groundPos);
+
+    // Ground must be 40-200 units above hunter
+    float dz = groundPos[2] - hunterPos[2];
+    return (dz > 40.0 && dz < 200.0) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// Action: Jump up to an elevated position
+BT_Status HunterAct_ClimbHighGround(int client) {
+    float hunterPos[3];
+    GetClientAbsOrigin(client, hunterPos);
+
+    // Find where the high ground is (re-trace)
+    float upCheck[3];
+    upCheck[0] = hunterPos[0];
+    upCheck[1] = hunterPos[1];
+    upCheck[2] = hunterPos[2] + 120.0;
+
+    float downCheck[3];
+    downCheck[0] = upCheck[0];
+    downCheck[1] = upCheck[1];
+    downCheck[2] = upCheck[2] - 200.0;
+
+    TR_TraceRayFilter(upCheck, downCheck, MASK_PLAYERSOLID, RayType_EndPoint, TracerayFilter, client);
+    if (!TR_DidHit()) return BT_FAILURE;
+
+    float groundPos[3];
+    TR_GetEndPosition(groundPos);
+
+    // Face the elevated position and jump
+    float dir[3], ang[3];
+    MakeVectorFromPoints(hunterPos, groundPos, dir);
+    GetVectorAngles(dir, ang);
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_AddButton(client, IN_JUMP);
+    return BT_SUCCESS;
+}
+
+// Condition: Is there a wall too close ahead?
+BT_Status HunterCond_WallAhead(int client) {
+    int wallDist = GetConVarInt(FindConVar("ai_wall_detection_distance"));
+    if (wallDist <= 0) return BT_FAILURE;
+
+    float hunterPos[3], hunterAng[3];
+    GetClientAbsOrigin(client, hunterPos);
+    GetClientEyeAngles(client, hunterAng);
+
+    TR_TraceRayFilter(hunterPos, hunterAng, MASK_PLAYERSOLID, RayType_Infinite, TracerayFilter, client);
+    float impactPos[3];
+    TR_GetEndPosition(impactPos);
+
+    return (GetVectorDistance(hunterPos, impactPos) < float(wallDist)) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// Action: Briefly face away from target (fake direction)
+BT_Status HunterAct_FakeDirection(int client) {
+    float ang[3];
+    GetClientEyeAngles(client, ang);
+    ang[1] += GetRandomFloat(25.0, 40.0) * (GetRandomInt(0, 1) ? 1.0 : -1.0);
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    return BT_SUCCESS;
+}
+stock int BT_CreateHunterTree() {
+    // --- Leaf nodes ---
+    int missEscSeq = BT_CreateSequence(2,
+        BT_CreateCondition(HunterCond_JustMissed),
+        BT_CreateAction(HunterAct_EscapeJump)
+    );
+
+    int highPounceSeq = BT_CreateSequence(3,
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_IsDucking),
+        BT_CreateSequence(2,
+            BT_CreateRandomChance(0.35),       // 35% chance
+            BT_CreateAction(HunterAct_ClimbHighGround)
+        )
+    );
+
+    int wallCheck = BT_CreateCondition(HunterCond_WallAhead);
+
+    // Fast pounce: cooldown-gated attack sequence
+    int fastPounceSeq = BT_CreateSequence(2,
+        // Pre-conditions
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_IsDucking)
+    );
+
+    int pounceInnerSeq = BT_CreateSequence(3,
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(1000.0),           // fast pounce proximity
+        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))  // don't dogpile
+    );
+
+    int attackActionSeq = BT_CreateSequence(3,
+        BT_CreateAction(ACT_StrafeRandom),     // zigzag strafe
+        BT_CreateAction(ACT_SnapAimToTarget),  // aim at target
+        BT_CreateAction(ACT_QueueLunge)        // press ATTACK
+    );
+
+    // Wrap attack in cooldown (based on z_lunge_interval)
+    int cooldownAttack = BT_CreateCooldown(1.0, attackActionSeq);
+
+    int signalCoord = BT_CreateAction(ACT_SignalAttack);
+
+    // Approach: move toward target
+    int approachSeq = BT_CreateSequence(3,
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_StrafeRandom),     // zigzag while approaching
+        BT_CreateAction(ACT_MoveToTarget)
+    );
+
+    // Duck to prepare pounce
+    int crouchSeq = BT_CreateSequence(1,
+        BT_CreateAction(ACT_Crouch)
+    );
+
+    // Crouch approach (when in range but no LOS yet)
+    int crouchApproachSeq = BT_CreateSequence(3,
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateAction(ACT_StrafeRandom),
+        BT_CreateAction(ACT_AcquireClosestTarget)
+    );
+
+    // Wander as last resort
+    int wander = BT_CreateAction(ACT_Wander);
+
+    // --- Build main tree ---
+    // Priority order:
+    //   1. Escape after missed pounce
+    //   2. High-pounce positioning (35% chance)
+    //   3. Fast pounce (within range, has LOS, target not pinned)
+    //   4. Approach target (zigzag, crouch when close)
+    //   5. Wander
+
+    // Start with the missed escape at highest priority
+    BT_AddChild(fastPounceSeq, pounceInnerSeq);
+    BT_AddChild(fastPounceSeq, cooldownAttack);
+    BT_AddChild(fastPounceSeq, signalCoord);
+
+    // Build approach subtree: approach → crouch when getting close
+    int approachFull = BT_Create(BTN_SEQUENCE);
+    BT_AddChild(approachFull, approachSeq);
+    BT_AddChild(approachFull, crouchSeq);
+
+    // Root selector
+    int root = BT_Create(BTN_SELECTOR);
+    BT_AddChild(root, missEscSeq);
+    BT_AddChild(root, highPounceSeq);
+    BT_AddChild(root, fastPounceSeq);
+    BT_AddChild(root, approachFull);
+    BT_AddChild(root, crouchApproachSeq);
+    BT_AddChild(root, wander);
+
+    return root;
+}
+
+// Module init — register cvars
+public Hunter_OnModuleStart() {
+    SetConVarInt(FindConVar("hunter_committed_attack_range"), 10000);
+    SetConVarInt(FindConVar("hunter_pounce_ready_range"), 500);
+    SetConVarInt(FindConVar("hunter_leap_away_give_up_range"), 0);
+    SetConVarInt(FindConVar("hunter_pounce_max_loft_angle"), 0);
+}

@@ -1,270 +1,292 @@
+// ============================================================================
+// AI_HardSI.sp — L4D2 Special Infected AI (Behavior Tree v3.0)
+// ============================================================================
+// Original v2.4 by Breezy — flat if-then-else per-SI logic.
+// v3.0 refactored with composable Behavior Tree framework for hierarchical,
+// reactive, and maintainable AI decision-making.
+//
+// Include order is critical:
+//   1. Core SM/left4dhooks SDK
+//   2. hardcoop_util (shared utilities, coordination system)
+//   3. bt_core       (BT node framework)
+//   4. bt_common     (shared game-specific condition/action nodes)
+//   5. bt_*          (per-SI behavior trees)
+// ============================================================================
+
 #pragma semicolon 1
 
 #include <sourcemod>
 #include <sdktools>
+#include <sdkhooks>
 #include <left4dhooks>
 
+// Shared utilities + coordination system (preserved from v2.4)
 #include "hardcoop_util.sp"
-#include "AI_Smoker.sp"
-#include "AI_Boomer.sp"
-#include "AI_Hunter.sp"
-#include "AI_Spitter.sp"
-#include "AI_Charger.sp"
-#include "AI_Jockey.sp"
-#include "AI_Tank.sp"
-#include "AI_Witch.sp"
 
-new bool:bHasBeenShoved[MAXPLAYERS]; // shoving resets SI movement
+// BT framework + shared nodes
+#include "bt_core.inc"
+#include "bt_common.inc"
 
-// OPTIMIZATION: Tick throttling for OnPlayerRunCmd
-// OnPlayerRunCmd fires every frame (~30/sec per client) which is excessive for AI decisions.
-// We only need to evaluate AI every few ticks. This dramatically reduces CPU usage with no
-// perceptible change in behavior.
-new iTickCounter[MAXPLAYERS];
-#define TICK_INTERVAL 4  // evaluate AI every 4th tick (~7.5 decisions/sec at 30 tick)
+// Per-SI behavior trees
+#include "bt_hunter.inc"
+#include "bt_charger.inc"
+#include "bt_jockey.inc"
+#include "bt_smoker.inc"
+#include "bt_boomer.inc"
+#include "bt_spitter.inc"
+#include "bt_tank.inc"
+#include "bt_witch.inc"
 
-public Plugin:myinfo =
-{
-	name = "AI: Hard SI (Optimized)",
-	author = "Breezy, optimized by Claude",
-	description = "Improves the AI behaviour of special infected - bugfixed & optimized version",
-	version = "2.0",
-	url = "github.com/breezyplease"
+// ============================================================================
+// Plugin Info
+// ============================================================================
+
+public Plugin:myinfo = {
+    name = "AI: Hard SI (Behavior Tree v3.0)",
+    author = "Breezy, refactored by Claude",
+    description = "Improves the AI of special infected — BT-driven decision engine",
+    version = "3.0",
+    url = "github.com/breezyplease"
 };
 
-public OnPluginStart() {
-	// Event hooks
-	HookEvent("player_spawn", InitialiseSpecialInfected, EventHookMode_Pre);
-	HookEvent("ability_use", OnAbilityUse, EventHookMode_Pre);
-	HookEvent("player_shoved", OnPlayerShoved, EventHookMode_Pre);
-	HookEvent("player_jump", OnPlayerJump, EventHookMode_Pre);
-	HookEvent("tongue_release", OnTongueRelease, EventHookMode_Pre); // FIXED: was never hooked!
+// ============================================================================
+// Global State
+// ============================================================================
 
-	// Load modules
-	Smoker_OnModuleStart();
-	Hunter_OnModuleStart();
-	Spitter_OnModuleStart();
-	Boomer_OnModuleStart();
-	Charger_OnModuleStart();
-	Jockey_OnModuleStart();
-	Tank_OnModuleStart();
-	Witch_OnModuleStart();
+// Tick throttling — evaluate AI every N frames
+int   g_iTickCounter[MAXPLAYERS + 1];
+#define TICK_INTERVAL 4
+
+// Shove tracking
+bool  g_bHasBeenShoved[MAXPLAYERS + 1];
+
+// BT root node IDs (built once in OnPluginStart, shared across clients)
+int   g_iBTHunterRoot   = -1;
+int   g_iBTChargerRoot  = -1;
+int   g_iBTJockeyRoot   = -1;
+int   g_iBTSmokerRoot   = -1;
+int   g_iBTBoomerRoot   = -1;
+int   g_iBTSpitterRoot  = -1;
+int   g_iBTTankRoot     = -1;
+int   g_iBTWitchRoot    = -1;
+
+// ============================================================================
+// OnPluginStart
+// ============================================================================
+
+public OnPluginStart() {
+    // --- Event hooks (preserved from v2.4) ---
+    HookEvent("player_spawn",      Event_PlayerSpawn,      EventHookMode_Pre);
+    HookEvent("ability_use",       Event_AbilityUse,       EventHookMode_Pre);
+    HookEvent("player_shoved",     Event_PlayerShoved,     EventHookMode_Pre);
+    HookEvent("player_jump",       Event_PlayerJump,       EventHookMode_Pre);
+    HookEvent("tongue_release",    Event_TongueRelease,    EventHookMode_Pre);
+
+    // --- Coordination cvars ---
+    g_hCvarCoordEnable = CreateConVar("ai_coordination_enable", "1",
+        "Enable SI coordination system: 0=OFF, 1=ON",
+        FCVAR_NONE, true, 0.0, true, 1.0);
+    g_hCvarCoordWindow = CreateConVar("ai_coordination_window", "4.0",
+        "Duration (seconds) of the coordination attack window",
+        FCVAR_NONE, true, 0.5, true, 10.0);
+
+    // --- Per-SI module initialization (cvars + game tuning) ---
+    Smoker_OnModuleStart();
+    Hunter_OnModuleStart();
+    Spitter_OnModuleStart();
+    Boomer_OnModuleStart();
+    Charger_OnModuleStart();
+    Jockey_OnModuleStart();
+    Tank_OnModuleStart();
+    Witch_OnModuleStart();
+
+    // --- Build all Behavior Trees ---
+    g_iBTHunterRoot  = BT_CreateHunterTree();
+    g_iBTChargerRoot = BT_CreateChargerTree();
+    g_iBTJockeyRoot  = BT_CreateJockeyTree();
+    g_iBTSmokerRoot  = BT_CreateSmokerTree();
+    g_iBTBoomerRoot  = BT_CreateBoomerTree();
+    g_iBTSpitterRoot = BT_CreateSpitterTree();
+    g_iBTTankRoot    = BT_CreateTankTree();
+    g_iBTWitchRoot   = BT_CreateWitchTree();
+
+    // --- Coordination timer ---
+    CreateTimer(1.0, Timer_UpdateCoordination, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
+
+// ============================================================================
+// Per-SI Module Start/End functions are defined in their respective bt_*.inc files.
+// These register custom cvars and modify vanilla game cvars.
+// The BT framework replaces only the decision logic, not the game tuning.
 
 public OnPluginEnd() {
-	// Unload modules
-	Smoker_OnModuleEnd();
-	Hunter_OnModuleEnd();
-	Spitter_OnModuleEnd();
-	Boomer_OnModuleEnd();
-	Charger_OnModuleEnd();
-	Jockey_OnModuleEnd();
-	Tank_OnModuleEnd();
-	Witch_OnModuleEnd();
+    // Cleanup (if needed)
 }
 
-/***********************************************************************************************************************************************************************************
+// ============================================================================
+// Player Spawn: bind BT tree to SI bot
+// ============================================================================
 
-																		SI MOVEMENT
+public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast) {
+    int client = GetClientOfUserId(GetEventInt(event, "userid"));
+    if (!IsBotInfected(client)) return Plugin_Handled;
 
-***********************************************************************************************************************************************************************************/
+    g_bHasBeenShoved[client] = false;
+    g_iTickCounter[client] = 0;
 
-// Modify SI movement
-public Action:OnPlayerRunCmd(client, &buttons, &impulse, Float:vel[3], Float:angles[3], &weapon) {
-	if( IsBotInfected(client) && IsPlayerAlive(client) ) {
-		// Always suppress AI Tank jumps every tick — only smart bhop logic re-adds IN_JUMP.
-		// This prevents vanilla Tank AI from jumping at close range (overshooting survivors).
-		if ( L4D2_Infected:GetInfectedClass(client) == L4D2Infected_Tank ) {
-			buttons &= ~IN_JUMP;
-			buttons &= ~IN_DUCK;
-		}
+    // Bind the appropriate behavior tree
+    int rootId = -1;
+    switch (L4D2_Infected:GetInfectedClass(client)) {
+        case L4D2Infected_Hunter:  rootId = g_iBTHunterRoot;
+        case L4D2Infected_Charger: rootId = g_iBTChargerRoot;
+        case L4D2Infected_Jockey:  rootId = g_iBTJockeyRoot;
+        case L4D2Infected_Smoker:  rootId = g_iBTSmokerRoot;
+        case L4D2Infected_Boomer:  rootId = g_iBTBoomerRoot;
+        case L4D2Infected_Spitter: rootId = g_iBTSpitterRoot;
+        case L4D2Infected_Tank:    rootId = g_iBTTankRoot;
+        case L4D2Infected_Witch:   rootId = g_iBTWitchRoot;
+        default:                   rootId = -1;
+    }
 
-		// OPTIMIZATION: Throttle AI evaluation to every TICK_INTERVAL ticks
-		iTickCounter[client]++;
-		if ( iTickCounter[client] < TICK_INTERVAL ) {
-			return Plugin_Continue;
-		}
-		iTickCounter[client] = 0;
+    if (rootId >= 0) {
+        BT_Bind(client, rootId);
+    }
 
-		new botInfected = client;
-		switch( L4D2_Infected:GetInfectedClass(botInfected) ) {
+    // Per-SI spawn initialization (reset per-SI state)
+    switch (L4D2_Infected:GetInfectedClass(client)) {
+        case L4D2Infected_Hunter: {
+            g_bHunterJustLunged[client] = false;
+            g_fHunterMissEscapeCooldown[client] = 0.0;
+        }
+        case L4D2Infected_Tank: {
+            g_fTankLastBhop[client] = 0.0;
+            g_iTankBhopChain[client] = 0;
+            g_fTankLastGround[client] = 0.0;
+            g_fTankLastPunchJump[client] = 0.0;
+        }
+    }
 
-			case (L4D2Infected_Hunter): {
-				if( !bHasBeenShoved[botInfected] ) return Hunter_OnPlayerRunCmd( botInfected, buttons, impulse, vel, angles, weapon );
-			}
-
-			case (L4D2Infected_Charger): {
-				return Charger_OnPlayerRunCmd( botInfected, buttons, impulse, vel, angles, weapon );
-			}
-
-			case (L4D2Infected_Jockey): {
-				return Jockey_OnPlayerRunCmd( botInfected, buttons, impulse, vel, angles, weapon, bHasBeenShoved[botInfected] );
-			}
-
-			case (L4D2Infected_Tank): {
-				return Tank_OnPlayerRunCmd( botInfected, buttons, impulse, vel, angles, weapon );
-			}
-
-			default: {
-				return Plugin_Continue;
-			}
-		}
-	}
-	return Plugin_Continue;
+    return Plugin_Handled;
 }
 
-/***********************************************************************************************************************************************************************************
+// ============================================================================
+// OnPlayerRunCmd — main AI tick entry point
+// ============================================================================
 
-																		EVENT HOOKS
+public Action:OnPlayerRunCmd(int client, int &buttons, int &impulse,
+    float vel[3], float angles[3], int &weapon) {
 
-***********************************************************************************************************************************************************************************/
+    if (!IsBotInfected(client) || !IsPlayerAlive(client)) {
+        return Plugin_Continue;
+    }
 
-// Initialise relevant module flags for SI when they spawn
-public Action:InitialiseSpecialInfected(Handle:event, String:name[], bool:dontBroadcast) {
-	new client = GetClientOfUserId(GetEventInt(event, "userid"));
-	if( IsBotInfected(client) ) {
-		new botInfected = client;
-		bHasBeenShoved[client] = false;
-		iTickCounter[client] = 0;  // Reset tick counter on spawn
-		// Process for SI class
-		switch( L4D2_Infected:GetInfectedClass(botInfected) ) {
+    // Tick throttle
+    g_iTickCounter[client]++;
+    if (g_iTickCounter[client] < TICK_INTERVAL) {
+        return Plugin_Continue;
+    }
+    g_iTickCounter[client] = 0;
 
-			case (L4D2Infected_Hunter): {
-				return Hunter_OnSpawn(botInfected);
-			}
+    // Skip if not bound to a BT
+    if (!BT_IsBound(client)) {
+        return Plugin_Continue;
+    }
 
-			case (L4D2Infected_Charger): {
-				return Charger_OnSpawn(botInfected);
-			}
+    // Reset BT movement accumulators
+    BT_ResetMovement(client);
 
-			case (L4D2Infected_Jockey): {
-				return Jockey_OnSpawn(botInfected);
-			}
+    // Set tank aggression mode on blackboard
+    BB_SetBool(client, "tank_aggro", GetConVarBool(FindConVar("ai_tank_aggro_bhop")));
 
-			default: {
-				return Plugin_Handled;
-			}
-		}
-	}
-	return Plugin_Handled;
+    // Execute Behavior Tree
+    // The BT modifies buttons/angles via BT_AddButton/BT_RemoveButton/BT_SetAimAngles.
+    // OnPlayerRunCmd then applies these modifications.
+    BT_Tick(client);
+
+    // Apply accumulated movement changes
+    BT_ApplyMovement(client, buttons);
+    BT_ApplyAngles(client, angles);
+
+    // Handle teleport (used by Tank bhop for velocity override)
+    if (g_bBT_Teleport[client]) {
+        TeleportEntity(client, NULL_VECTOR, g_fBT_Angles[client], NULL_VECTOR);
+    }
+
+    return Plugin_Changed;
 }
 
-// Modify hunter lunges and block smokers/spitters from fleeing after using their ability
-public Action:OnAbilityUse(Handle:event, String:name[], bool:dontBroadcast) {
-	new client = GetClientOfUserId(GetEventInt(event, "userid"));
-	if( IsBotInfected(client) ) {
-		new bot = client;
-		bHasBeenShoved[bot] = false; // Reset shove status
-		// Process for different SI
-		new String:abilityName[32];
-		GetEventString(event, "ability", abilityName, sizeof(abilityName));
-		if( StrEqual(abilityName, "ability_lunge") ) {
-			return Hunter_OnPounce(bot);
-		} else if( StrEqual(abilityName, "ability_charge") ) {
-			Charger_OnCharge(bot);
-		} else if( StrEqual(abilityName, "ability_spit") ) { // stop smokers and spitters running away
-			RequestFrame(SuicideFrame, any:client);  // OPTIMIZED: use RequestFrame instead of 0.5s timer
-		}
-	}
-	return Plugin_Handled;
+// ============================================================================
+// Event Hooks (preserved from v2.4 — game events, not BT logic)
+// ============================================================================
+
+// On ability use: handle pounce angle modification, smoker/spitter suicide
+public Action:Event_AbilityUse(Handle:event, String:name[], bool:dontBroadcast) {
+    int client = GetClientOfUserId(GetEventInt(event, "userid"));
+    if (!IsBotInfected(client)) return Plugin_Handled;
+
+    g_bHasBeenShoved[client] = false;
+
+    char abilityName[32];
+    GetEventString(event, "ability", abilityName, sizeof(abilityName));
+
+    if (StrEqual(abilityName, "ability_lunge")) {
+        // Hunter pounce: mark for missed-pounce detection, signal coordination
+        g_bHunterJustLunged[client] = true;
+        g_fHunterMissEscapeCooldown[client] = GetGameTime() + 0.3;
+        SI_SignalAttack(client);
+        return Plugin_Handled;
+
+    } else if (StrEqual(abilityName, "ability_charge")) {
+        // Charger charge: signal coordination
+        SI_SignalAttack(client);
+        return Plugin_Handled;
+
+    } else if (StrEqual(abilityName, "ability_spit")) {
+        // Smoker/Spitter: suicide after ability use
+        RequestFrame(SuicideFrame, any:client);
+    }
+    return Plugin_Handled;
 }
 
-// FIXED: This event was never hooked in the original! Now properly registered.
-public Action:OnTongueRelease(Handle:event, String:name[], bool:dontBroadcast) {
-	new client = GetClientOfUserId(GetEventInt(event, "userid"));
-	if( IsBotInfected(client) ) {
-		RequestFrame(SuicideFrame, any:client);  // OPTIMIZED: use RequestFrame instead of 0.5s timer
-	}
-	return Plugin_Continue;
+public Action:Event_TongueRelease(Handle:event, String:name[], bool:dontBroadcast) {
+    int client = GetClientOfUserId(GetEventInt(event, "userid"));
+    if (IsBotInfected(client)) {
+        RequestFrame(SuicideFrame, any:client);
+    }
+    return Plugin_Continue;
 }
 
-// OPTIMIZED: Replace CreateTimer(0.5, Timer_Suicide) with RequestFrame for immediate execution
-// The 0.5 second delay served no purpose — the SI should die immediately after ability use.
-public SuicideFrame(any:client) {
-	if ( IsValidClient(client) && IsBotInfected(client) && IsPlayerAlive(client) ) {
-		ForcePlayerSuicide(client);
-	}
+public Action:Event_PlayerShoved(Handle:event, String:name[], bool:dontBroadcast) {
+    int shovedPlayer = GetClientOfUserId(GetEventInt(event, "userid"));
+    if (IsBotInfected(shovedPlayer)) {
+        g_bHasBeenShoved[shovedPlayer] = true;
+    }
+    return Plugin_Continue;
 }
 
-// Pause behaviour modification when shoved
-public Action:OnPlayerShoved(Handle:event, String:name[], bool:dontBroadcast) {
-	new shovedPlayer = GetClientOfUserId(GetEventInt(event, "userid"));
-	if( IsBotInfected(shovedPlayer) ) {
-		bHasBeenShoved[shovedPlayer] = true;
-		if( L4D2_Infected:GetInfectedClass(shovedPlayer) == L4D2Infected_Jockey ) {
-			Jockey_OnShoved(shovedPlayer);
-		}
-	}
-	return Plugin_Continue;
+public Action:Event_PlayerJump(Handle:event, String:name[], bool:dontBroadcast) {
+    int jumpingPlayer = GetClientOfUserId(GetEventInt(event, "userid"));
+    if (IsBotInfected(jumpingPlayer)) {
+        g_bHasBeenShoved[jumpingPlayer] = false;
+    }
+    return Plugin_Continue;
 }
 
-// Re-enable forced hopping when a shoved jockey leaps again naturally
-public Action:OnPlayerJump(Handle:event, String:name[], bool:dontBroadcast) {
-	new jumpingPlayer = GetClientOfUserId(GetEventInt(event, "userid"));
-	if( IsBotInfected(jumpingPlayer) )  {
-		bHasBeenShoved[jumpingPlayer] = false;
-	}
+// ============================================================================
+// Suicide frame (called via RequestFrame after ability use)
+// ============================================================================
+
+public void SuicideFrame(any:client) {
+    if (IsValidClient(client) && IsBotInfected(client) && IsPlayerAlive(client)) {
+        ForcePlayerSuicide(client);
+    }
 }
 
-/***********************************************************************************************************************************************************************************
+// ============================================================================
+// Coordination timer callback
+// ============================================================================
 
-																	TRACKING SURVIVORS' AIM
-
-***********************************************************************************************************************************************************************************/
-
-/**
-	Determines whether an attacking SI is being watched by the survivor
-	@return: true if the survivor's crosshair is within the specified radius
-	@param attacker: the client number of the attacking SI
-	@param offsetThreshold: the radius(degrees) of the cone of detection around the straight line from the attacked survivor to the SI
-**/
-bool:IsTargetWatchingAttacker( attacker, offsetThreshold ) {
-	new bool:isWatching = true;
-	if( GetClientTeam(attacker) == 3 && IsPlayerAlive(attacker) ) { // SI continue to hold on to their targets for a few seconds after death
-		new target = GetClientAimTarget(attacker);
-		if( IsSurvivor(target) ) {
-			new aimOffset = RoundToNearest(GetPlayerAimOffset(target, attacker));
-			if( aimOffset <= offsetThreshold ) {
-				isWatching = true;
-			} else {
-				isWatching = false;
-			}
-		}
-	}
-	return isWatching;
-}
-
-/**
-	Calculates how much a player's aim is off another player
-	@return: aim offset in degrees
-	@attacker: considers this player's eye angles
-	@target: considers this player's position
-	Adapted from code written by Guren with help from Javalia
-**/
-Float:GetPlayerAimOffset( attacker, target ) {
-	if( !IsClientConnected(attacker) || !IsClientInGame(attacker) || !IsPlayerAlive(attacker) )
-		ThrowError("Client is not Alive.");
-	if(!IsClientConnected(target) || !IsClientInGame(target) || !IsPlayerAlive(target) )
-		ThrowError("Target is not Alive.");
-
-	new Float:attackerPos[3], Float:targetPos[3];
-	new Float:aimVector[3], Float:directVector[3];
-	new Float:resultAngle;
-
-	// Get the unit vector representing the attacker's aim
-	GetClientEyeAngles(attacker, aimVector);
-	aimVector[0] = aimVector[2] = 0.0; // Restrict pitch and roll, consider yaw only (angles on horizontal plane)
-	GetAngleVectors(aimVector, aimVector, NULL_VECTOR, NULL_VECTOR); // extract the forward vector[3]
-	NormalizeVector(aimVector, aimVector); // convert into unit vector
-
-	// Get the unit vector representing the vector between target and attacker
-	GetClientAbsOrigin(target, targetPos);
-	GetClientAbsOrigin(attacker, attackerPos);
-	attackerPos[2] = targetPos[2] = 0.0; // Restrict to XY coordinates
-	MakeVectorFromPoints(attackerPos, targetPos, directVector);
-	NormalizeVector(directVector, directVector);
-
-	// Calculate the angle between the two unit vectors
-	resultAngle = RadToDeg(ArcCosine(GetVectorDotProduct(aimVector, directVector)));
-	return resultAngle;
+public Action:Timer_UpdateCoordination(Handle:timer) {
+    SI_UpdateCoordination();
+    return Plugin_Continue;
 }

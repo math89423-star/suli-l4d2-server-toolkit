@@ -431,6 +431,11 @@ stock bool:IsBotTank(client) {
  * @param dummyName: The name to use for the dummy client
  *
 **/
+// Shared traceray filter — used by multiple AI modules
+public bool:TracerayFilter(impactEntity, contentMask, any:rayOriginEntity) {
+	return impactEntity != rayOriginEntity;
+}
+
 stock CheatCommand( String:commandName[], String:argument1[] = "", String:argument2[] = "", bool:doUseCommandBot = false ) {
 	new flags = GetCommandFlags(commandName);
 	if ( flags != INVALID_FCVAR_FLAGS ) {
@@ -510,6 +515,221 @@ stock bool IsValidClient(int client, bool replaycheck = true) {
 
 stock bool:IsGenericAdmin(client) {
 	return CheckCommandAccess(client, "generic_admin", ADMFLAG_GENERIC, false);
+}
+
+// ===================================================================================
+// SI COORDINATION SYSTEM v2.1
+// ===================================================================================
+
+enum SI_AttackState {
+	SI_IDLE = 0,
+	SI_APPROACHING = 1,
+	SI_COMMITTED = 2,
+	SI_RECOVERING = 3
+};
+
+SI_AttackState g_iSIAttackState[MAXPLAYERS+1];
+int g_iSIAttackTarget[MAXPLAYERS+1];
+float g_fSILastAttackTime[MAXPLAYERS+1];
+float g_fSIWindowEndTime;
+bool g_bSIBoomerHit;
+float g_fSIBoomerHitExpire;
+
+new Handle:g_hCvarCoordEnable;
+new Handle:g_hCvarCoordWindow;
+
+stock SI_UpdateCoordination() {
+	g_bSIBoomerHit = (g_fSIBoomerHitExpire > 0.0 && GetGameTime() < g_fSIBoomerHitExpire);
+
+	for (new client = 1; client <= MaxClients; client++) {
+		if (!IsBotInfected(client) || !IsPlayerAlive(client)) {
+			g_iSIAttackState[client] = SI_IDLE;
+			g_iSIAttackTarget[client] = -1;
+			continue;
+		}
+		if (IsPinningASurvivor(client)) {
+			g_iSIAttackState[client] = SI_COMMITTED;
+			g_iSIAttackTarget[client] = GetClientAimTarget(client);
+			g_fSILastAttackTime[client] = GetGameTime();
+		} else {
+			new Float:sinceAttack = (g_fSILastAttackTime[client] > 0.0) ?
+				GetGameTime() - g_fSILastAttackTime[client] : 999.0;
+			if (sinceAttack < 3.0) {
+				g_iSIAttackState[client] = SI_RECOVERING;
+			} else {
+				new target = GetClientAimTarget(client);
+				g_iSIAttackState[client] = (IsSurvivor(target)) ? SI_APPROACHING : SI_IDLE;
+				g_iSIAttackTarget[client] = target;
+			}
+		}
+	}
+	for (new client = 1; client <= MaxClients; client++) {
+		if (g_iSIAttackState[client] == SI_COMMITTED) {
+			new Float:window = (g_hCvarCoordWindow != INVALID_HANDLE) ?
+				GetConVarFloat(g_hCvarCoordWindow) : 3.0;
+			g_fSIWindowEndTime = GetGameTime() + window;
+			break;
+		}
+	}
+}
+
+stock bool:SI_IsAttackWindow() {
+	if (g_hCvarCoordEnable != INVALID_HANDLE && !GetConVarBool(g_hCvarCoordEnable))
+		return false;
+	return (g_fSIWindowEndTime > 0.0 && GetGameTime() < g_fSIWindowEndTime);
+}
+
+stock bool:SI_IsBoomerActive() {
+	return g_bSIBoomerHit;
+}
+
+stock SI_SignalBoomerHit() {
+	g_bSIBoomerHit = true;
+	g_fSIBoomerHitExpire = GetGameTime() + 5.0;
+	new Float:window = (g_hCvarCoordWindow != INVALID_HANDLE) ?
+		GetConVarFloat(g_hCvarCoordWindow) : 3.0;
+	g_fSIWindowEndTime = GetGameTime() + window;
+
+	// v2.4: VScript coordination — trigger full assault on boomer hit
+	if (g_hCvarCoordEnable != INVALID_HANDLE && GetConVarBool(g_hCvarCoordEnable))
+	{
+		// All SI enter assault mode (no hiding/dithering)
+		L4D2_StartAssault();
+
+		// Command idle/approaching SI to attack distributed targets
+		new bestTarget = GetRandomSurvivor();
+		if (bestTarget > 0)
+		{
+			for (new si = 1; si <= MaxClients; si++)
+			{
+				if (IsValidClient(si) && IsBotInfected(si) && IsPlayerAlive(si)
+					&& g_iSIAttackState[si] < SI_COMMITTED)
+				{
+					new cmdTarget = SI_GetCoordinatedTarget(si);
+					if (cmdTarget > 0)
+					{
+						L4D2_CommandABot(si, cmdTarget, BOT_CMD_ATTACK);
+					}
+				}
+			}
+			// Common infected rush toward the affected survivor
+			L4D2_RushVictim(bestTarget, 1000.0);
+		}
+	}
+}
+
+stock SI_GetCoordinatedTarget(si, preferClass = -1) {
+	new Float:siPos[3];
+	GetClientAbsOrigin(si, siPos);
+
+	new candidates[MAXPLAYERS+1];
+	new candidateCount = 0;
+	new Float:candidateDist[MAXPLAYERS+1];
+
+	for (new client = 1; client <= MaxClients; client++) {
+		if (!IsSurvivor(client) || !IsPlayerAlive(client)) continue;
+		if (IsIncapacitated(client)) continue;
+		if (IsPinned(client)) continue;
+
+		candidates[candidateCount] = client;
+		new Float:survPos[3];
+		GetClientAbsOrigin(client, survPos);
+		candidateDist[candidateCount] = GetVectorDistance(siPos, survPos);
+		candidateCount++;
+	}
+
+	if (candidateCount == 0) {
+		return GetClosestSurvivor(siPos);
+	}
+
+	if (preferClass == _:ZC_SMOKER) {
+		new farthest = candidates[0];
+		new Float:farthestDist = candidateDist[0];
+		for (new i = 1; i < candidateCount; i++) {
+			if (candidateDist[i] > farthestDist) {
+				farthest = candidates[i];
+				farthestDist = candidateDist[i];
+			}
+		}
+		return farthest;
+	}
+
+	if (preferClass == _:ZC_JOCKEY) {
+		new lowestHP = candidates[0];
+		new lowestHPVal = GetClientHealth(candidates[0]);
+		for (new i = 1; i < candidateCount; i++) {
+			new hp = GetClientHealth(candidates[i]);
+			if (hp < lowestHPVal) {
+				lowestHP = candidates[i];
+				lowestHPVal = hp;
+			}
+		}
+		return lowestHP;
+	}
+
+	new bestTarget = -1;
+	new Float:bestDist = -1.0;
+	for (new i = 0; i < candidateCount; i++) {
+		new bool:alreadyTargeted = false;
+		for (new other = 1; other <= MaxClients; other++) {
+			if (other == si) continue;
+			if (g_iSIAttackTarget[other] == candidates[i] && g_iSIAttackState[other] >= SI_APPROACHING) {
+				alreadyTargeted = true;
+				break;
+			}
+		}
+		if (alreadyTargeted && candidateCount > 1) continue;
+		if (SI_IsBoomerActive() && GetEntProp(candidates[i], Prop_Data, "m_hasBeenBoomed") > 0) {
+			return candidates[i];
+		}
+		if (bestDist < 0.0 || candidateDist[i] < bestDist) {
+			bestDist = candidateDist[i];
+			bestTarget = candidates[i];
+		}
+	}
+	return (bestTarget > 0) ? bestTarget : GetClosestSurvivor(siPos);
+}
+
+stock SI_SignalAttack(si) {
+	g_fSILastAttackTime[si] = GetGameTime();
+	g_iSIAttackState[si] = SI_COMMITTED;
+	if (g_hCvarCoordEnable != INVALID_HANDLE && GetConVarBool(g_hCvarCoordEnable)) {
+		new Float:window = (g_hCvarCoordWindow != INVALID_HANDLE) ?
+			GetConVarFloat(g_hCvarCoordWindow) : 3.0;
+		g_fSIWindowEndTime = GetGameTime() + window;
+
+		// v2.4: VScript command — force nearby idle SI to join the attack
+		new target = g_iSIAttackTarget[si];
+		if (target > 0 && IsSurvivor(target))
+		{
+			new Float:siPos[3];
+			GetClientAbsOrigin(si, siPos);
+			for (new other = 1; other <= MaxClients; other++)
+			{
+				if (other == si) continue;
+				if (IsValidClient(other) && IsBotInfected(other) && IsPlayerAlive(other)
+					&& g_iSIAttackState[other] < SI_COMMITTED)
+				{
+					// Only command SI that are within range
+					new Float:otherPos[3];
+					GetClientAbsOrigin(other, otherPos);
+					if (GetVectorDistance(siPos, otherPos) < 2000.0)
+					{
+						L4D2_CommandABot(other, target, BOT_CMD_ATTACK);
+					}
+				}
+			}
+		}
+	}
+}
+
+stock bool:SI_AnySurvivorBoomaBiled() {
+	for (new client = 1; client <= MaxClients; client++) {
+		if (IsSurvivor(client) && IsPlayerAlive(client)) {
+			if (GetEntProp(client, Prop_Data, "m_hasBeenBoomed") > 0) return true;
+		}
+	}
+	return false;
 }
 
 // Kick dummy bot
