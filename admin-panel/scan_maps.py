@@ -110,7 +110,7 @@ def extract_maps_from_vpk(vpk_path):
     try:
         result = subprocess.run(
             ['strings', vpk_path],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=120
         )
         for line in result.stdout.split('\n'):
             line = line.strip()

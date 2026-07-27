@@ -335,7 +335,7 @@ def _extract_map_names(vpk_path):
                     if re.match(r'^[a-z][a-z0-9_]*[a-z0-9]$', m) and len(m) >= 4:
                         maps.add(m)
     try:
-        result = subprocess.run(['strings', vpk_path], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(['strings', vpk_path], capture_output=True, text=True, timeout=120)
         for line in result.stdout.split('\n'):
             line = line.strip()
             if not line.lower().endswith('.bsp'):
@@ -377,7 +377,7 @@ def api_maps_upload():
     tmpdir = tempfile.mkdtemp(prefix="l4d2_upload_")
     try:
         subprocess.run(["unzip", "-o", zip_dst, "*.vpk", "-d", tmpdir],
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
         shutil.rmtree(tmpdir, ignore_errors=True)
         return jsonify({"error": "unzip timeout"}), 500
