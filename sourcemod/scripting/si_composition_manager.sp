@@ -30,7 +30,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.0.0"
+#define PLUGIN_VERSION "2.1.0"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -99,6 +99,11 @@ float  g_fLastSpawnedTime[SCM_CLASS_COUNT + 1];  // Timestamp of last spawn per 
 
 Handle g_hModeTimer = INVALID_HANDLE;
 
+// Wave announcement state
+float  g_fLastWaveAnnounce = 0.0;                // GameTime of last wave chat message
+float  g_fSsTimeMin = 40.0;                      // ss_time_min (configured range lower bound)
+float  g_fSsTimeMax = 60.0;                      // ss_time_max (configured range upper bound)
+
 // ============================================================================
 // ConVars
 // ============================================================================
@@ -106,6 +111,8 @@ ConVar g_cvEnable;
 ConVar g_cvModeIntervalMin;
 ConVar g_cvModeIntervalMax;
 ConVar g_cvAnnounce;
+ConVar g_cvWaveAnnounce;
+ConVar g_cvSsTimeMax;  // ss_time_max handle for runtime override
 
 // ============================================================================
 // Plugin Info
@@ -132,11 +139,25 @@ public void OnPluginStart()
         "Maximum seconds between mode changes", _, true, 30.0, true, 600.0);
     g_cvAnnounce        = CreateConVar("si_comp_announce",            "0",
         "Announce mode changes in chat (0=off, 1=on)", _, true, 0.0, true, 1.0);
+    g_cvWaveAnnounce    = CreateConVar("si_comp_wave_announce",      "1",
+        "Announce each spawn wave in chat with strategy + next wave timer (0=off, 1=on)",
+        _, true, 0.0, true, 1.0);
 
     AutoExecConfig(true, "si_composition_manager");
 
-    // --- Read specialspawner hard limits ---
+    // --- Read specialspawner limits + save timing range ---
     ReadClassLimits();
+
+    // Save the configured spawn interval range (read once, before we start
+    // overwriting ss_time_max at runtime)
+    ConVar cv = FindConVar("ss_time_min");
+    g_fSsTimeMin = (cv != null) ? cv.FloatValue : 40.0;
+    cv = FindConVar("ss_time_max");
+    g_fSsTimeMax = (cv != null) ? cv.FloatValue : 60.0;
+
+    // Get ss_time_max handle for runtime override
+    g_cvSsTimeMax = FindConVar("ss_time_max");
+    RefreshSpawnTiming();  // set initial interval
 
     // --- Hook spawn events ---
     HookEvent("player_spawn",  Event_PlayerSpawn,  EventHookMode_Post);
@@ -162,6 +183,19 @@ int GetConVarIntSafe(const char[] name, int defaultVal)
 {
     ConVar cv = FindConVar(name);
     return (cv != null) ? cv.IntValue : defaultVal;
+}
+
+// ============================================================================
+// Spawn timing: generate random interval, push to ss_time_max (mode 0 = fixed)
+// ss_time_max is constantly overwritten so each wave has a different known interval.
+// The configured range [ss_time_min, original_ss_time_max] is read once at init.
+// ============================================================================
+void RefreshSpawnTiming()
+{
+    float interval = GetRandomFloat(g_fSsTimeMin, g_fSsTimeMax);
+    if (g_cvSsTimeMax != null) {
+        g_cvSsTimeMax.SetFloat(interval);
+    }
 }
 
 // ============================================================================
@@ -201,6 +235,8 @@ void ResetTracking()
         g_iAliveByClass[i] = 0;
         g_fLastSpawnedTime[i] = 0.0;
     }
+    g_fLastWaveAnnounce = 0.0;
+    RefreshSpawnTiming();  // new round, new first interval
 }
 
 // ============================================================================
@@ -351,10 +387,51 @@ public Action L4D_OnSpawnSpecial(int &zombieClass, const float vecPos[3], const 
     if (chosen >= ZC_SMOKER && chosen <= ZC_CHARGER) {
         zombieClass = chosen;
         g_fLastSpawnedTime[chosen] = GetGameTime();
+
+        // --- Wave detection + announcement ---
+        DetectAndAnnounceWave();
+
         return Plugin_Changed;
     }
 
     return Plugin_Continue;  // Fallback: let specialspawner decide
+}
+
+// ============================================================================
+// Wave detection: if cooldown expired, this spawn starts a new wave
+// ============================================================================
+void DetectAndAnnounceWave()
+{
+    float now = GetGameTime();
+    float cooldown = g_fSsTimeMin * 0.5;  // half of min interval = safe gap
+    if (cooldown < 15.0) cooldown = 15.0;
+
+    if (now - g_fLastWaveAnnounce > cooldown) {
+        g_fLastWaveAnnounce = now;
+
+        // Generate next interval BEFORE announcing (so countdown is accurate)
+        float nextInterval = GetRandomFloat(g_fSsTimeMin, g_fSsTimeMax);
+        if (g_cvSsTimeMax != null) {
+            g_cvSsTimeMax.SetFloat(nextInterval);
+        }
+
+        AnnounceWave(nextInterval);
+    }
+}
+
+void AnnounceWave(float nextInterval)
+{
+    if (!g_cvWaveAnnounce.BoolValue) return;
+
+    char modeName[32];
+    if (g_bTankOverride) {
+        strcopy(modeName, sizeof(modeName), "巨兽协同 (Tank支援)");
+    } else {
+        strcopy(modeName, sizeof(modeName), g_sModeNames[g_iCurrentMode]);
+    }
+
+    PrintToChatAll("\x04[SI波次]\x01 特感已刷新! 进攻策略: \x05%s\x01 | 下一波: \x04%.0f\x01秒后",
+        modeName, nextInterval);
 }
 
 // ============================================================================
