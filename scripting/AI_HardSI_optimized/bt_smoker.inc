@@ -120,8 +120,11 @@ stock int BT_CreateSmokerTree() {
     // --- v3.2: Terrain-aware pull strategies ---
     // Ledge: 90% farthest target → pull for fall damage
     int ledgeTargetAcquire = BT_CreateAction(SmokerAct_AcquireLedgeTarget);
-    int ledgePullSeq = BT_CreateSequence(4,
+    // v3.2 FIX: ledgePullSeq now uses SmokerAct_AcquireLedgeTarget (90% farthest)
+    // before snapping aim, instead of relying on the engine's default target.
+    int ledgePullSeq = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsLedgeBetweenTarget),
+        BT_CreateAction(SmokerAct_AcquireLedgeTarget),
         BT_CreateCondition(CND_HasLOS),
         BT_CreateAction(ACT_SnapAimToTarget),
         BT_CreateAction(ACT_Attack)

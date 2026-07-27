@@ -25,7 +25,17 @@
 // ---------------------------------------------------------------------------
 
 BT_Status BoomerCnd_HasVomited(int client) {
-    return BB_GetBool(client, "_boomer_vomited", false) ? BT_SUCCESS : BT_FAILURE;
+    // v3.2 FIX: use timestamp so Boomer can re-vomit after cooldown (10s).
+    // Previously _boomer_vomited was a permanent flag that never reset,
+    // turning the Boomer into a melee-only bot after its first vomit.
+    float vomitTime = BB_GetFloat(client, "_boomer_vomit_time", 0.0);
+    if (vomitTime <= 0.0) return BT_FAILURE;
+    if (GetGameTime() - vomitTime > 10.0) {
+        BB_SetFloat(client, "_boomer_vomit_time", 0.0);
+        BB_SetBool(client, "_boomer_approach", false);
+        return BT_FAILURE;
+    }
+    return BT_SUCCESS;
 }
 
 BT_Status BoomerCnd_PostVomitApproach(int client) {
@@ -90,12 +100,14 @@ BT_Status BoomerAct_Vomit(int client) {
     }
 
     BT_AddButton(client, IN_ATTACK);  // vomit
-    SI_SignalBoomerHit();             // trigger coordination
+    // v3.2 FIX: removed SI_SignalBoomerHit() from here — the OnPlayerBoomed
+    // event hook already fires when vomit actually hits a survivor, so calling
+    // it here caused double coordination triggers (on-press + on-hit).
 
     // Decide post-vomit behavior once
     bool approach = (GetRandomFloat(0.0, 1.0) < 0.8);
     BB_SetBool(client, "_boomer_approach", approach);
-    BB_SetBool(client, "_boomer_vomited", true);
+    BB_SetFloat(client, "_boomer_vomit_time", GetGameTime());  // v3.2 FIX: timestamp, not permanent flag
 
     return BT_SUCCESS;
 }

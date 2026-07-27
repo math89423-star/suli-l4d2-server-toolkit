@@ -33,7 +33,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.3.3"
+#define PLUGIN_VERSION "2.3.5"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -104,8 +104,11 @@ Handle g_hModeTimer = INVALID_HANDLE;
 
 // Wave announcement state
 float  g_fLastWaveAnnounce = 0.0;                // GameTime of last wave chat message
-float  g_fSrcTimeMin = 40.0;                     // Source range lower bound (from cfg)
-float  g_fSrcTimeMax = 60.0;                     // Source range upper bound (from cfg)
+
+// v2.3.4: captured ONCE at OnMapStart — NEVER re-read from the ConVar.
+// PinSpawnTiming writes to these cvars, so re-reading creates a feedback loop.
+float  g_fCfgTimeMin = 45.0;
+float  g_fCfgTimeMax = 60.0;
 
 // Timing pin: we own ss_time_min and ss_time_max handles to pin both
 // to the same value each wave. ss_time_mode 1 then produces exactly that value
@@ -180,19 +183,13 @@ public void OnPluginStart()
     g_cvSsBaseSize   = FindConVar("ss_base_size");
     g_cvSsExtraSize  = FindConVar("ss_extra_size");
 
-    // Capture the config's ss_spawn_size as a FIXED baseline.
-    // AdjustSpawnSize must use this constant, not the mutable ConVar value,
-    // or it feeds its own output back as input and converges to the clamp floor.
-    if (g_cvSsSpawnSize != null) {
-        g_fCfgBaseSpawnSize = float(g_cvSsSpawnSize.IntValue);
-    }
+    // NOTE: g_fCfgBaseSpawnSize is now captured in OnConfigsExecuted —
+    // at OnPluginStart, specialspawner.cfg hasn't executed yet,
+    // so ss_spawn_size still holds the compile default (4 vs cfg 6).
 
-    // --- Read configured source range ---
-    ReadSourceRange();
-
-    // --- Set initial interval + spawn size ---
-    PinSpawnTiming();
-    AdjustSpawnSize();
+    // NOTE: CaptureSourceRange / PinSpawnTiming / AdjustSpawnSize are
+    // deferred to OnConfigsExecuted — in OnPluginStart, specialspawner.cfg
+    // hasn't executed yet, so the ConVars still hold compile defaults (~10-15s).
 
     // --- Hook spawn events ---
     HookEvent("player_spawn",     Event_PlayerSpawn,     EventHookMode_Post);
@@ -227,20 +224,22 @@ int GetConVarIntSafe(const char[] name, int defaultVal)
 //
 // specialspawner mode 1 picks random(ss_time_min, ss_time_max) each wave.
 // We pin BOTH to the SAME value → random(X, X) = X → exact countdown.
-// ss_time_min / ss_time_max are read fresh from cfg on MapStart / round_start.
 // ============================================================================
-void ReadSourceRange()
+void CaptureSourceRange()
 {
-    if (g_cvSsTimeMin != null) g_fSrcTimeMin = g_cvSsTimeMin.FloatValue;
-    if (g_cvSsTimeMax != null) g_fSrcTimeMax = g_cvSsTimeMax.FloatValue;
+    // v2.3.4: read configured range ONCE. NEVER re-read from the ConVar
+    // inside PinSpawnTiming — we wrote to it last call so it contains our
+    // own pinned value, not the configured range.
+    if (g_cvSsTimeMin != null) g_fCfgTimeMin = g_cvSsTimeMin.FloatValue;
+    if (g_cvSsTimeMax != null) g_fCfgTimeMax = g_cvSsTimeMax.FloatValue;
 }
 
 // Generate next interval and pin both cvars to it.
 // Returns the chosen interval so the caller can announce it.
 float PinSpawnTiming()
 {
-    ReadSourceRange();  // re-read in case sourcemod.cfg changed them
-    float interval = GetRandomFloat(g_fSrcTimeMin, g_fSrcTimeMax);
+    // v2.3.4: use CAPTURED values, not live ConVar (feedback loop fix)
+    float interval = GetRandomFloat(g_fCfgTimeMin, g_fCfgTimeMax);
     if (g_cvSsTimeMin != null) g_cvSsTimeMin.SetFloat(interval);
     if (g_cvSsTimeMax != null) g_cvSsTimeMax.SetFloat(interval);
 
@@ -298,6 +297,11 @@ void AdjustSpawnSize()
 // ============================================================================
 public void OnMapStart()
 {
+    // NOTE: NOT calling CaptureSourceRange() here — OnMapStart fires BEFORE
+    // specialspawner.cfg is re-executed on map change, so the live ConVars
+    // still hold the Pinned values from the previous map (feedback loop!).
+    // Instead, OnConfigsExecuted fires AFTER cfgs and does the capture.
+
     // Pick random starting mode
     g_iCurrentMode = GetRandomInt(0, SCM_MODE_COUNT - 1);
     g_bTankOverride = false;
@@ -305,8 +309,22 @@ public void OnMapStart()
     ResetTracking();
 
     // Start mode rotation timer
-    delete g_hModeTimer;
-    ScheduleNextModeRotation();
+    ScheduleNextModeRotation();  // creates new timer (old one killed by TIMER_FLAG_NO_MAPCHANGE)
+}
+
+// OnConfigsExecuted fires AFTER specialspawner.cfg + sourcemod.cfg on every map load.
+// This is the ONLY safe place to capture ss_time_min / ss_time_max —
+// OnPluginStart is too early (defaults), OnMapStart is too early (pinned values).
+public void OnConfigsExecuted()
+{
+    // Re-capture configured spawn size baseline (cfg just executed, value is fresh)
+    if (g_cvSsSpawnSize != null) {
+        g_fCfgBaseSpawnSize = float(g_cvSsSpawnSize.IntValue);
+    }
+
+    CaptureSourceRange();
+    PinSpawnTiming();
+    AdjustSpawnSize();
 }
 
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -528,7 +546,7 @@ public Action L4D_OnSpawnSpecial(int &zombieClass, const float vecPos[3], const 
 void DetectAndAnnounceWave()
 {
     float now = GetGameTime();
-    float cooldown = g_fSrcTimeMin * 0.5;  // half of source range min
+    float cooldown = g_fCfgTimeMin * 0.5;  // half of captured source range min
     if (cooldown < 15.0) cooldown = 15.0;
 
     if (now - g_fLastWaveAnnounce > cooldown) {

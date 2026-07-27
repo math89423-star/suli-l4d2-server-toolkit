@@ -70,6 +70,9 @@ int   g_iBTSpitterRoot  = -1;
 int   g_iBTTankRoot     = -1;
 int   g_iBTWitchRoot    = -1;
 
+// Cached ConVar handles (avoid FindConVar per-tick)
+ConVar g_hCvarTankAggroBhop = null;
+
 // ============================================================================
 // OnPluginStart
 // ============================================================================
@@ -104,6 +107,9 @@ public OnPluginStart() {
     Jockey_OnModuleStart();
     Tank_OnModuleStart();
     Witch_OnModuleStart();
+
+    // Cache frequently-read cvars (avoid FindConVar per tick)
+    g_hCvarTankAggroBhop = FindConVar("ai_tank_aggro_bhop");
 
     // --- Build all Behavior Trees ---
     g_iBTHunterRoot  = BT_CreateHunterTree();
@@ -185,9 +191,22 @@ public Action:OnPlayerRunCmd(int client, int &buttons, int &impulse,
         return Plugin_Continue;
     }
 
+    // --- v3.2 FIX: per-frame Tank jump/duck suppression (v2.2 first-layer defense) ---
+    // The vanilla Tank AI presses IN_JUMP on its own. Without per-frame clearing,
+    // TICK_INTERVAL=4 means 75% of frames pass through unmodified, letting the
+    // vanilla AI jump freely at close range. This runs BEFORE the tick throttle.
+    if (GetInfectedClass(client) == L4D2Infected_Tank) {
+        buttons &= ~IN_JUMP;
+        buttons &= ~IN_DUCK;
+    }
+
     // Tick throttle
     g_iTickCounter[client]++;
     if (g_iTickCounter[client] < TICK_INTERVAL) {
+        // For Tanks: we already suppressed jump/duck above → must return Changed
+        if (GetInfectedClass(client) == L4D2Infected_Tank) {
+            return Plugin_Changed;
+        }
         return Plugin_Continue;
     }
     g_iTickCounter[client] = 0;
@@ -200,8 +219,8 @@ public Action:OnPlayerRunCmd(int client, int &buttons, int &impulse,
     // Reset BT movement accumulators
     BT_ResetMovement(client);
 
-    // Set tank aggression mode on blackboard
-    BB_SetBool(client, "tank_aggro", GetConVarBool(FindConVar("ai_tank_aggro_bhop")));
+    // Set tank aggression mode on blackboard (cached handle, no FindConVar per tick)
+    BB_SetBool(client, "tank_aggro", g_hCvarTankAggroBhop != null && GetConVarBool(g_hCvarTankAggroBhop));
 
     // Execute Behavior Tree
     // The BT modifies buttons/angles via BT_AddButton/BT_RemoveButton/BT_SetAimAngles.

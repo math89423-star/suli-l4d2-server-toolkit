@@ -101,6 +101,16 @@ stock int BT_CreateChargerTree() {
         BT_CreateAction(ChargerAct_Charge)
     );
 
+    // v3.2 FIX: approach when in range but no LOS (LOS blind-spot deadlock).
+    // Previously: distance ≤500 + no LOS → neither charge nor approach fires
+    // → falls to BlockCharge → Charger stands still extending cooldown forever.
+    int noLosApproach = BT_CreateSequence(4,
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
+        BT_CreateIsInRange(500.0),
+        BT_CreateAction(ACT_StrafeMoveToTarget)   // keep moving, may regain LOS
+    );
+
     // Standard approach: strafe toward target when too far to charge
     int approachSeq = BT_CreateSequence(3,
         BT_CreateAction(ACT_AcquireClosestTarget),
@@ -109,7 +119,7 @@ stock int BT_CreateChargerTree() {
     );
 
     // Root selector — terrain branches (2-6) fail when ai_terrain_enable=0 or
-    // terrain=UNKNOWN → falls through to standard behavior (7-12).
+    // terrain=UNKNOWN → falls through to standard behavior (7-13).
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor));
     BT_AddChild(root, ledgeChargeSeq);          // 2. v3.2: ledge → charge
@@ -119,10 +129,11 @@ stock int BT_CreateChargerTree() {
     BT_AddChild(root, openFlankSeq);            // 6. v3.2: open → approach
     BT_AddChild(root, lowHpSeq);                // 7. ← FALLBACK: low HP charge
     BT_AddChild(root, coordSeq);                // 8. ← FALLBACK: coordination
-    BT_AddChild(root, defaultChargeSeq);        // 9. ← FALLBACK: default charge (v3.3)
-    BT_AddChild(root, approachSeq);             // 10.← FALLBACK: approach with strafe
-    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 11. ← FALLBACK
-    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 12. ← FALLBACK
+    BT_AddChild(root, defaultChargeSeq);        // 9. ← FALLBACK: default charge
+    BT_AddChild(root, noLosApproach);           // 10. ← FALLBACK: in-range no-LOS approach
+    BT_AddChild(root, approachSeq);             // 11. ← FALLBACK: approach with strafe
+    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 12. ← FALLBACK
+    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 13. ← FALLBACK
 
     return root;
 }

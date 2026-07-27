@@ -526,6 +526,9 @@ public bool TerrainTraceFilter(int entity, int contentsMask, any data) {
     if (entity < 1 || entity > MaxClients) return true;  // world geometry
     // Skip other infected bots (they're not terrain)
     if (IsClientInGame(entity) && GetClientTeam(entity) == 3) return false;
+    // v3.2 FIX: skip survivors too (they're not terrain — standing next to a
+    // survivor shouldn't make the area classify as "narrow").
+    if (IsClientInGame(entity) && GetClientTeam(entity) == 2) return false;
     return true;
 }
 

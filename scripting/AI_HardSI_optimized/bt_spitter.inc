@@ -23,7 +23,17 @@
 // ---------------------------------------------------------------------------
 
 BT_Status SpitterCnd_HasSpit(int client) {
-    return BB_GetBool(client, "_spitter_spit", false) ? BT_SUCCESS : BT_FAILURE;
+    // v3.2 FIX: use timestamp so Spitter can re-spit after cooldown (8s).
+    // Previously _spitter_spit was a permanent flag that never reset,
+    // turning the Spitter into a melee-only bot after its first spit.
+    float spitTime = BB_GetFloat(client, "_spitter_spit_time", 0.0);
+    if (spitTime <= 0.0) return BT_FAILURE;
+    if (GetGameTime() - spitTime > 8.0) {
+        BB_SetFloat(client, "_spitter_spit_time", 0.0);
+        BB_SetBool(client, "_spitter_approach", false);
+        return BT_FAILURE;
+    }
+    return BT_SUCCESS;
 }
 
 BT_Status SpitterCnd_PostSpitApproach(int client) {
@@ -108,7 +118,7 @@ BT_Status SpitterAct_Spit(int client) {
     // 80% approach (body-block/distract), 20% retreat
     bool approach = (GetRandomFloat(0.0, 1.0) < 0.8);
     BB_SetBool(client, "_spitter_approach", approach);
-    BB_SetBool(client, "_spitter_spit", true);
+    BB_SetFloat(client, "_spitter_spit_time", GetGameTime());  // v3.2 FIX: timestamp, not permanent flag
 
     return BT_SUCCESS;
 }
@@ -169,9 +179,12 @@ stock int BT_CreateSpitterTree() {
         BT_CreateAction(SpitterAct_Spit)
     );
 
-    // --- Default: find any target and spit ---
-    int defaultSpit = BT_CreateSequence(2,
+    // --- Default: find any target, check LOS, then spit ---
+    // v3.2 FIX: added CND_HasLOS — without it, Spitter would spit toward the
+    // closest survivor even when a wall was in the way, wasting the ability.
+    int defaultSpit = BT_CreateSequence(3,
         BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateCondition(CND_HasLOS),
         BT_CreateAction(SpitterAct_Spit)
     );
 

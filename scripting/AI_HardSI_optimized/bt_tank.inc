@@ -163,6 +163,9 @@ BT_Status TankAct_ExecuteIncapped(int client) {
 // ============================================================================
 
 BT_Status TankCond_RockEligible(int client) {
+    // v3.2 FIX: check ai_tank_rock master switch (was created but never read)
+    if (!GetConVarBool(FindConVar("ai_tank_rock"))) return BT_FAILURE;
+
     int target = BB_GetInt(client, "target", -1);
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return BT_FAILURE;
     float tPos[3], sPos[3];
@@ -177,6 +180,9 @@ BT_Status TankCond_RockEligible(int client) {
 // ============================================================================
 
 BT_Status TankCond_BhopEligible(int client) {
+    // v3.2 FIX: check ai_tank_bhop master switch (was created but never read)
+    if (!GetConVarBool(FindConVar("ai_tank_bhop"))) return BT_FAILURE;
+
     int flags = GetEntityFlags(client);
     if (!(flags & FL_ONGROUND)) return BT_FAILURE;
     if (GetEntityMoveType(client) & MOVETYPE_LADDER) return BT_FAILURE;
@@ -190,7 +196,16 @@ BT_Status TankCond_BhopEligible(int client) {
     float tPos[3];
     GetClientAbsOrigin(client, tPos);
     int target = BB_GetInt(client, "target", -1);
-    if (GetSurvivorProximity(tPos, target) > 800) return BT_FAILURE;
+
+    // v3.2 FIX: enforce min_dist (was created as cvar but never checked).
+    // Tank should punch at close range, not bhop.
+    int minDist = GetConVarInt(FindConVar("ai_tank_bhop_min_dist"));
+    if (GetSurvivorProximity(tPos, target) < minDist) return BT_FAILURE;
+
+    // v3.2 FIX: enforce max_dist too (check was reversed: >800 returned FAIL,
+    // but intended behavior is FAIL when farther than max_dist).
+    int maxDist = GetConVarInt(FindConVar("ai_tank_bhop_max_dist"));
+    if (GetSurvivorProximity(tPos, target) > maxDist) return BT_FAILURE;
 
     return BT_SUCCESS;
 }

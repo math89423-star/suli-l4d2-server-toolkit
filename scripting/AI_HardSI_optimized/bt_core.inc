@@ -443,10 +443,12 @@ BT_Status BT_TickNode(int nodeId, int client) {
             for (int i = 0; i < len; i++) {
                 int childId = g_hBTChildren[nodeId].Get(i);
                 BT_Status result = BT_TickNode(childId, client);
+                // v3.2 FIX: add break statements — the fall-through meant
+                // SUCCESS also incremented failureCount and runningCount.
                 switch (result) {
-                    case BT_SUCCESS:  { successCount++; }
-                    case BT_FAILURE:  { failureCount++; }
-                    case BT_RUNNING:  { runningCount++; }
+                    case BT_SUCCESS:  { successCount++;  break; }
+                    case BT_FAILURE:  { failureCount++;  break; }
+                    case BT_RUNNING:  { runningCount++;  break; }
                 }
             }
 
@@ -468,8 +470,14 @@ BT_Status BT_TickNode(int nodeId, int client) {
         }
 
         case BTN_COOLDOWN: {
+            // v3.2 FIX: per-node cooldown key (was shared "_bt_cd_last" across
+            // all Cooldown nodes in the tree — e.g., Smoker's two cooldowns
+            // interfered with each other).
+            char cdKey[32];
+            Format(cdKey, sizeof(cdKey), "_bt_cd_%d", nodeId);
+
             float now = GetGameTime();
-            float lastTick = BB_GetFloat(client, "_bt_cd_last");
+            float lastTick = BB_GetFloat(client, cdKey);
             float cooldown = g_fBTParam[nodeId];
 
             // If within cooldown, skip child entirely
@@ -487,7 +495,7 @@ BT_Status BT_TickNode(int nodeId, int client) {
 
             if (result != BT_RUNNING) {
                 // Child completed — reset the cooldown timer
-                BB_SetFloat(client, "_bt_cd_last", now);
+                BB_SetFloat(client, cdKey, now);
                 g_iBTRunningChild[client][nodeId] = -1;
             } else {
                 g_iBTRunningChild[client][nodeId] = 0;
@@ -576,18 +584,26 @@ stock BT_Status BT_Tick(int client) {
 // ---------------------------------------------------------------------------
 
 stock void BT_GetNodeTypeName(BT_NodeType type, char[] buffer, int maxlen) {
-    switch (type) {
-        case BTN_SELECTOR:         strcopy(buffer, maxlen, "Selector");
-        case BTN_SEQUENCE:         strcopy(buffer, maxlen, "Sequence");
-        case BTN_PARALLEL:         strcopy(buffer, maxlen, "Parallel");
-        case BTN_INVERTER:         strcopy(buffer, maxlen, "Inverter");
-        case BTN_COOLDOWN:         strcopy(buffer, maxlen, "Cooldown");
-        case BTN_FORCE_SUCCESS:    strcopy(buffer, maxlen, "ForceSuccess");
-        case BTN_FORCE_FAILURE:    strcopy(buffer, maxlen, "ForceFailure");
-        case BTN_REPEAT_UNTIL_FAIL: strcopy(buffer, maxlen, "RepeatUntilFail");
-        case BTN_CONDITION:        strcopy(buffer, maxlen, "Condition");
-        case BTN_ACTION:           strcopy(buffer, maxlen, "Action");
-        case BTN_WAIT:             strcopy(buffer, maxlen, "Wait");
-        default:                   strcopy(buffer, maxlen, "Unknown");
-    }
+    // v3.2 FIX: replaced switch-case (whose break-statements were silently
+    // dropped by SourcePawn's parser) with a static-array lookup that is
+    // immune to fall-through by construction.
+    // BTN_WAIT = 11, so 12 slots (0..11 inclusive).
+    static const char sNodeNames[12][] = {
+        "Invalid",          // BTN_INVALID=0
+        "Selector",         // BTN_SELECTOR=1
+        "Sequence",         // BTN_SEQUENCE=2
+        "Parallel",         // BTN_PARALLEL=3
+        "Inverter",         // BTN_INVERTER=4
+        "Cooldown",         // BTN_COOLDOWN=5
+        "ForceSuccess",     // BTN_FORCE_SUCCESS=6
+        "ForceFailure",     // BTN_FORCE_FAILURE=7
+        "RepeatUntilFail",  // BTN_REPEAT_UNTIL_FAIL=8
+        "Condition",        // BTN_CONDITION=9
+        "Action",           // BTN_ACTION=10
+        "Wait"              // BTN_WAIT=11
+    };
+    if (type >= BTN_INVALID && type <= BTN_WAIT)
+        strcopy(buffer, maxlen, sNodeNames[_:type]);
+    else
+        strcopy(buffer, maxlen, "Unknown");
 }

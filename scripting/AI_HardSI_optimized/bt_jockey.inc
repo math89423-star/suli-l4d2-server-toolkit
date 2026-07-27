@@ -53,32 +53,61 @@ stock int BT_CreateJockeyTree() {
         BT_CreateAction(ACT_HoldVictim)
     );
 
-    // --- v3.2: Terrain-aware leap strategies ---
-    // Narrow: hug wall approach → leap from cover
-    int narrowLeapSeq = BT_CreateSequence(5,
-        BT_CreateCondition(CND_IsNarrowSpace),
-        BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(600.0),
-        BT_CreateAction(ACT_HugWall)
-    );
+    // --- v3.2 FIX: Terrain-aware leap strategies ---
+    // Each terrain type is split into TWO branches:
+    //   Approach (far):  terrain match + onGround + HasLOS + NOT inRange → move
+    //   Attack  (close): terrain match + onGround + HasLOS + inRange → AlternatingHop
+    // Previously these branches ended with RUNNING-type movement actions
+    // (HugWall/FlankApproach), which blocked the hopSeq fallback forever.
+    // Now the approach runs when far; when close, it fails (Inverter trips)
+    // and the selector moves to the attack branch.
 
-    // Open area: flank approach → leap from unexpected angle
-    int openFlankSeq = BT_CreateSequence(5,
-        BT_CreateCondition(CND_IsOpenArea),
-        BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(800.0),
-        BT_CreateAction(ACT_FlankApproach)
-    );
-
-    // Ledge: approach survivor who is near edge → ride them off
-    int ledgeRideSeq = BT_CreateSequence(5,
+    // Ledge: approach (far) → flank
+    int ledgeApproach = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsNearLedge),
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(500.0),
+        BT_CreateInverter(BT_CreateIsInRange(400.0)),   // still far
         BT_CreateAction(ACT_FlankApproach)
+    );
+    int ledgeLeap = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsNearLedge),
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(400.0),                       // close enough
+        BT_CreateCooldown(2.0, BT_CreateAction(JockeyAct_AlternatingHop))
+    );
+
+    // Narrow: approach (far) → hug wall
+    int narrowApproach = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateInverter(BT_CreateIsInRange(350.0)),
+        BT_CreateAction(ACT_HugWall)
+    );
+    int narrowLeap = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(350.0),
+        BT_CreateCooldown(2.0, BT_CreateAction(JockeyAct_AlternatingHop))
+    );
+
+    // Open: approach (far) → flank
+    int openApproach = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateInverter(BT_CreateIsInRange(400.0)),
+        BT_CreateAction(ACT_FlankApproach)
+    );
+    int openLeap = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(400.0),
+        BT_CreateCooldown(2.0, BT_CreateAction(JockeyAct_AlternatingHop))
     );
 
     // --- Standard hop attack ---
@@ -91,8 +120,6 @@ stock int BT_CreateJockeyTree() {
     int hopAcquireTarget = BT_CreateAction(JockeyAct_AlternatingHop);
     int hopWithCooldown = BT_CreateCooldown(2.0, hopAcquireTarget);
 
-    // v3.2 FIX: StrafeRandom RUNNING blocked hopWithCooldown (same bug as Hunter)
-    // Strafe is now handled by strafeApproach, not inside the hop attack sequence.
     int hopSeq = BT_CreateSequence(2,
         hopPreCond,
         hopWithCooldown
@@ -104,15 +131,19 @@ stock int BT_CreateJockeyTree() {
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
-    // Root selector — terrain branches (2-4) fail when disabled/unknown
-    // → falls through to standard hop (5) and approach (6-7).
+    // Root selector — terrain branches come in approach/attack pairs.
+    // When disabled (ai_terrain_enable=0): all terrain conditions return FAIL
+    // → falls through to standard hop (8) and approach (9-10).
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, rideSeq);
-    BT_AddChild(root, ledgeRideSeq);        // 2. v3.2: ledge → flank + leap
-    BT_AddChild(root, narrowLeapSeq);       // 3. v3.2: narrow → hug wall
-    BT_AddChild(root, openFlankSeq);        // 4. v3.2: open → flank
-    BT_AddChild(root, hopSeq);              // 5. ← FALLBACK: standard hop
-    BT_AddChild(root, strafeApproach);      // 6. ← FALLBACK: approach
+    BT_AddChild(root, ledgeLeap);           // 2. v3.2: ledge → close → leap
+    BT_AddChild(root, ledgeApproach);       // 3. v3.2: ledge → far → flank
+    BT_AddChild(root, narrowLeap);          // 4. v3.2: narrow → close → leap
+    BT_AddChild(root, narrowApproach);      // 5. v3.2: narrow → far → hug wall
+    BT_AddChild(root, openLeap);            // 6. v3.2: open → close → leap
+    BT_AddChild(root, openApproach);        // 7. v3.2: open → far → flank
+    BT_AddChild(root, hopSeq);              // 8. ← FALLBACK: standard hop
+    BT_AddChild(root, strafeApproach);      // 9. ← FALLBACK: approach
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
 
     return root;
