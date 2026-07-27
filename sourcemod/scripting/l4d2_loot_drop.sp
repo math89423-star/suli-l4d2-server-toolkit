@@ -243,41 +243,21 @@ void WeightedPickN(LootItem pool[MAX_LOOT_ITEMS], int count, int n, int result[M
 }
 
 // ============================================================================
-// 射线过滤
 // ============================================================================
-public bool TraceFilterIgnoreEntity(int entity, int contentsMask, any data)
-{
-    return entity != data;
-}
-
-// ============================================================================
-// 地面追踪 + 生成单个物品
+// 生成单个物品 — spawn 到僵尸位置上方，引擎物理自然掉落
 // ============================================================================
 void SpawnOne(const char[] classname, float base[3], float off[3])
 {
     int ent = CreateEntityByName(classname);
     if (ent == -1) return;
 
-    float from[3];
-    from[0] = base[0] + off[0];
-    from[1] = base[1] + off[1];
-    from[2] = base[2] + 20.0;
-
-    float to[3];
-    Handle tr = TR_TraceRayFilterEx(from, view_as<float>({ 90.0, 0.0, 0.0 }), MASK_SOLID, RayType_Infinite, TraceFilterIgnoreEntity, ent);
-    if (TR_DidHit(tr))
-    {
-        TR_GetEndPosition(to, tr);
-        to[2] += 5.0;
-    }
-    else
-    {
-        to = from;
-    }
-    delete tr;
+    float spawnPos[3];
+    spawnPos[0] = base[0] + off[0];
+    spawnPos[1] = base[1] + off[1];
+    spawnPos[2] = base[2] + 40.0;
 
     DispatchSpawn(ent);
-    TeleportEntity(ent, to, NULL_VECTOR, NULL_VECTOR);
+    TeleportEntity(ent, spawnPos, NULL_VECTOR, NULL_VECTOR);
 
     // Give reserve ammo to heavy weapons
     if (StrEqual(classname, "weapon_grenade_launcher"))
@@ -285,10 +265,10 @@ void SpawnOne(const char[] classname, float base[3], float off[3])
         SetEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo", 30);
     }
 
-    // Glow highlight: golden outline visible through walls at close range
+    // Glow highlight
     SetEntProp(ent, Prop_Send, "m_iGlowType", 3);
     SetEntProp(ent, Prop_Send, "m_nGlowRange", 800);
-    SetEntProp(ent, Prop_Send, "m_glowColorOverride", 50 | (255 << 8) | (50 << 16) | (255 << 24)); // bright green
+    SetEntProp(ent, Prop_Send, "m_glowColorOverride", 50 | (255 << 8) | (50 << 16) | (255 << 24));
 }
 
 // ============================================================================
@@ -371,8 +351,13 @@ void Event_InfectedDeath(Event event, const char[] name, bool dontBroadcast)
     int idx = WeightedPick(g_Pool_ThrowMed, g_Count_ThrowMed);
     if (idx < 0) return;
 
+    // 从僵尸身上掉落，不是击杀者
     float pos[3];
-    GetClientAbsOrigin(attacker, pos);
+    int infected = event.GetInt("entityid");
+    if (infected > 0 && IsValidEntity(infected))
+        GetEntPropVector(infected, Prop_Send, "m_vecOrigin", pos);
+    else
+        GetClientAbsOrigin(attacker, pos);
 
     int tmp[MAX_LOOT_ITEMS]; tmp[0] = idx;
     SpawnN(g_Pool_ThrowMed, tmp, 1, pos);
