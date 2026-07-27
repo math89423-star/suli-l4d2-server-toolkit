@@ -239,7 +239,7 @@ bool g_bFlowRecomputeHooked;
 bool finale_stitched; // finale guide was drawn
 bool finale_backwards; // rescue vehicle is not at max flow -> flow cannot be used for guiding
 
-bool elevator_available, blocked_available; // check fi l4dhooks is up to date
+bool elevator_available, corner_available, blocked_available; // check if l4dhooks is up to date
 
 ConVar g_hCvarFinale;
 #define FINALE_ALWAYS 0 

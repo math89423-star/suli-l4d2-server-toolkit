@@ -205,8 +205,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 public void OnAllPluginsLoaded()
 {
     elevator_available = GetFeatureStatus(FeatureType_Native,"L4D_NavArea_GetElevator")==FeatureStatus_Available;
+    corner_available  = GetFeatureStatus(FeatureType_Native,"L4D_NavArea_GetCorner")==FeatureStatus_Available;
     blocked_available = GetFeatureStatus(FeatureType_Native,"L4D_NavArea_IsBlocked")==FeatureStatus_Available;
-    if (!elevator_available || !blocked_available) LogMessage("Please update l4dhooks for better performance.");
+    if (!elevator_available || !corner_available || !blocked_available) LogMessage("Please update l4dhooks for better performance.");
     if (g_bL4D2) g_hCvarZM = FindConVar("zm_enable"); // check if zombie master is active
 }
 

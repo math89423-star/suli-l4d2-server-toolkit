@@ -791,11 +791,15 @@ stock void AStar_ReconstructPath(ArrayList outCells)
         return;
     }
 
-    // v4.0 fix: Direct path conversion instead of portal/funnel algorithm.
-    // The funnel string-pulling code causes SIGALRM crashes even on small maps
-    // (14 portals, 15 nodes). Until the funnel bug is root-caused, we build
-    // guide cells directly from the A* cameFrom node chain.
-    // This produces slightly suboptimal paths but is stable and functional.
+    // Direct path conversion: place a guide cell at every nav area center
+    // along the A* path. Adjacent nav areas share walkable connections,
+    // so consecutive beams are short and likely traversable.
+    // The hull validation pass + STAGE_REPAIR handle the few blocked beams.
+
+    // Direct path conversion: place a guide cell at every nav area center
+    // along the A* path. Adjacent nav areas share walkable connections,
+    // so consecutive beams are short and likely traversable.
+    // The hull validation pass + STAGE_REPAIR handle the few blocked beams.
     for (int i = 0; i < pathLen; i++)
     {
         int nodeIdx = nodePath.Get(i);
@@ -809,228 +813,10 @@ stock void AStar_ReconstructPath(ArrayList outCells)
         outCells.PushArray(cell, sizeof(Cell));
     }
     delete nodePath;
-    return;
-    /*
-    // --- DISABLED: Portal/funnel code causes SIGALRM crash ---
-    // Each portal is the shared edge between consecutive nav areas in the path.
-    // The funnel algorithm uses the left/right endpoints to find the shortest
-    // path through this sequence — mathematically optimal string pulling.
-    int portalCount = pathLen - 1;
-    LogMessage("[PTG] ReconstructPath: portalCount=%d, about to alloc portalEps", portalCount);
-    ArrayList portalEps = new ArrayList(6); // each portal: float[3] left, float[3] right
-    LogMessage("[PTG] ReconstructPath: portalEps created, about to alloc bool[%d]", portalCount);
-    bool[] portalDegenerate = new bool[portalCount];
-    LogMessage("[PTG] ReconstructPath: bool array OK, about to build portal loop");
-
-    for (int i = 0; i < portalCount; i++)
-    {
-        int ni = nodePath.Get(i);
-        int nj = nodePath.Get(i + 1);
-        int minI = (ni < nj) ? ni : nj;
-        int maxI = (ni < nj) ? nj : ni;
-        char key[32];
-        Format(key, sizeof(key), "%d_%d", minI, maxI);
-
-        PortalInfo portal;
-        float left[3], right[3];
-        bool gotPortal = false;
-
-        if (g_hPortalCache != null && g_hPortalCache.GetArray(key, portal, sizeof(PortalInfo)))
-        {
-            left = portal.ep1;
-            right = portal.ep2;
-            gotPortal = true;
-        }
-
-        if (!gotPortal)
-        {
-            // Fallback: use centers of the two areas as degenerate portal
-            g_hAStarCenters.GetArray(ni, left, 3);
-            g_hAStarCenters.GetArray(nj, right, 3);
-            portalDegenerate[i] = true;
-        }
-        else
-        {
-            // Check if portal is effectively a point (endpoints very close)
-            portalDegenerate[i] = (GetVectorDistance(left, right, true) < 64.0);
-        }
-
-        portalEps.PushArray(left, 3);
-        portalEps.PushArray(right, 3);
-    }
-
-    LogMessage("[PTG] ReconstructPath: portals built, starting funnel");
-    LogMessage("[PTG] ReconstructPath: about to alloc funnelResult ArrayList");
-    // --- Funnel String Pulling ---
-    // Operates in 2D (XY plane) over the portal endpoint sequence.
-    // Produces the optimal shortest path through the portals.
-
-    // 2D triangle area (signed). >0 = p is left of ab, <0 = right, 0 = collinear.
-    // Used for all left/right orientation checks in the funnel.
-
-    ArrayList funnelResult = new ArrayList(sizeof(Cell));
-    LogMessage("[PTG] ReconstructPath: funnelResult created, building start cell");
-
-    // Start cell
-    Cell startCell;
-    int firstNodeIdx = nodePath.Get(0);
-    int firstAreaInt = g_hAStarNodes.Get(firstNodeIdx);
-    startCell.navArea = view_as<Address>(firstAreaInt);
-    g_hAStarCenters.GetArray(firstNodeIdx, startCell.center, 3);
-    startCell.flow = L4D2Direct_GetTerrorNavAreaFlow(startCell.navArea);
-    if (startCell.flow <= 0.0 && g_fMaxFlow > 0.0)
-        startCell.flow = 0.0;
-
-    // Funnel state
-    Cell apex;
-    apex.navArea = startCell.navArea;
-    apex.center = startCell.center;
-    apex.flow = startCell.flow;
-    int leftPortalIdx = -1;   // which portal supplies the left funnel boundary
-    int rightPortalIdx = -1;  // which portal supplies the right funnel boundary
-    LogMessage("[PTG] funnel: apex at (%.1f,%.1f,%.1f), portalCount=%d",
-        apex.center[0], apex.center[1], apex.center[2], portalCount);
-
-    for (int i = 0; i < portalCount; i++)
-    {
-        float portalLeft[3], portalRight[3];
-        portalEps.GetArray(i * 2, portalLeft, 3);
-        portalEps.GetArray(i * 2 + 1, portalRight, 3);
-
-        // Ensure consistent orientation: portalLeft should be left of portalRight
-        // from the perspective of the path direction (apex → portal)
-        if (TriArea2D(apex.center, portalLeft, portalRight) < 0.0)
-        {
-            // Swap: portalLeft is actually to the right of portalRight
-            float tmp[3]; tmp = portalLeft; portalLeft = portalRight; portalRight = tmp;
-        }
-
-        if (portalDegenerate[i])
-        {
-            // Degenerate portal (single point or nearly so) — can't narrow the funnel.
-            // Just check if this point forces a waypoint (if it's outside the funnel).
-            if (leftPortalIdx >= 0 && rightPortalIdx >= 0)
-            {
-                float leftEp[3], rightEp[3];
-                portalEps.GetArray(leftPortalIdx * 2, leftEp, 3);
-                portalEps.GetArray(rightPortalIdx * 2 + 1, rightEp, 3);
-
-                // If the degenerate portal's center is outside the funnel, we need to add a waypoint
-                if (TriArea2D(apex.center, leftEp, portalLeft) < 0.0 ||
-                    TriArea2D(apex.center, rightEp, portalLeft) > 0.0)
-                {
-                    // Funnel collapsed: add current apex to result and reset
-                    funnelResult.PushArray(apex, sizeof(Cell));
-                    // New apex at the previous portal
-                    int nj = nodePath.Get(i + 1);
-                    int currAreaInt = g_hAStarNodes.Get(nj);
-                    apex.navArea = view_as<Address>(currAreaInt);
-                    g_hAStarCenters.GetArray(nj, apex.center, 3);
-                    apex.flow = L4D2Direct_GetTerrorNavAreaFlow(apex.navArea);
-                    if (apex.flow <= 0.0 && g_fMaxFlow > 0.0)
-                        apex.flow = (float(i + 1) / float(pathLen - 1)) * g_fMaxFlow;
-                    leftPortalIdx = -1;
-                    rightPortalIdx = -1;
-                    continue;
-                }
-            }
-            // Degenerate portal doesn't change funnel — skip
-            continue;
-        }
-
-        // First valid portal initializes the funnel
-        if (leftPortalIdx < 0)
-        {
-            leftPortalIdx = i;
-            rightPortalIdx = i;
-            continue;
-        }
-
-        float leftEp[3], rightEp[3];
-        portalEps.GetArray(leftPortalIdx * 2, leftEp, 3);
-        portalEps.GetArray(rightPortalIdx * 2 + 1, rightEp, 3);
-
-        bool leftInside  = TriArea2D(apex.center, leftEp, portalLeft) >= 0.0;
-        bool rightInside = TriArea2D(apex.center, rightEp, portalRight) <= 0.0;
-
-        if (leftInside && rightInside)
-        {
-            // Both endpoints inside funnel — narrow it
-            if (TriArea2D(apex.center, rightEp, portalRight) < 0.0)
-                rightPortalIdx = i;
-            if (TriArea2D(apex.center, leftEp, portalLeft) > 0.0)
-                leftPortalIdx = i;
-        }
-        else if (!rightInside)
-        {
-            // Portal right endpoint is to the RIGHT of right boundary
-            // OR portal left endpoint is to the LEFT of left boundary
-            // → funnel collapsed on the right side
-            // Output the right boundary endpoint as a waypoint
-            Cell waypoint;
-            waypoint.center = rightEp;
-            waypoint.navArea = Address_Null; // waypoint, not a nav area center
-            waypoint.flow = apex.flow; // approximate
-            funnelResult.PushArray(waypoint, sizeof(Cell));
-
-            apex.navArea = waypoint.navArea;
-            apex.center = waypoint.center;
-            apex.flow = waypoint.flow;
-            // Reset funnel with the previous portal
-            leftPortalIdx = i - 1;
-            rightPortalIdx = i - 1;
-            i--; // re-process this portal with new apex
-        }
-        else // !leftInside
-        {
-            // Funnel collapsed on the left side
-            Cell waypoint;
-            waypoint.center = leftEp;
-            waypoint.navArea = Address_Null;
-            waypoint.flow = apex.flow;
-            funnelResult.PushArray(waypoint, sizeof(Cell));
-
-            apex = waypoint;
-            leftPortalIdx = i - 1;
-            rightPortalIdx = i - 1;
-            i--;
-        }
-    }
-
-    // Output the final result
-    // Start with the start cell
-    outCells.PushArray(startCell, sizeof(Cell));
-
-    // Add funnel waypoints
-    for (int i = 0; i < funnelResult.Length; i++)
-    {
-        Cell wp;
-        funnelResult.GetArray(i, wp, sizeof(Cell));
-        outCells.PushArray(wp, sizeof(Cell));
-    }
-
-    // Add goal cell
-    Cell goalCell;
-    int lastNodeIdx = nodePath.Get(pathLen - 1);
-    int lastAreaInt = g_hAStarNodes.Get(lastNodeIdx);
-    goalCell.navArea = view_as<Address>(lastAreaInt);
-    g_hAStarCenters.GetArray(lastNodeIdx, goalCell.center, 3);
-    goalCell.flow = L4D2Direct_GetTerrorNavAreaFlow(goalCell.navArea);
-    if (goalCell.flow <= 0.0 && g_fMaxFlow > 0.0)
-        goalCell.flow = g_fMaxFlow;
-    outCells.PushArray(goalCell, sizeof(Cell));
-
-    LogMessage("[PTG] ReconstructPath: funnel done, %d output cells", outCells.Length);
-    PrintToServer("[PTG] ReconstructPath: funnel done, %d output cells", outCells.Length);
-
-    delete nodePath;
-    delete portalEps;
-    delete funnelResult;
-    */  // END disabled portal/funnel code
 
     // --- Validation pass: hull trace every edge ---
-    // Funnel waypoints are geometrically optimal but may cross geometry
-    // in rare edge cases (thin walls, complex 3D terrain). Validate and fix.
+    // Direct path cells may cross geometry in rare edge cases
+    // (thin walls, complex 3D terrain). Validate and fix.
     if (outCells.Length >= 2)
     {
         for (int i = 1; i < outCells.Length; i++)
@@ -1056,14 +842,6 @@ stock void AStar_ReconstructPath(ArrayList outCells)
     }
 }
 
-// ============================================================================
-// Start/Goal Identification (multi-strategy fallback)
-// ============================================================================
-
-// Identify the START nav area for the escape path.
-// Returns nodeIndex, or -1 if not found.
-
-// ── Start/Goal identification ──
 stock int AStar_IdentifyStart()
 {
     if (g_hAStarNodes == null || g_hAStarNodes.Length == 0) return -1;
@@ -1303,7 +1081,7 @@ stock void AStar_ComputePortals()
         if (areaA == Address_Null) continue;
 
         // Get corners of area A — required for accurate portal detection
-        if (!elevator_available) continue; // corner API unavailable, skip portals
+        if (!corner_available) continue; // corner API unavailable, skip portals
 
         for (int c = 0; c < 4; c++)
             L4D_NavArea_GetCorner(areaA, view_as<NavCornerType>(c), cornersA[c]);
@@ -1444,7 +1222,7 @@ stock bool AStar_ComputePortalsBatch(int startIdx, int count)
         Address areaA = view_as<Address>(areaIntA);
         if (areaA == Address_Null) continue;
 
-        if (!elevator_available) continue;
+        if (!corner_available) continue;
 
         for (int c = 0; c < 4; c++)
             L4D_NavArea_GetCorner(areaA, view_as<NavCornerType>(c), cornersA[c]);
