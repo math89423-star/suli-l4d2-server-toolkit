@@ -6,20 +6,21 @@
 // the engine spawns the bot.
 //
 // Design:
-//   - 6 regular modes rotate every 90-120s, each with distinct class ratios
-//   - 1 Tank override mode: when Tank is alive, no Smoker/Boomer spawn
-//   - Deficit-first algorithm: pick the class furthest below its target ratio
-//   - Respects specialspawner per-class limits (ss_*_limit)
-//   - Proportional: works with any player count, not hardcoded numbers
+//   - 6 regular modes rotate every 90-120s, each with a DISTINCT class signature
+//   - Each mode OMITS 2-3 SI types entirely (0% ratio) for strong identity
+//   - Only Mode 6 (Balanced) includes all 6 classes
+//   - 1 Tank override mode: auto-activates when Tank spawns
+//   - Deficit-first algorithm: picks the class furthest below its target ratio
+//   - Zero-ratio classes are never selected (deficit ≤ 0)
 //
 // Mode table (Smoker, Boomer, Hunter, Spitter, Jockey, Charger):
-//   Mode 1 "钢铁先锋"  — Charger+Jockey melee push
-//   Mode 2 "暗影锁链"  — Smoker pull + Boomer horde
-//   Mode 3 "冲锋陷阵"  — Charger break + Spitter denial
-//   Mode 4 "猎手天网"  — Hunter high-ground pounce swarm
-//   Mode 5 "毒沼地狱"  — Boomer+Spitter zone lockdown
-//   Mode 6 "均衡演武"  — even distribution
-//   Mode T "巨兽协同"  — Tank support (no Smoker/Boomer), auto-triggered
+//   Mode 1 "钢铁洪流"  — C+H+J only, zero ranged/zoning
+//   Mode 2 "暗影锁链"  — Sm+Bm+Sp+J only, zero melee assault
+//   Mode 3 "地空协同"  — H+C+J+Sp only, zero Sm/Bm
+//   Mode 4 "生化危机"  — Bm+Sp+Sm+C only, zero H/J
+//   Mode 5 "猎手集群"  — H+J+Sp+Sm only, zero C/Bm
+//   Mode 6 "均衡演武"  — all 6 classes evenly
+//   Mode T "巨兽协同"  — C+H+Sp+J, no Sm/Bm (Tank support)
 // ============================================================================
 
 #pragma semicolon 1
@@ -29,7 +30,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "2.0.0"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -48,33 +49,39 @@
 // Columns: Smoker, Boomer, Hunter, Spitter, Jockey, Charger
 // ============================================================================
 float g_fModeRatios[SCM_MODE_COUNT][SCM_CLASS_COUNT] = {
-    // Mode 1: 钢铁先锋 — Charger-led melee push
-    { 0.13, 0.10, 0.20, 0.10, 0.22, 0.25 },
-    // Mode 2: 暗影锁链 — Smoker pull + Boomer horde
-    { 0.25, 0.22, 0.10, 0.18, 0.15, 0.10 },
-    // Mode 3: 冲锋陷阵 — Charger break + Spitter kill zone
-    { 0.15, 0.10, 0.22, 0.18, 0.10, 0.25 },
-    // Mode 4: 猎手天网 — Hunter high-ground pounce storm
-    { 0.18, 0.10, 0.28, 0.10, 0.22, 0.12 },
-    // Mode 5: 毒沼地狱 — Boomer+Spitter area denial siege
-    { 0.18, 0.25, 0.10, 0.22, 0.10, 0.15 },
-    // Mode 6: 均衡演武 — classic even distribution
+    // Mode 1: 钢铁洪流 — pure melee: C+H+J only
+    //           Omitted: Smoker, Boomer, Spitter (zero ranged/zoning)
+    { 0.00, 0.00, 0.35, 0.00, 0.25, 0.40 },
+    // Mode 2: 暗影锁链 — ranged control + horde: Sm+Bm+Sp+J only
+    //           Omitted: Charger, Hunter (zero direct melee)
+    { 0.35, 0.25, 0.00, 0.25, 0.15, 0.00 },
+    // Mode 3: 地空协同 — air+ground assault: H+C+J+Sp only
+    //           Omitted: Smoker, Boomer (zero pull/horde)
+    { 0.00, 0.00, 0.35, 0.20, 0.20, 0.25 },
+    // Mode 4: 生化危机 — zone denial siege: Bm+Sp+Sm+C only
+    //           Omitted: Hunter, Jockey (zero chase)
+    { 0.25, 0.30, 0.00, 0.30, 0.00, 0.15 },
+    // Mode 5: 猎手集群 — speed swarm: H+J+Sp+Sm only
+    //           Omitted: Charger, Boomer (zero heavy/support)
+    { 0.15, 0.00, 0.40, 0.15, 0.30, 0.00 },
+    // Mode 6: 均衡演武 — all 6 classes evenly
     { 0.17, 0.16, 0.17, 0.16, 0.17, 0.17 }
 };
 
-// Mode 7 (Tank override): 巨兽协同 — no Smoker/Boomer, Charger+Hunter+Jockey+Spitter
-// Smoker=0, Boomer=0, Hunter=0.30, Spitter=0.20, Jockey=0.20, Charger=0.30
+// Mode T (Tank override): 巨兽协同 — Tank support squad
+// Omitted: Smoker (pulls away from Tank), Boomer (horde chaos on top of Tank)
+// Active: C+H+Sp+J — pin/control survivors for Tank to land punches
 float g_fTankModeRatios[SCM_CLASS_COUNT] = {
     0.00, 0.00, 0.30, 0.20, 0.20, 0.30
 };
 
 // Mode display names
 char g_sModeNames[SCM_MODE_COUNT][] = {
-    "钢铁先锋",
+    "钢铁洪流",
     "暗影锁链",
-    "冲锋陷阵",
-    "猎手天网",
-    "毒沼地狱",
+    "地空协同",
+    "生化危机",
+    "猎手集群",
     "均衡演武"
 };
 
