@@ -57,6 +57,7 @@ Thumbs.db
 
 # --- Compiled output (build artifacts, plugins go to sourcemod/plugins/) ---
 sourcemod/scripting/compiled/
+sourcemod/scripting/*.smx
 
 # --- IDE ---
 .vscode/
