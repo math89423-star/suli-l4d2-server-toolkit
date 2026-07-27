@@ -124,6 +124,41 @@ public void OnPluginStart()
     g_hCvarNonMesh = CreateConVar("l4d_path_to_goal_nonmesh", "0",
     "Enable non-mesh connection detection (jumps, vaults, crouch passages). 0=off, 1=on. Disabled by default — nav mesh edges are sufficient for correct pathfinding on most maps.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
+    // ── v4.0 Advanced Features ──
+
+    g_hCvarFunnel3D = CreateConVar("l4d_path_to_goal_funnel_3d", "1",
+    "Enable 3D funnel algorithm for multi-floor building navigation. 0=2D funnel only (legacy), 1=3D funnel with Z-layer awareness.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarFunnelZStep = CreateConVar("l4d_path_to_goal_funnel_z_step", "80.0",
+    "Max Z height change (units) between consecutive funnel portals before forcing an intermediate waypoint.",FCVAR_NOTIFY, true, 32.0, true, 500.0);
+
+    g_hCvarRepairEnable = CreateConVar("l4d_path_to_goal_repair_enable", "1",
+    "Enable STAGE_REPAIR: auto-fix beams blocked by world geometry after hull trace validation. 0=skip, 1=repair.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarRepairAttempts = CreateConVar("l4d_path_to_goal_repair_attempts", "8",
+    "Max repair attempts per blocked beam before giving up and placing a beacon.",FCVAR_NOTIFY, true, 1.0, true, 20.0);
+
+    g_hCvarBeaconEnable = CreateConVar("l4d_path_to_goal_beacon_enable", "1",
+    "Draw bright beacon pillars at unreachable path break points. 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarThetaStar = CreateConVar("l4d_path_to_goal_theta_star", "1",
+    "Enable Theta* any-angle pathfinding: allows line-of-sight shortcuts during A* search for smoother paths.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarThetaLosMax = CreateConVar("l4d_path_to_goal_theta_los_max", "1500.0",
+    "Theta* LOS check max distance (units). Larger = more aggressive shortcuts, higher CPU cost.",FCVAR_NOTIFY, true, 256.0, true, 5000.0);
+
+    g_hCvarHpaEnable = CreateConVar("l4d_path_to_goal_hpa_enable", "1",
+    "Enable HPA* hierarchical pathfinding for large maps (3000+ nav areas). 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarHpaCellSize = CreateConVar("l4d_path_to_goal_hpa_cell_size", "1024.0",
+    "HPA* cluster cell size (units). Smaller = finer hierarchy, more clusters.",FCVAR_NOTIFY, true, 256.0, true, 4096.0);
+
+    g_hCvarFlowWeight = CreateConVar("l4d_path_to_goal_flow_weight", "0.25",
+    "Flow heuristic weight for A* tie-breaking. 0.0=pure Euclidean, 1.0=pure flow.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarZCostFactor = CreateConVar("l4d_path_to_goal_z_cost_factor", "4.0",
+    "Vertical cost multiplier in A* edge weights. Higher values strongly prefer level paths over climbing.",FCVAR_NOTIFY, true, 0.0, true, 10.0);
+
   	g_hCvarMPGameMode = FindConVar("mp_gamemode");
   	g_hCvarMPGameMode.AddChangeHook(ConVarGameMode);
     
