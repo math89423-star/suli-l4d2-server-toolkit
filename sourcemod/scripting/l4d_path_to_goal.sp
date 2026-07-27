@@ -17,7 +17,7 @@
 #include <dhooks>
 #include <l4d_path_to_goal>
 
-#define PLUGIN_VERSION 			"4.0 2026-07-26"
+#define PLUGIN_VERSION 			"3.0 2026-07-25"
 
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
 // Per-client: each player toggles their own guide independently
@@ -121,32 +121,8 @@ public void OnPluginStart()
     g_hCvarTraceHull = CreateConVar("l4d_path_to_goal_trace_hull", "1",
     "Use player-sized hull trace to skip beams blocked by world geometry (walls). 0=draw all beams including through walls.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_hCvarNonMesh = CreateConVar("l4d_path_to_goal_nonmesh", "1",
-    "Enable non-mesh connection detection (jumps, vaults, crouch passages). 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    // ---- v4.0 New Cvars ----
-    g_hCvarFunnel3D = CreateConVar("l4d_path_to_goal_funnel_3d", "1",
-    "Enable 3D funnel algorithm for multi-floor buildings. 0=2D only, 1=3D with Z-layer awareness.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_hCvarFunnelZStep = CreateConVar("l4d_path_to_goal_funnel_z_step", "80.0",
-    "Max Z change between funnel portals before forcing intermediate waypoint.",FCVAR_NOTIFY, true, 32.0, true, 500.0);
-    g_hCvarRepairEnable = CreateConVar("l4d_path_to_goal_repair_enable", "1",
-    "Enable STAGE_REPAIR: auto-fix beams blocked by world geometry. 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_hCvarRepairAttempts = CreateConVar("l4d_path_to_goal_repair_attempts", "8",
-    "Max repair attempts per blocked beam before placing a beacon.",FCVAR_NOTIFY, true, 1.0, true, 20.0);
-    g_hCvarBeaconEnable = CreateConVar("l4d_path_to_goal_beacon_enable", "1",
-    "Draw bright beacon dots at unreachable path break points. 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_hCvarThetaStar = CreateConVar("l4d_path_to_goal_theta_star", "1",
-    "Enable Theta* any-angle pathfinding. 0=standard A*, 1=Theta*.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_hCvarThetaLosMax = CreateConVar("l4d_path_to_goal_theta_los_max", "1500.0",
-    "Theta* LOS max distance for parent-to-neighbor shortcuts.",FCVAR_NOTIFY, true, 256.0, true, 5000.0);
-    g_hCvarHpaEnable = CreateConVar("l4d_path_to_goal_hpa_enable", "1",
-    "Enable HPA* hierarchical pre-search for large maps. 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_hCvarHpaCellSize = CreateConVar("l4d_path_to_goal_hpa_cell_size", "1024.0",
-    "HPA* cluster cell size in units.",FCVAR_NOTIFY, true, 256.0, true, 4096.0);
-    g_hCvarFlowWeight = CreateConVar("l4d_path_to_goal_flow_weight", "0.25",
-    "Flow heuristic dominance: 0.0=pure Euclidean, 1.0=pure flow. v4.0 default 0.25.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_hCvarZCostFactor = CreateConVar("l4d_path_to_goal_z_cost_factor", "4.0",
-    "Vertical cost multiplier for A* edges. Higher = prefer level paths.",FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_hCvarNonMesh = CreateConVar("l4d_path_to_goal_nonmesh", "0",
+    "Enable non-mesh connection detection (jumps, vaults, crouch passages). 0=off, 1=on. Disabled by default — nav mesh edges are sufficient for correct pathfinding on most maps.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
   	g_hCvarMPGameMode = FindConVar("mp_gamemode");
   	g_hCvarMPGameMode.AddChangeHook(ConVarGameMode);
@@ -163,7 +139,7 @@ public void OnPluginStart()
 	HookEvent("finale_start", 			  evtFinaleStart,    EventHookMode_PostNoCopy);
 	HookEvent("finale_radio_start", 	  evtFinaleStart,    EventHookMode_PostNoCopy);
     HookEvent("finale_vehicle_ready", 	  evtFinaleVehicle,  EventHookMode_PostNoCopy);
-    HookEvent("player_first_spawn",       evtFirstSpawn,     EventHookMode_Post);
+    HookEvent("player_first_spawn",       evtFirstSpawn,     EventHookMode_PostNoCopy);
     if (g_bL4D2)
     {
     HookEvent("gauntlet_finale_start", 	  evtGauntletStart,  EventHookMode_PostNoCopy);
@@ -307,12 +283,6 @@ Action CmdRequestGuide(int client, int args)
         Guide_Prep();
         if (!guide_ready || g_GuideCells == null)
         {
-            // v4.0: Guide prep is async (batched across frames). Register a
-            // pending one-shot request so beams draw when the pipeline completes.
-            // Timer_CheckRequests polls g_CellRequests[].duration at pipeline end.
-            g_CellRequests[client].duration = 20.0;
-            g_CellRequests[client].backward = false;
-            g_CellRequests[client].join_client = true;
             ReplyToCommand(client, "[PTG] %t", "ptg_wait");
             return Plugin_Continue;
         }
@@ -562,16 +532,12 @@ int g_iFallbackRetries = 0;
 
 void MapStarted()
 {
-    g_iMapGeneration++;
     map_started = true;
     t_nav = -1.0;
     timer_nav = null;
     g_iPrepAttempts = 0;
     g_iFallbackStage = 0;
     g_iFallbackRetries = 0;
-    g_iBuildPhase = 0;
-    g_iPortalBatchIdx = 0;
-    g_iHPAClusterCount = 0;
 
     // Re-create check timer on every map load (OnPluginStart only fires once;
     // OnMapEnd kills it, so we must recreate here after each map change)
@@ -596,24 +562,6 @@ public void OnMapEnd()
     if (g_hAutoCheckTimer != null) { KillTimer(g_hAutoCheckTimer); g_hAutoCheckTimer = null; }
     if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); g_hToggleTimer = null; }
     for (int i = 1; i <= MaxClients; i++) g_bGuideToggled[i] = false;
-
-    // Clean late-declared globals (declared after Guide_Cleanup in include file)
-    delete g_hBeaconCells;
-
-    // Clean HPA* clusters — must delete inner ArrayLists first to prevent handle leak
-    if (g_hHPAClusterNodes != null)
-    {
-        for (int i = 0; i < g_hHPAClusterNodes.Length; i++)
-        {
-            int handle = g_hHPAClusterNodes.Get(i);
-            ArrayList innerList = view_as<ArrayList>(handle);
-            delete innerList;
-        }
-    }
-    delete g_hHPAClusterNodes;
-    delete g_hHPAClusterCenters;
-    delete g_hHPAClusters;
-    delete g_hHPAClusterAdj;
 }
 
 public void OnClientDisconnect(int client)
@@ -806,7 +754,6 @@ void Guide_Prep_Fallback()
     g_iLoop = 0;
     guide_prep = true;
     g_iFallbackStage = 2;
-    g_iPrepMapGen = g_iMapGeneration;
 
     RequestFrame(OnFramePrep, true);
 }
@@ -1004,9 +951,6 @@ void AutoGuideDrawPath(int client = -1)
         LogMessage("[PTG] Beam cap reached: %d trails drawn out of %d cells (max %d, step %d). Increase l4d_path_to_goal_max or adjust filter cvars.",
             trailDrawn, count, maxBeams, step);
     }
-
-    // v4.0: Draw beacon markers at unreachable path break points
-    Guide_DrawBeacons(client);
 }
 
 Action Timer_AutoGuidePulse(Handle timer)
@@ -1027,6 +971,7 @@ public void OnClientPutInServer(int client)
 
 void evtFirstSpawn(Event event, const char[] name, bool dontBroadcast)
 {
+    if (event == null) return;
     int userid = event.GetInt("userid");
     if (userid <= 0) return;
     // Delay bind until after client config.cfg has executed (~5s after first spawn)
