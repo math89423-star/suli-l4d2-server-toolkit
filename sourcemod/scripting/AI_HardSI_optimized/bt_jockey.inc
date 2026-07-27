@@ -66,22 +66,15 @@ stock int BT_CreateJockeyTree() {
         hopWithCooldown
     );
 
-    // Approach
-    int approachSeq = BT_CreateSequence(2,
-        BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateAction(ACT_MoveToTarget)
-    );
-
-    // Strafe approach (farther away, strafe toward target)
+    // Approach: always strafe while closing in (avoids being headshot while running straight)
     int strafeApproach = BT_CreateSequence(2,
-        BT_CreateAction(ACT_StrafeRandom),
-        BT_CreateAction(ACT_MoveToTarget)
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, rideSeq);
     BT_AddChild(root, hopSeq);
-    BT_AddChild(root, approachSeq);
     BT_AddChild(root, strafeApproach);
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
 

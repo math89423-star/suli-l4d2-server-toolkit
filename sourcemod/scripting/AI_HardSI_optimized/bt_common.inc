@@ -386,4 +386,39 @@ BT_Status ACT_AcquireCoordTarget(int client) {
     return BT_FAILURE;
 }
 
+// Strafe + move toward blackboard target (combined action for SI approach).
+// Avoids running in a straight line — prevents survivors from easily headshotting.
+BT_Status ACT_StrafeMoveToTarget(int client) {
+    // ---- strafe component ----
+    float now = GetGameTime();
+    float nextSwitch = BB_GetFloat(client, "_strafe_next");
+    if (nextSwitch <= 0.0 || now >= nextSwitch) {
+        bool goLeft = (GetRandomInt(0, 1) == 0);
+        BB_SetBool(client, "_strafe_left", goLeft);
+        BB_SetFloat(client, "_strafe_next", now + GetRandomFloat(0.3, 0.8));
+    }
+    if (BB_GetBool(client, "_strafe_left", false)) {
+        BT_AddButton(client, IN_MOVELEFT);
+        BT_RemoveButton(client, IN_MOVERIGHT);
+    } else {
+        BT_AddButton(client, IN_MOVERIGHT);
+        BT_RemoveButton(client, IN_MOVELEFT);
+    }
+
+    // ---- move component ----
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        return BT_RUNNING;  // keep strafing even without target
+    }
+    float sPos[3], tPos[3], dir[3], ang[3];
+    GetClientAbsOrigin(client, sPos);
+    GetClientAbsOrigin(target, tPos);
+    MakeVectorFromPoints(sPos, tPos, dir);
+    GetVectorAngles(dir, ang);
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_AddButton(client, IN_FORWARD);
+
+    return BT_RUNNING;
+}
+
 // ---------------------------------------------------------------------------
