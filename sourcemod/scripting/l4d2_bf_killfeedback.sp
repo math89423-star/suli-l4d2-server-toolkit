@@ -1,35 +1,33 @@
 /**
- * [L4D2] Battlefield Kill Feedback
+ * [L4D2] Battlefield Kill Feedback  v3.5
  *
  * Battlefield-style kill confirmation:
- *   - Kill a Special Infected → "ching" sound + skull icon (☠) on screen
- *   - Headshot kill → enhanced sound + [HS] tag
- *   - Tank / Witch kill → special celebration sound
- *   - Melee kill → distinct sound
+ *   - PrintToChatAll: global kill feed (all players, stacked, colored)
+ *   - PrintHintText: attacker personal kill confirm (center-lower area, above weapon bar)
+ *   - Kill sounds: battlefield-style per kill type
+ *   - Weapon name display (24+ weapons mapped)
+ *   - SI name via m_zombieClass (correct for bot players)
+ *   - System-killed SI display (suicide, fall damage, fire, etc.)
  *
- * Pure server-side plugin — no client mods required.
- * Sound files are configurable; drop Battlefield .wav/.mp3 rips into
- * left4dead2/sound/battlefield/ and set the ConVars.
- *
- * Battlefield audio sources:
- *   https://modworkshop.net/mod/46718 (BF1 Kill & Hit Sounds, .ogg)
- *   https://www.nexusmods.com/newvegas/mods/94052 (BF1/BFV kill sounds)
+ * Pure server-side.  No client files needed.
  */
 
 #pragma semicolon 1
 #pragma newdecls required
 
 #include <sourcemod>
-#include <sdkhooks>
 #include <sdktools>
 
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "3.5.0"
 
 // ============================================================================
 // ConVars
 // ============================================================================
 
 ConVar g_cvEnabled;
+ConVar g_cvChatEnabled;
+ConVar g_cvCenterTextEnabled;
+ConVar g_cvCenterTextTimeout;
 ConVar g_cvSoundSIKill;
 ConVar g_cvSoundSIHeadshot;
 ConVar g_cvSoundTankKill;
@@ -37,15 +35,12 @@ ConVar g_cvSoundWitchKill;
 ConVar g_cvSoundMeleeKill;
 ConVar g_cvSoundCommonHS;
 ConVar g_cvVolume;
-ConVar g_cvHudEnabled;
-ConVar g_cvKillStreak;
 ConVar g_cvCooldown;
 
 // ============================================================================
 // State
 // ============================================================================
 
-int   g_iKillStreak[MAXPLAYERS + 1];
 float g_fLastKillTime[MAXPLAYERS + 1];
 
 // ============================================================================
@@ -56,7 +51,7 @@ public Plugin myinfo =
 {
     name        = "[L4D2] Battlefield Kill Feedback",
     author      = "Claude (for suli's server)",
-    description = "Battlefield-style kill sound + skull icon on SI kills",
+    description = "BF-style kill sound + global chat kill feed + center text",
     version     = PLUGIN_VERSION,
     url         = ""
 };
@@ -71,376 +66,335 @@ public void OnPluginStart()
         "[L4D2] Battlefield Kill Feedback version", FCVAR_NOTIFY | FCVAR_DONTRECORD);
 
     g_cvEnabled = CreateConVar("bf_kill_enabled", "1",
-        "Enable/disable Battlefield kill feedback (1=on, 0=off)",
+        "Enable/disable all kill feedback.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_cvChatEnabled = CreateConVar("bf_kill_chat_enabled", "1",
+        "Global kill feed via PrintToChatAll (all players, stacked, colored).",
         FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvSoundSIKill = CreateConVar("bf_kill_sound_si", "battlefield/si_kill.mp3",
-        "Sound played when killing a Special Infected. Leave empty to disable.",
-        FCVAR_NOTIFY);
+    g_cvCenterTextEnabled = CreateConVar("bf_kill_hinttext_enabled", "1",
+        "Hint text for attacker kill confirm (center-lower area, above weapon bar).",
+        FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvSoundSIHeadshot = CreateConVar("bf_kill_sound_headshot", "battlefield/si_headshot_kill.mp3",
-        "Sound played when killing a Special Infected with a headshot. Leave empty for same as SI kill.",
-        FCVAR_NOTIFY);
+    g_cvCenterTextTimeout = CreateConVar("bf_kill_hinttext_timeout", "2.0",
+        "Seconds before hint text clears.", FCVAR_NOTIFY, true, 0.5, true, 5.0);
 
-    g_cvSoundTankKill = CreateConVar("bf_kill_sound_tank", "battlefield/tank_kill.mp3",
-        "Sound played when killing a Tank. Leave empty to use default SI kill sound.",
-        FCVAR_NOTIFY);
-
-    g_cvSoundWitchKill = CreateConVar("bf_kill_sound_witch", "battlefield/witch_kill.mp3",
-        "Sound played when killing a Witch. Leave empty to use default SI kill sound.",
-        FCVAR_NOTIFY);
-
-    g_cvSoundMeleeKill = CreateConVar("bf_kill_sound_melee", "battlefield/melee_kill.mp3",
-        "Sound played on melee kill. Leave empty to use default SI kill sound.",
-        FCVAR_NOTIFY);
-
+    g_cvSoundSIKill = CreateConVar("bf_kill_sound_si", "battlefield/si_kill.wav",
+        "SI kill sound.", FCVAR_NOTIFY);
+    g_cvSoundSIHeadshot = CreateConVar("bf_kill_sound_headshot", "battlefield/si_headshot_kill.wav",
+        "SI headshot sound.", FCVAR_NOTIFY);
+    g_cvSoundTankKill = CreateConVar("bf_kill_sound_tank", "battlefield/tank_kill.wav",
+        "Tank kill sound.", FCVAR_NOTIFY);
+    g_cvSoundWitchKill = CreateConVar("bf_kill_sound_witch", "battlefield/witch_kill.wav",
+        "Witch kill sound.", FCVAR_NOTIFY);
+    g_cvSoundMeleeKill = CreateConVar("bf_kill_sound_melee", "battlefield/melee_kill.wav",
+        "Melee kill sound.", FCVAR_NOTIFY);
     g_cvSoundCommonHS = CreateConVar("bf_kill_sound_common_hs", "",
-        "Sound played on common infected headshot kill. Leave empty to disable.",
-        FCVAR_NOTIFY);
+        "Common headshot sound (empty=off).", FCVAR_NOTIFY);
 
     g_cvVolume = CreateConVar("bf_kill_volume", "0.8",
-        "Sound volume (0.0 = silent, 1.0 = full)",
-        FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_cvHudEnabled = CreateConVar("bf_kill_hud_enabled", "1",
-        "Show skull icon HUD notification on kill (1=on, 0=off)",
-        FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-
-    g_cvKillStreak = CreateConVar("bf_kill_streak_threshold", "3",
-        "Show streak counter when consecutive SI kills reach this number. 0=off.",
-        FCVAR_NOTIFY, true, 0.0, true, 99.0);
-
+        "Sound volume.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     g_cvCooldown = CreateConVar("bf_kill_cooldown", "0.1",
-        "Minimum seconds between kill sounds (prevents overlap).",
-        FCVAR_NOTIFY, true, 0.0, true, 1.0);
+        "Min seconds between sounds.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     AutoExecConfig(true, "l4d2_bf_killfeedback");
 
     HookEvent("player_death",   Event_PlayerDeath);
     HookEvent("infected_death", Event_InfectedDeath);
-
-    // Reset streaks on round end
-    HookEvent("round_end",      Event_RoundEnd);
 }
-
-// ============================================================================
-// Precache sounds
-// ============================================================================
 
 public void OnMapStart()
 {
-    // Precache all configured sounds
-    PrecacheSound2("battlefield/si_kill.mp3");
-    PrecacheSound2("battlefield/si_headshot_kill.mp3");
-    PrecacheSound2("battlefield/tank_kill.mp3");
-    PrecacheSound2("battlefield/witch_kill.mp3");
-    PrecacheSound2("battlefield/melee_kill.mp3");
-    PrecacheSound2("battlefield/common_headshot.mp3");
+    PrecacheSound2("battlefield/si_kill.wav");
+    PrecacheSound2("battlefield/si_headshot_kill.wav");
+    PrecacheSound2("battlefield/tank_kill.wav");
+    PrecacheSound2("battlefield/witch_kill.wav");
+    PrecacheSound2("battlefield/melee_kill.wav");
+    PrecacheSound2("battlefield/common_headshot.wav");
 }
 
 void PrecacheSound2(const char[] sound)
 {
-    if (sound[0] == '\0')
-        return;
-
+    if (sound[0] == '\0') return;
     char buffer[PLATFORM_MAX_PATH];
     Format(buffer, sizeof(buffer), "sound/%s", sound);
-
-    // Make sure clients download the file
     AddFileToDownloadsTable(buffer);
-
-    // Precache for EmitSound
     PrecacheSound(sound, true);
 }
 
-// ============================================================================
-// Reset state
-// ============================================================================
+Action Timer_ClearCenterText(Handle timer, int userId)
+{
+    int client = GetClientOfUserId(userId);
+    if (client > 0 && IsClientInGame(client))
+        PrintHintText(client, " ");
+    return Plugin_Stop;
+}
 
 public void OnClientDisconnect(int client)
 {
-    g_iKillStreak[client] = 0;
-    g_fLastKillTime[client] = 0.0;
-}
-
-public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
-{
-    for (int i = 1; i <= MaxClients; i++)
-    {
-        g_iKillStreak[i] = 0;
-        g_fLastKillTime[i] = 0.0;
-    }
 }
 
 // ============================================================================
-// player_death — Special Infected kill detection
+// player_death — SI kill detection
 // ============================================================================
 
 public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
-    if (!g_cvEnabled.BoolValue)
-        return Plugin_Continue;
+    if (!g_cvEnabled.BoolValue) return Plugin_Continue;
 
     int victim   = GetClientOfUserId(event.GetInt("userid"));
     int attacker = GetClientOfUserId(event.GetInt("attacker"));
 
-    // Attacker must be a valid survivor
+    // ── SI player death ──────────────────────────────────
+
+    if (victim >= 1 && victim <= MaxClients && GetClientTeam(victim) == 3)
+    {
+        bool validAttacker = (attacker >= 1 && attacker <= MaxClients
+                           && IsClientInGame(attacker)
+                           && GetClientTeam(attacker) == 2);
+
+        if (validAttacker)
+        {
+            // Survivor killed SI → full sound + display
+            float now = GetGameTime();
+            if (now - g_fLastKillTime[attacker] < g_cvCooldown.FloatValue)
+                return Plugin_Continue;
+
+            g_fLastKillTime[attacker] = now;
+            bool headshot = event.GetBool("headshot");
+
+            char siName[32], weaponEnt[64], weaponDisplay[64], playerName[64];
+            GetSIName(victim, siName, sizeof(siName));
+            event.GetString("weapon", weaponEnt, sizeof(weaponEnt));
+            GetWeaponDisplayName(weaponEnt, weaponDisplay, sizeof(weaponDisplay));
+            GetClientName(attacker, playerName, sizeof(playerName));
+
+            bool melee = IsMeleeWeapon(weaponEnt);
+
+            char sound[PLATFORM_MAX_PATH];
+            if (IsTank(victim))
+                GetSoundPath(sound, sizeof(sound), g_cvSoundTankKill, g_cvSoundSIKill);
+            else if (headshot)
+                GetSoundPath(sound, sizeof(sound), g_cvSoundSIHeadshot, g_cvSoundSIKill);
+            else if (melee)
+                GetSoundPath(sound, sizeof(sound), g_cvSoundMeleeKill, g_cvSoundSIKill);
+            else
+                g_cvSoundSIKill.GetString(sound, sizeof(sound));
+            PlayClientSound(attacker, sound);
+
+            ShowKillDisplay(attacker, playerName, weaponDisplay, siName,
+                headshot, melee, IsTank(victim), false);
+        }
+        else
+        {
+            // System-killed SI (suicide, fall, fire, drown, etc.)
+            // Chat + hint notification for all survivors
+            char siName[32], victimName[64];
+            GetSIName(victim, siName, sizeof(siName));
+            GetClientName(victim, victimName, sizeof(victimName));
+
+            int rawAttacker = event.GetInt("attacker");
+            bool suicide = (rawAttacker == event.GetInt("userid"));
+
+            if (g_cvChatEnabled.BoolValue)
+            {
+                char chatMsg[256];
+                if (suicide)
+                    Format(chatMsg, sizeof(chatMsg),
+                        "\x04%s\x01  [\x03%s\x01]  \x05自杀了", victimName, siName);
+                else
+                    Format(chatMsg, sizeof(chatMsg),
+                        "\x04%s\x01  [\x03%s\x01]  \x05死于意外", victimName, siName);
+                PrintToChatAll(chatMsg);
+            }
+
+            if (g_cvCenterTextEnabled.BoolValue)
+            {
+                char hintMsg[128];
+                if (suicide)
+                    Format(hintMsg, sizeof(hintMsg), "%s  自杀了", siName);
+                else
+                    Format(hintMsg, sizeof(hintMsg), "%s  死于意外", siName);
+
+                for (int i = 1; i <= MaxClients; i++)
+                {
+                    if (IsClientInGame(i) && GetClientTeam(i) == 2)
+                        PrintHintText(i, hintMsg);
+                }
+            }
+        }
+        return Plugin_Continue;
+    }
+
+    // ── Non-SI death (Witch / common) ─────────────────────
+
     if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker))
         return Plugin_Continue;
-
     if (GetClientTeam(attacker) != 2)
         return Plugin_Continue;
 
-    // Cooldown check
     float now = GetGameTime();
     if (now - g_fLastKillTime[attacker] < g_cvCooldown.FloatValue)
         return Plugin_Continue;
 
     bool headshot = event.GetBool("headshot");
 
-    // Check if victim is a Special Infected or Witch
-    if (victim >= 1 && victim <= MaxClients && GetClientTeam(victim) == 3)
+    int entityid = event.GetInt("entityid");
+    if (entityid > 0 && IsWitchEntity(entityid))
     {
-        // ---- Special Infected Kill ----
         g_fLastKillTime[attacker] = now;
 
-        // Kill streak
-        g_iKillStreak[attacker]++;
-        int streakThreshold = g_cvKillStreak.IntValue;
+        char weaponEnt[64], weaponDisplay[64], playerName[64];
+        event.GetString("weapon", weaponEnt, sizeof(weaponEnt));
+        GetWeaponDisplayName(weaponEnt, weaponDisplay, sizeof(weaponDisplay));
+        GetClientName(attacker, playerName, sizeof(playerName));
 
-        char siName[32];
-        GetSIName(victim, siName, sizeof(siName));
-
-        // Detect melee kill
-        char weapon[64];
-        event.GetString("weapon", weapon, sizeof(weapon));
-        bool melee = IsMeleeWeapon(weapon);
-
-        // Determine sound
         char sound[PLATFORM_MAX_PATH];
-
-        if (IsTank(victim))
-        {
-            // Tank kill — special celebration
-            GetSoundPath(sound, sizeof(sound), g_cvSoundTankKill, g_cvSoundSIKill);
-        }
-        else if (headshot)
-        {
-            // Headshot kill on SI
-            GetSoundPath(sound, sizeof(sound), g_cvSoundSIHeadshot, g_cvSoundSIKill);
-        }
-        else if (melee)
-        {
-            // Melee kill on SI
-            GetSoundPath(sound, sizeof(sound), g_cvSoundMeleeKill, g_cvSoundSIKill);
-        }
-        else
-        {
-            // Default SI kill
-            g_cvSoundSIKill.GetString(sound, sizeof(sound));
-        }
-
+        GetSoundPath(sound, sizeof(sound), g_cvSoundWitchKill, g_cvSoundSIKill);
         PlayClientSound(attacker, sound);
 
-        // Show HUD notification
-        if (g_cvHudEnabled.BoolValue)
-        {
-            ShowKillHud(attacker, siName, headshot, melee, IsTank(victim), false, g_iKillStreak[attacker], streakThreshold);
-        }
+        ShowKillDisplay(attacker, playerName, weaponDisplay, "WITCH 女巫",
+            headshot, false, false, true);
     }
-    else
-    {
-        // ---- Witch kill (witch is an entity, not a player client) ----
-        // The witch death is caught via the "entityid" field
-        int entityid = event.GetInt("entityid");
-        if (entityid > 0 && IsWitchEntity(entityid))
-        {
-            g_fLastKillTime[attacker] = now;
-            g_iKillStreak[attacker]++;
-
-            int streakThreshold = g_cvKillStreak.IntValue;
-            char sound[PLATFORM_MAX_PATH];
-            GetSoundPath(sound, sizeof(sound), g_cvSoundWitchKill, g_cvSoundSIKill);
-
-            PlayClientSound(attacker, sound);
-
-            if (g_cvHudEnabled.BoolValue)
-            {
-                ShowKillHud(attacker, "Witch", headshot, false, false, true, g_iKillStreak[attacker], streakThreshold);
-            }
-        }
-    }
-
     return Plugin_Continue;
 }
-
-// ============================================================================
-// infected_death — Common infected headshot kill
-// ============================================================================
 
 public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroadcast)
 {
-    if (!g_cvEnabled.BoolValue)
-        return Plugin_Continue;
-
-    bool headshot = event.GetBool("headshot");
-    if (!headshot)
-        return Plugin_Continue;
-
+    if (!g_cvEnabled.BoolValue) return Plugin_Continue;
+    if (!event.GetBool("headshot")) return Plugin_Continue;
     int attacker = GetClientOfUserId(event.GetInt("attacker"));
-    if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker))
-        return Plugin_Continue;
+    if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker)) return Plugin_Continue;
+    if (GetClientTeam(attacker) != 2) return Plugin_Continue;
 
-    if (GetClientTeam(attacker) != 2)
-        return Plugin_Continue;
-
-    // Only play sound if a common headshot sound is configured
     char sound[PLATFORM_MAX_PATH];
     g_cvSoundCommonHS.GetString(sound, sizeof(sound));
-    if (sound[0] == '\0')
-        return Plugin_Continue;
+    if (sound[0] == '\0') return Plugin_Continue;
+    if (GetGameTime() - g_fLastKillTime[attacker] < g_cvCooldown.FloatValue) return Plugin_Continue;
 
-    float now = GetGameTime();
-    if (now - g_fLastKillTime[attacker] < g_cvCooldown.FloatValue)
-        return Plugin_Continue;
-
-    g_fLastKillTime[attacker] = now;
+    g_fLastKillTime[attacker] = GetGameTime();
     PlayClientSound(attacker, sound);
-
     return Plugin_Continue;
 }
 
 // ============================================================================
-// HUD notification — skull icon + kill info
+// Kill display
 // ============================================================================
 
-void ShowKillHud(int client, const char[] siName, bool headshot, bool melee, bool isTank, bool isWitch, int streak, int streakThreshold)
+void ShowKillDisplay(int client, const char[] playerName, const char[] weaponDisplay,
+                     const char[] siName, bool headshot, bool melee,
+                     bool isTank, bool isWitch)
 {
-    char msg[256];
+    char chatMsg[256], suffix[32] = "";
 
-    // Tier-based visual: Tank ★★ > Witch ★ > Headshot ☠☠ > Melee > Normal
-    if (isTank)
-    {
-        if (headshot)
-            Format(msg, sizeof(msg), "★★  ☠  %s  爆头击杀  ☠  ★★", siName);
-        else if (melee)
-            Format(msg, sizeof(msg), "★★  ☠  %s  近战击杀  ☠  ★★", siName);
-        else
-            Format(msg, sizeof(msg), "★★  ☠  %s  击杀  ☠  ★★", siName);
-    }
-    else if (isWitch)
-    {
-        if (headshot)
-            Format(msg, sizeof(msg), "★  ☠  %s  爆头击杀  ☠  ★", siName);
-        else
-            Format(msg, sizeof(msg), "★  ☠  %s  击杀  ☠  ★", siName);
-    }
-    else if (headshot && melee)
-    {
-        Format(msg, sizeof(msg), "☠☠  %s  爆头近战击杀", siName);
-    }
-    else if (headshot)
-    {
-        Format(msg, sizeof(msg), "☠☠  %s  爆头击杀", siName);
-    }
-    else if (melee)
-    {
-        Format(msg, sizeof(msg), "☠  %s  近战击杀", siName);
-    }
-    else
-    {
-        Format(msg, sizeof(msg), "☠  %s  击杀", siName);
-    }
+    if (isTank && headshot)       suffix = "  爆头 ★";
+    else if (isTank && melee)     suffix = "  近战 ★";
+    else if (isTank)              suffix = " ★";
+    else if (isWitch && headshot) suffix = "  爆头";
+    else if (isWitch)             suffix = "";
+    else if (headshot && melee)   suffix = "  爆头近战";
+    else if (headshot)            suffix = "  爆头";
+    else if (melee)               suffix = "  近战";
 
-    // Streak counter
-    if (streakThreshold > 0 && streak >= streakThreshold)
-        Format(msg, sizeof(msg), "%s  x%d", msg, streak);
+    Format(chatMsg, sizeof(chatMsg), "\x04%s\x01  [%s]  ☠  \x03%s%s",
+        playerName, weaponDisplay, siName, suffix);
 
-    // Center-screen for Battlefield-style positioning
-    PrintCenterText(client, msg);
+    if (g_cvChatEnabled.BoolValue) PrintToChatAll(chatMsg);
 
-    // Note: PrintCenterText auto-fades after ~4 seconds.
-    // For a BF5-style kill feed on the side, a VScript HUD can be added later.
+    // Center text: weapon ☠ SI only, no player name
+    if (g_cvCenterTextEnabled.BoolValue)
+    {
+        char centerMsg[128];
+        Format(centerMsg, sizeof(centerMsg), "[%s]  ☠  %s%s", weaponDisplay, siName, suffix);
+        PrintHintText(client, centerMsg);
+        CreateTimer(g_cvCenterTextTimeout.FloatValue, Timer_ClearCenterText,
+            GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+    }
 }
 
 // ============================================================================
-// Helpers — Get sound path (fallback chain)
+// Helpers
 // ============================================================================
 
 void GetSoundPath(char[] buffer, int maxlen, ConVar primary, ConVar fallback)
 {
     primary.GetString(buffer, maxlen);
-    if (buffer[0] == '\0')
-        fallback.GetString(buffer, maxlen);
+    if (buffer[0] == '\0') fallback.GetString(buffer, maxlen);
 }
 
 void PlayClientSound(int client, const char[] sound)
 {
-    if (sound[0] == '\0')
-        return;
-
+    if (sound[0] == '\0') return;
     float vol = g_cvVolume.FloatValue;
-    if (vol <= 0.0)
-        return;
-
-    if (vol >= 1.0)
-        EmitSoundToClient(client, sound);
-    else
-        EmitSoundToClient(client, sound, _, _, _, _, vol);
+    if (vol <= 0.0) return;
+    EmitSoundToClient(client, sound, client, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS,
+        vol >= 1.0 ? 1.0 : vol);
 }
-
-// ============================================================================
-// Helpers — SI detection
-// ============================================================================
 
 void GetSIName(int client, char[] buffer, int maxlen)
 {
-    char cls[32];
-    GetEntityClassname(client, cls, sizeof(cls));
-    GetSINameByClass(cls, buffer, maxlen);
-}
-
-void GetSINameByClass(const char[] classname, char[] buffer, int maxlen)
-{
-    if (StrContains(classname, "smoker")  != -1) { strcopy(buffer, maxlen, "SMOKER  烟鬼");   return; }
-    if (StrContains(classname, "boomer")  != -1) { strcopy(buffer, maxlen, "BOOMER  胖子");   return; }
-    if (StrContains(classname, "hunter")  != -1) { strcopy(buffer, maxlen, "HUNTER  猎人");   return; }
-    if (StrContains(classname, "spitter") != -1) { strcopy(buffer, maxlen, "SPITTER 口水");   return; }
-    if (StrContains(classname, "jockey")  != -1) { strcopy(buffer, maxlen, "JOCKEY  猴子");   return; }
-    if (StrContains(classname, "charger") != -1) { strcopy(buffer, maxlen, "CHARGER 牛");     return; }
-    if (StrContains(classname, "tank")    != -1) { strcopy(buffer, maxlen, "TANK  坦克");      return; }
-    if (StrContains(classname, "witch")   != -1) { strcopy(buffer, maxlen, "WITCH  女巫");     return; }
-
-    strcopy(buffer, maxlen, "特感");
+    int zombieClass = GetEntProp(client, Prop_Send, "m_zombieClass");
+    switch (zombieClass)
+    {
+        case 1:  strcopy(buffer, maxlen, "SMOKER  烟鬼");
+        case 2:  strcopy(buffer, maxlen, "BOOMER  胖子");
+        case 3:  strcopy(buffer, maxlen, "HUNTER  猎人");
+        case 4:  strcopy(buffer, maxlen, "SPITTER 口水");
+        case 5:  strcopy(buffer, maxlen, "JOCKEY  猴子");
+        case 6:  strcopy(buffer, maxlen, "CHARGER 牛");
+        case 7:  strcopy(buffer, maxlen, "WITCH  女巫");
+        case 8:  strcopy(buffer, maxlen, "TANK  坦克");
+        default: strcopy(buffer, maxlen, "特感");
+    }
 }
 
 bool IsTank(int client)
 {
-    char cls[32];
-    GetEntityClassname(client, cls, sizeof(cls));
-    return (StrContains(cls, "tank") != -1);
+    return GetEntProp(client, Prop_Send, "m_zombieClass") == 8;
 }
 
 bool IsWitchEntity(int entity)
 {
-    if (entity <= 0 || !IsValidEntity(entity))
-        return false;
-
-    char cls[32];
-    GetEntityClassname(entity, cls, sizeof(cls));
-    return (StrContains(cls, "witch") != -1);
+    if (entity <= 0 || !IsValidEntity(entity)) return false;
+    char cls[32]; GetEntityClassname(entity, cls, sizeof(cls));
+    return StrContains(cls, "witch") != -1;
 }
 
 bool IsMeleeWeapon(const char[] weapon)
 {
-    // In L4D2, melee kills always report weapon as "melee"
-    if (StrEqual(weapon, "melee"))
-        return true;
+    return StrEqual(weapon, "melee") || StrEqual(weapon, "chainsaw");
+}
 
-    // Also check for chainsaw (technically not melee but close-range)
-    if (StrEqual(weapon, "chainsaw"))
-        return true;
-
-    return false;
+void GetWeaponDisplayName(const char[] weapon, char[] buffer, int maxlen)
+{
+    if (StrEqual(weapon, "pistol"))              { strcopy(buffer, maxlen, "手枪");     return; }
+    if (StrEqual(weapon, "dual_pistols"))        { strcopy(buffer, maxlen, "手枪");     return; }
+    if (StrEqual(weapon, "pistol_magnum"))       { strcopy(buffer, maxlen, "马格南");   return; }
+    if (StrEqual(weapon, "smg"))                 { strcopy(buffer, maxlen, "UZI");      return; }
+    if (StrEqual(weapon, "smg_silenced"))        { strcopy(buffer, maxlen, "MAC-10");   return; }
+    if (StrEqual(weapon, "smg_mp5"))             { strcopy(buffer, maxlen, "MP5");      return; }
+    if (StrEqual(weapon, "pumpshotgun"))         { strcopy(buffer, maxlen, "木喷");     return; }
+    if (StrEqual(weapon, "shotgun_chrome"))      { strcopy(buffer, maxlen, "铁喷");     return; }
+    if (StrEqual(weapon, "autoshotgun"))         { strcopy(buffer, maxlen, "M1014");    return; }
+    if (StrEqual(weapon, "shotgun_spas"))        { strcopy(buffer, maxlen, "SPAS");     return; }
+    if (StrEqual(weapon, "rifle"))               { strcopy(buffer, maxlen, "M16");      return; }
+    if (StrEqual(weapon, "rifle_sg552"))         { strcopy(buffer, maxlen, "SG552");    return; }
+    if (StrEqual(weapon, "rifle_desert"))        { strcopy(buffer, maxlen, "SCAR");     return; }
+    if (StrEqual(weapon, "rifle_ak47"))          { strcopy(buffer, maxlen, "AK47");     return; }
+    if (StrEqual(weapon, "hunting_rifle"))       { strcopy(buffer, maxlen, "猎枪");     return; }
+    if (StrEqual(weapon, "sniper_military"))     { strcopy(buffer, maxlen, "军狙");     return; }
+    if (StrEqual(weapon, "sniper_awp"))          { strcopy(buffer, maxlen, "AWP");      return; }
+    if (StrEqual(weapon, "sniper_scout"))        { strcopy(buffer, maxlen, "SCOUT");    return; }
+    if (StrEqual(weapon, "melee"))               { strcopy(buffer, maxlen, "近战");     return; }
+    if (StrEqual(weapon, "chainsaw"))            { strcopy(buffer, maxlen, "电锯");     return; }
+    if (StrEqual(weapon, "pipe_bomb"))           { strcopy(buffer, maxlen, "土制");     return; }
+    if (StrEqual(weapon, "molotov"))             { strcopy(buffer, maxlen, "燃烧瓶");   return; }
+    if (StrEqual(weapon, "vomitjar"))            { strcopy(buffer, maxlen, "胆汁");     return; }
+    if (StrEqual(weapon, "grenade_launcher"))    { strcopy(buffer, maxlen, "榴弹");     return; }
+    if (StrEqual(weapon, "prop_minigun"))        { strcopy(buffer, maxlen, "固定机枪"); return; }
+    if (StrEqual(weapon, "prop_mounted_machine_gun")) { strcopy(buffer, maxlen, "固定机枪"); return; }
+    if (StrEqual(weapon, "rifle_m60"))           { strcopy(buffer, maxlen, "M60");      return; }
+    if (StrEqual(weapon, "inferno") || StrEqual(weapon, "entityflame"))
+        { strcopy(buffer, maxlen, "火焰"); return; }
+    strcopy(buffer, maxlen, weapon);
 }

@@ -6,12 +6,15 @@
 // the engine spawns the bot.
 //
 // Design:
-//   - 6 regular modes rotate every 90-120s, each with a DISTINCT class signature
+//   - 6 regular modes rotate every 40-60s (synced with ss_time_min/max)
 //   - Each mode OMITS 2-3 SI types entirely (0% ratio) for strong identity
 //   - Only Mode 6 (Balanced) includes all 6 classes
 //   - 1 Tank override mode: auto-activates when Tank spawns
 //   - Deficit-first algorithm: picks the class furthest below its target ratio
 //   - Zero-ratio classes are never selected (deficit ≤ 0)
+//   - g_iAliveByClass pre-counted in L4D_OnSpawnSpecial → intra-wave deficit awareness
+//   - Class limits (ss_*_limit) enforced within the same wave, not just between waves
+//   - Requires ss_time_mode 1 (random); pin min=max per wave for exact countdown
 //
 // Mode table (Smoker, Boomer, Hunter, Spitter, Jockey, Charger):
 //   Mode 1 "钢铁洪流"  — C+H+J only, zero ranged/zoning
@@ -30,7 +33,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.1.0"
+#define PLUGIN_VERSION "2.3.3"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -101,8 +104,27 @@ Handle g_hModeTimer = INVALID_HANDLE;
 
 // Wave announcement state
 float  g_fLastWaveAnnounce = 0.0;                // GameTime of last wave chat message
-float  g_fSsTimeMin = 40.0;                      // ss_time_min (configured range lower bound)
-float  g_fSsTimeMax = 60.0;                      // ss_time_max (configured range upper bound)
+float  g_fSrcTimeMin = 40.0;                     // Source range lower bound (from cfg)
+float  g_fSrcTimeMax = 60.0;                     // Source range upper bound (from cfg)
+
+// Timing pin: we own ss_time_min and ss_time_max handles to pin both
+// to the same value each wave. ss_time_mode 1 then produces exactly that value
+// (random(X, X) = X), giving us exact countdown control.
+ConVar g_cvSsTimeMin;
+ConVar g_cvSsTimeMax;
+
+// Spawn-size scaling: dynamically adjust ss_spawn_size per survivor count.
+// Uses same extra_limit/extra_size formula as specialspawner's alive limit.
+ConVar g_cvSsSpawnSize;
+ConVar g_cvSsBaseLimit;
+ConVar g_cvSsExtraLimit;
+ConVar g_cvSsBaseSize;
+ConVar g_cvSsExtraSize;
+
+// Fixed baseline captured once at startup — NOT read from the mutable ConVar
+// each time. Otherwise AdjustSpawnSize feeds its own output back as input,
+// converging irreversibly to the minimum clamp (4) on the first low-player event.
+float g_fCfgBaseSpawnSize = 6.0;  // overridden from ss_spawn_size in OnPluginStart
 
 // ============================================================================
 // ConVars
@@ -112,7 +134,6 @@ ConVar g_cvModeIntervalMin;
 ConVar g_cvModeIntervalMax;
 ConVar g_cvAnnounce;
 ConVar g_cvWaveAnnounce;
-ConVar g_cvSsTimeMax;  // ss_time_max handle for runtime override
 
 // ============================================================================
 // Plugin Info
@@ -133,10 +154,10 @@ public void OnPluginStart()
     // --- Our cvars ---
     g_cvEnable          = CreateConVar("si_comp_enable",              "1",
         "Enable spawn composition manager (0=off, 1=on)", _, true, 0.0, true, 1.0);
-    g_cvModeIntervalMin = CreateConVar("si_comp_mode_interval_min",   "90.0",
-        "Minimum seconds between mode changes", _, true, 30.0, true, 600.0);
-    g_cvModeIntervalMax = CreateConVar("si_comp_mode_interval_max",   "120.0",
-        "Maximum seconds between mode changes", _, true, 30.0, true, 600.0);
+    g_cvModeIntervalMin = CreateConVar("si_comp_mode_interval_min",   "40.0",
+        "Minimum seconds between mode changes (synced to ss_time_min)", _, true, 20.0, true, 600.0);
+    g_cvModeIntervalMax = CreateConVar("si_comp_mode_interval_max",   "60.0",
+        "Maximum seconds between mode changes (synced to ss_time_max)", _, true, 20.0, true, 600.0);
     g_cvAnnounce        = CreateConVar("si_comp_announce",            "0",
         "Announce mode changes in chat (0=off, 1=on)", _, true, 0.0, true, 1.0);
     g_cvWaveAnnounce    = CreateConVar("si_comp_wave_announce",      "1",
@@ -145,25 +166,41 @@ public void OnPluginStart()
 
     AutoExecConfig(true, "si_composition_manager");
 
-    // --- Read specialspawner limits + save timing range ---
+    // --- Read specialspawner limits ---
     ReadClassLimits();
 
-    // Save the configured spawn interval range (read once, before we start
-    // overwriting ss_time_max at runtime)
-    ConVar cv = FindConVar("ss_time_min");
-    g_fSsTimeMin = (cv != null) ? cv.FloatValue : 40.0;
-    cv = FindConVar("ss_time_max");
-    g_fSsTimeMax = (cv != null) ? cv.FloatValue : 60.0;
-
-    // Get ss_time_max handle for runtime override
+    // --- Grab handles for ss_time_min / ss_time_max (we pin them per-wave) ---
+    g_cvSsTimeMin = FindConVar("ss_time_min");
     g_cvSsTimeMax = FindConVar("ss_time_max");
-    RefreshSpawnTiming();  // set initial interval
+
+    // --- Grab handles for spawn-size scaling ---
+    g_cvSsSpawnSize  = FindConVar("ss_spawn_size");
+    g_cvSsBaseLimit  = FindConVar("ss_base_limit");
+    g_cvSsExtraLimit = FindConVar("ss_extra_limit");
+    g_cvSsBaseSize   = FindConVar("ss_base_size");
+    g_cvSsExtraSize  = FindConVar("ss_extra_size");
+
+    // Capture the config's ss_spawn_size as a FIXED baseline.
+    // AdjustSpawnSize must use this constant, not the mutable ConVar value,
+    // or it feeds its own output back as input and converges to the clamp floor.
+    if (g_cvSsSpawnSize != null) {
+        g_fCfgBaseSpawnSize = float(g_cvSsSpawnSize.IntValue);
+    }
+
+    // --- Read configured source range ---
+    ReadSourceRange();
+
+    // --- Set initial interval + spawn size ---
+    PinSpawnTiming();
+    AdjustSpawnSize();
 
     // --- Hook spawn events ---
-    HookEvent("player_spawn",  Event_PlayerSpawn,  EventHookMode_Post);
-    HookEvent("player_death",  Event_PlayerDeath,  EventHookMode_Pre);
-    HookEvent("round_start",   Event_RoundStart,   EventHookMode_PostNoCopy);
-    HookEvent("round_end",     Event_RoundEnd,     EventHookMode_PostNoCopy);
+    HookEvent("player_spawn",     Event_PlayerSpawn,     EventHookMode_Post);
+    HookEvent("player_death",     Event_PlayerDeath,     EventHookMode_Pre);
+    HookEvent("player_team",      Event_PlayerTeam,      EventHookMode_Post);
+    HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Post);
+    HookEvent("round_start",      Event_RoundStart,      EventHookMode_PostNoCopy);
+    HookEvent("round_end",        Event_RoundEnd,        EventHookMode_PostNoCopy);
 }
 
 // ============================================================================
@@ -186,16 +223,74 @@ int GetConVarIntSafe(const char[] name, int defaultVal)
 }
 
 // ============================================================================
-// Spawn timing: generate random interval, push to ss_time_max (mode 0 = fixed)
-// ss_time_max is constantly overwritten so each wave has a different known interval.
-// The configured range [ss_time_min, original_ss_time_max] is read once at init.
+// Spawn timing (ss_time_mode 1 + pinning trick)
+//
+// specialspawner mode 1 picks random(ss_time_min, ss_time_max) each wave.
+// We pin BOTH to the SAME value → random(X, X) = X → exact countdown.
+// ss_time_min / ss_time_max are read fresh from cfg on MapStart / round_start.
 // ============================================================================
-void RefreshSpawnTiming()
+void ReadSourceRange()
 {
-    float interval = GetRandomFloat(g_fSsTimeMin, g_fSsTimeMax);
-    if (g_cvSsTimeMax != null) {
-        g_cvSsTimeMax.SetFloat(interval);
+    if (g_cvSsTimeMin != null) g_fSrcTimeMin = g_cvSsTimeMin.FloatValue;
+    if (g_cvSsTimeMax != null) g_fSrcTimeMax = g_cvSsTimeMax.FloatValue;
+}
+
+// Generate next interval and pin both cvars to it.
+// Returns the chosen interval so the caller can announce it.
+float PinSpawnTiming()
+{
+    ReadSourceRange();  // re-read in case sourcemod.cfg changed them
+    float interval = GetRandomFloat(g_fSrcTimeMin, g_fSrcTimeMax);
+    if (g_cvSsTimeMin != null) g_cvSsTimeMin.SetFloat(interval);
+    if (g_cvSsTimeMax != null) g_cvSsTimeMax.SetFloat(interval);
+
+    AdjustSpawnSize();  // re-scale per current survivor count
+
+    return interval;
+}
+
+// ============================================================================
+// Spawn-size scaling — mirrors specialspawner's limit formula
+//
+//   spawn_size = base_spawn_size + ss_extra_limit * (survivors - ss_base_size) / ss_extra_size
+//
+// with ss_spawn_size from cfg as the "base_spawn_size" (for 4 survivors).
+// Clamped to minimum 4 and capped at the computed alive limit.
+// ============================================================================
+int GetSurvivorCount()
+{
+    int count = 0;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i)) {
+            count++;
+        }
     }
+    return (count > 0) ? count : 4;  // fallback to 4 if no survivors found
+}
+
+void AdjustSpawnSize()
+{
+    if (g_cvSsSpawnSize == null) return;
+
+    int survivors    = GetSurvivorCount();
+    float baseSpawn  = g_fCfgBaseSpawnSize;  // FIXED baseline, not mutable ConVar
+    float extraLimit = (g_cvSsExtraLimit != null) ? g_cvSsExtraLimit.FloatValue : 1.5;
+    float baseSize   = (g_cvSsBaseSize != null)   ? g_cvSsBaseSize.FloatValue   : 4.0;
+    float extraSize  = (g_cvSsExtraSize != null)  ? g_cvSsExtraSize.FloatValue  : 1.0;
+    float baseLimit  = (g_cvSsBaseLimit != null)  ? g_cvSsBaseLimit.FloatValue  : 8.0;
+
+    // survivor delta: how many more (or fewer) than base_size
+    float delta = (float(survivors) - baseSize) / extraSize;
+
+    // Compute target spawn_size
+    int spawn = RoundToNearest(baseSpawn + extraLimit * delta);
+    if (spawn < 4) spawn = 4;
+
+    // Compute alive limit (same formula as specialspawner)
+    int limit = RoundToNearest(baseLimit + extraLimit * delta);
+    if (spawn > limit) spawn = limit;
+
+    g_cvSsSpawnSize.SetInt(spawn);
 }
 
 // ============================================================================
@@ -236,7 +331,27 @@ void ResetTracking()
         g_fLastSpawnedTime[i] = 0.0;
     }
     g_fLastWaveAnnounce = 0.0;
-    RefreshSpawnTiming();  // new round, new first interval
+    PinSpawnTiming();   // set random interval for the first wave
+    AdjustSpawnSize();  // set spawn_size for current survivor count
+}
+
+// ============================================================================
+// Player team / disconnect — re-scale spawn_size immediately
+// ============================================================================
+public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
+{
+    // Only care about team changes involving survivors
+    int oldTeam = event.GetInt("oldteam");
+    int newTeam = event.GetInt("team");
+    if (oldTeam == 2 || newTeam == 2) {
+        AdjustSpawnSize();
+    }
+}
+
+public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast)
+{
+    // Player may have been on survivor team — re-check
+    AdjustSpawnSize();
 }
 
 // ============================================================================
@@ -345,9 +460,8 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
         return;
     }
 
-    if (zombieClass < ZC_SMOKER || zombieClass > ZC_CHARGER) return;
-
-    g_iAliveByClass[zombieClass]++;
+    // SI alive counting moved to L4D_OnSpawnSpecial (pre-spawn)
+    // so subsequent spawns in the same wave can see earlier picks.
 }
 
 // ============================================================================
@@ -380,12 +494,18 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 public Action L4D_OnSpawnSpecial(int &zombieClass, const float vecPos[3], const float vecAng[3])
 {
     if (!g_cvEnable.BoolValue) {
+        // Still track spawn for accurate alive counts
+        if (zombieClass >= ZC_SMOKER && zombieClass <= ZC_CHARGER) {
+            g_iAliveByClass[zombieClass]++;
+            g_fLastSpawnedTime[zombieClass] = GetGameTime();
+        }
         return Plugin_Continue;
     }
 
     int chosen = PickClass();
     if (chosen >= ZC_SMOKER && chosen <= ZC_CHARGER) {
         zombieClass = chosen;
+        g_iAliveByClass[chosen]++;                       // pre-count for intra-wave deficit calc
         g_fLastSpawnedTime[chosen] = GetGameTime();
 
         // --- Wave detection + announcement ---
@@ -394,7 +514,12 @@ public Action L4D_OnSpawnSpecial(int &zombieClass, const float vecPos[3], const 
         return Plugin_Changed;
     }
 
-    return Plugin_Continue;  // Fallback: let specialspawner decide
+    // Fallback: let specialspawner decide, but still track the original class
+    if (zombieClass >= ZC_SMOKER && zombieClass <= ZC_CHARGER) {
+        g_iAliveByClass[zombieClass]++;
+        g_fLastSpawnedTime[zombieClass] = GetGameTime();
+    }
+    return Plugin_Continue;
 }
 
 // ============================================================================
@@ -403,17 +528,14 @@ public Action L4D_OnSpawnSpecial(int &zombieClass, const float vecPos[3], const 
 void DetectAndAnnounceWave()
 {
     float now = GetGameTime();
-    float cooldown = g_fSsTimeMin * 0.5;  // half of min interval = safe gap
+    float cooldown = g_fSrcTimeMin * 0.5;  // half of source range min
     if (cooldown < 15.0) cooldown = 15.0;
 
     if (now - g_fLastWaveAnnounce > cooldown) {
         g_fLastWaveAnnounce = now;
 
-        // Generate next interval BEFORE announcing (so countdown is accurate)
-        float nextInterval = GetRandomFloat(g_fSsTimeMin, g_fSsTimeMax);
-        if (g_cvSsTimeMax != null) {
-            g_cvSsTimeMax.SetFloat(nextInterval);
-        }
+        // Pin min=max to a new random interval → specialspawner picks exactly this
+        float nextInterval = PinSpawnTiming();
 
         AnnounceWave(nextInterval);
     }
@@ -430,8 +552,10 @@ void AnnounceWave(float nextInterval)
         strcopy(modeName, sizeof(modeName), g_sModeNames[g_iCurrentMode]);
     }
 
-    PrintToChatAll("\x04[SI波次]\x01 特感已刷新! 进攻策略: \x05%s\x01 | 下一波: \x04%.0f\x01秒后",
-        modeName, nextInterval);
+    int spawnSize = (g_cvSsSpawnSize != null) ? g_cvSsSpawnSize.IntValue : 6;
+
+    PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只! 进攻策略: \x05%s\x01 | 下一波: \x04%.0f\x01秒后",
+        spawnSize, modeName, nextInterval);
 }
 
 // ============================================================================
@@ -474,6 +598,11 @@ int PickClass()
             continue;
         }
 
+        // Skip zero-ratio classes (excluded from current mode)
+        if (ratios[idx] <= 0.0) {
+            continue;
+        }
+
         float target  = ratios[idx] * float(total);
         float deficit = target - float(g_iAliveByClass[cls]);
 
@@ -501,6 +630,10 @@ int PickClass()
                 continue;
             }
             int idx = cls - 1;
+            // Skip zero-ratio classes here too (same reason as above)
+            if (ratios[idx] <= 0.0) {
+                continue;
+            }
             float target  = ratios[idx] * float(total);
             float deficit = target - float(g_iAliveByClass[cls]);
             float absDef  = FloatAbs(deficit);
