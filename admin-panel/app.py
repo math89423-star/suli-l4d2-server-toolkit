@@ -385,11 +385,12 @@ def api_maps_upload():
         shutil.rmtree(tmpdir, ignore_errors=True)
         return jsonify({"error": f"unzip failed: {e}"}), 500
 
-    # Find VPK files
+    # Find VPK files (recursive — ZIP may nest them in subdirs)
     vpks = []
-    for fn in sorted(os.listdir(tmpdir)):
-        if fn.lower().endswith(".vpk"):
-            vpks.append(os.path.join(tmpdir, fn))
+    for root, dirs, files in os.walk(tmpdir):
+        for fn in sorted(files):
+            if fn.lower().endswith(".vpk"):
+                vpks.append(os.path.join(root, fn))
 
     if not vpks:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -403,18 +404,78 @@ def api_maps_upload():
     for vpk in vpks:
         for dest_dir in (addons, vpk_dir):
             dst = os.path.join(dest_dir, os.path.basename(vpk))
-            shutil.copy2(vpk, dst)
+            shutil.copy(vpk, dst)  # copy (not copy2) so mtime=now > last_restart
             os.chmod(dst, 0o644)
         copied.append(os.path.basename(vpk))
 
-    # Run scan_maps.py to regenerate maps.json
-    scan = cfg.get("scan_script", os.path.join(BASE_DIR, "scan_maps.py"))
-    scan_ok = False
-    try:
-        r = subprocess.run([sys.executable, scan], capture_output=True, text=True, timeout=60)
-        scan_ok = (r.returncode == 0)
-    except:
-        pass
+    # Incrementally add to maps.json (no full rescan — fast)
+    scan_ok = True
+    scan_error = ""
+    added_campaigns = []
+    for vpk in vpks:
+        vpk_basename = os.path.basename(vpk)
+        maps = _extract_map_names(vpk)
+        if not maps:
+            print(f"[upload] no maps found in {vpk_basename}, skipping", file=sys.stderr)
+            continue
+        first_map = maps[0]
+        # Generate campaign id
+        cid = re.sub(r'[^a-z0-9_]', '', first_map.rsplit('_', 1)[0]) if '_' in first_map else first_map
+        if len(cid) < 2:
+            cid = "up_" + re.sub(r'[^a-z0-9_]', '', vpk_basename.rsplit('.', 1)[0])[:14]
+        # Auto name from VPK filename
+        name = vpk_basename
+        if name.lower().endswith('.vpk'):
+            name = name[:-4]
+        for pf in ('l4d2_', 'l4d_'):
+            if name.lower().startswith(pf):
+                name = name[len(pf):]
+                break
+        name = re.sub(r'_v?\d+(_\d+)*$', '', name).replace('_', ' ').strip()
+        name = ' '.join(w[0].upper() + w[1:] if w and w[0].islower() else w for w in name.split() if w) or name
+        # Add to maps.json
+        try:
+            with open(MAPS_FILE) as f:
+                mj = json.load(f)
+            new_camp = {
+                "id": cid, "name": name, "alias": cid,
+                "maps": maps, "size": f"{os.path.getsize(vpk) // 1048576}M"
+            }
+            # Check duplicate
+            dup = False
+            for cat in mj["categories"]:
+                for camp in cat["campaigns"]:
+                    if camp["maps"][0] == first_map:
+                        dup = True
+                        break
+            if not dup:
+                for cat in mj["categories"]:
+                    if cat["id"] == "custom":
+                        cat["campaigns"].append(new_camp)
+                        break
+                mj["aliases"][cid] = first_map
+                for i, m in enumerate(maps):
+                    if m not in mj.get("map_labels", {}):
+                        mj.setdefault("map_labels", {})[m] = f"{name}-{i + 1}"
+                with open(MAPS_FILE, "w") as f:
+                    json.dump(mj, f, indent=2, ensure_ascii=False)
+                added_campaigns.append(new_camp)
+                # Add first map to custom mapcycle
+                mcp = cfg.get("mapcycle_custom_path", "")
+                if mcp:
+                    existing = []
+                    if os.path.exists(mcp):
+                        with open(mcp) as f:
+                            existing = [l.strip() for l in f if l.strip()]
+                    if first_map not in existing:
+                        with open(mcp, "a") as f:
+                            f.write(first_map + "\n")
+            else:
+                print(f"[upload] map {first_map} already exists, skipping", file=sys.stderr)
+        except Exception as e:
+            scan_ok = False
+            scan_error = str(e)
+            print(f"[upload] failed to update maps.json: {e}", file=sys.stderr)
 
     shutil.rmtree(tmpdir, ignore_errors=True)
     return jsonify({
@@ -422,7 +483,30 @@ def api_maps_upload():
         "vpks": copied,
         "need_restart": True,
         "scan_ok": scan_ok,
+        "scan_error": scan_error,
+        "added": [c["name"] for c in added_campaigns],
     })
+
+
+@app.route("/api/maps/rescan", methods=["POST"])
+@login_required
+def api_maps_rescan():
+    """Manually re-scan addons/ VPKs and regenerate maps.json."""
+    scan = cfg.get("scan_script", os.path.join(BASE_DIR, "scan_maps.py"))
+    try:
+        r = subprocess.run([sys.executable, scan], capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            return jsonify({"ok": True, "message": "maps.json 已刷新"})
+        else:
+            err = r.stderr.strip() or f"exit code {r.returncode}"
+            print(f"[rescan] scan_maps.py failed: {err}", file=sys.stderr)
+            return jsonify({"error": err}), 500
+    except subprocess.TimeoutExpired:
+        print("[rescan] scan_maps.py timed out", file=sys.stderr)
+        return jsonify({"error": "扫描超时 (60s)"}), 500
+    except Exception as e:
+        print(f"[rescan] scan_maps.py exception: {e}", file=sys.stderr)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/maps/workshop", methods=["POST"])
@@ -568,6 +652,8 @@ def api_server_restart():
         # Record restart time so frontend knows restart is no longer needed
         cfg["last_restart"] = _time.time()
         save_config(cfg)
+        # No post-restart rescan — upload handler already updated maps.json
+        # incrementally.  Full rescan is still available via /api/maps/rescan.
         return jsonify({"ok": True, "message": "服务器正在重启..."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
