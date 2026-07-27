@@ -93,14 +93,23 @@ stock int BT_CreateChargerTree() {
         BT_CreateAction(ChargerAct_Charge)
     );
 
-    // Standard approach: block charge until in range
-    int approachSeq = BT_CreateSequence(2,
+    // Default charge: in range + LOS → charge (v3.2 fix: was missing)
+    int defaultChargeSeq = BT_CreateSequence(4,
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateInverter(BT_CreateIsInRange(500.0))
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(500.0),
+        BT_CreateAction(ChargerAct_Charge)
+    );
+
+    // Standard approach: strafe toward target when too far to charge
+    int approachSeq = BT_CreateSequence(3,
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateInverter(BT_CreateIsInRange(500.0)),
+        BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
     // Root selector — terrain branches (2-6) fail when ai_terrain_enable=0 or
-    // terrain=UNKNOWN → falls through to standard behavior (7-11).
+    // terrain=UNKNOWN → falls through to standard behavior (7-12).
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor));
     BT_AddChild(root, ledgeChargeSeq);          // 2. v3.2: ledge → charge
@@ -110,9 +119,10 @@ stock int BT_CreateChargerTree() {
     BT_AddChild(root, openFlankSeq);            // 6. v3.2: open → approach
     BT_AddChild(root, lowHpSeq);                // 7. ← FALLBACK: low HP charge
     BT_AddChild(root, coordSeq);                // 8. ← FALLBACK: coordination
-    BT_AddChild(root, approachSeq);             // 9. ← FALLBACK: standard approach
-    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 10. ← FALLBACK
-    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 11. ← FALLBACK
+    BT_AddChild(root, defaultChargeSeq);        // 9. ← FALLBACK: default charge (v3.3)
+    BT_AddChild(root, approachSeq);             // 10.← FALLBACK: approach with strafe
+    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 11. ← FALLBACK
+    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 12. ← FALLBACK
 
     return root;
 }

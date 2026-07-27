@@ -126,7 +126,7 @@ Action Timer_ClearCenterText(Handle timer, int userId)
 {
     int client = GetClientOfUserId(userId);
     if (client > 0 && IsClientInGame(client))
-        PrintHintText(client, " ");
+        PrintHintText(client, "");
     return Plugin_Stop;
 }
 
@@ -296,7 +296,7 @@ void ShowKillDisplay(int client, const char[] playerName, const char[] weaponDis
     else if (headshot)            suffix = "  爆头";
     else if (melee)               suffix = "  近战";
 
-    Format(chatMsg, sizeof(chatMsg), "\x04%s\x01  [%s]  ☠  \x03%s%s",
+    Format(chatMsg, sizeof(chatMsg), "\x04%s\x01  [%s] KILL \x03%s%s",
         playerName, weaponDisplay, siName, suffix);
 
     if (g_cvChatEnabled.BoolValue) PrintToChatAll(chatMsg);
@@ -305,7 +305,7 @@ void ShowKillDisplay(int client, const char[] playerName, const char[] weaponDis
     if (g_cvCenterTextEnabled.BoolValue)
     {
         char centerMsg[128];
-        Format(centerMsg, sizeof(centerMsg), "[%s]  ☠  %s%s", weaponDisplay, siName, suffix);
+        Format(centerMsg, sizeof(centerMsg), "[%s] KILL %s%s", weaponDisplay, siName, suffix);
         PrintHintText(client, centerMsg);
         CreateTimer(g_cvCenterTextTimeout.FloatValue, Timer_ClearCenterText,
             GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
