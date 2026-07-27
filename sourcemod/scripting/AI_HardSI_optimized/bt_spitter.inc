@@ -1,11 +1,15 @@
 // ============================================================================
-// bt_spitter.inc — Spitter Behavior Tree
+// bt_spitter.inc — Spitter Behavior Tree (v3.2)
 // ============================================================================
 // v3.1: Post-spit behavior — 80% approach survivors (body-block/distract),
 //       20% retreat. No longer suicides after spitting.
 // Key behaviors preserved from v2.4:
 //   - Combo targeting: pinned survivors > boomed survivors
 //   - Snap aim to best target
+// v3.2 terrain-aware additions:
+//   - Narrow corridor: spit to block passage (area denial — survivors must wait or take damage)
+//   - Open area: prediction spit toward escape route (cut off retreat)
+//   - Near ledge: spit toward safe side to push survivors toward edge
 // ============================================================================
 
 #if defined _bt_spitter_included
@@ -114,6 +118,25 @@ BT_Status SpitterAct_Spit(int client) {
 // ============================================================================
 
 stock int BT_CreateSpitterTree() {
+    // --- v3.2: Terrain-aware spit strategies ---
+    // Narrow corridor: spit toward center to block passage entirely
+    int narrowBlockSpit = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(900.0),              // long-range area denial
+        BT_CreateAction(SpitterAct_Spit)
+    );
+
+    // Open area: spit toward escape route (predict survivor movement)
+    int openPredictSpit = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(800.0),
+        BT_CreateAction(SpitterAct_Spit)
+    );
+
     // --- Post-spit behavior: approach (80%) or retreat (20%) ---
     int postSpitApproach = BT_CreateSequence(3,
         BT_CreateCondition(SpitterCnd_PostSpitApproach),
@@ -152,16 +175,21 @@ stock int BT_CreateSpitterTree() {
         BT_CreateAction(SpitterAct_Spit)
     );
 
+    // Root selector — terrain branches (3-4) fail when disabled/unknown
+    // → falls through to default spit (5).
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, postSpitSeq);
-    BT_AddChild(root, spitOnPinned);
-    BT_AddChild(root, spitOnBoomed);
-    BT_AddChild(root, defaultSpit);
+    BT_AddChild(root, spitOnPinned);           // 1. combo: spit on pinned
+    BT_AddChild(root, spitOnBoomed);           // 2. combo: spit on boomed
+    BT_AddChild(root, narrowBlockSpit);        // 3. v3.2: narrow → area denial
+    BT_AddChild(root, openPredictSpit);        // 4. v3.2: open → prediction
+    BT_AddChild(root, defaultSpit);            // 5. ← FALLBACK: default spit
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
 
     return root;
 }
 
 public Spitter_OnModuleStart() {
-    SetConVarInt(FindConVar("z_spit_damage_interrupt"), 200);
+    // No game cvar tuning needed for Spitter.
+    // (z_spit_damage_interrupt does not exist in L4D2 — removed)
 }

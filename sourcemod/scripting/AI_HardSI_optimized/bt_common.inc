@@ -438,4 +438,331 @@ BT_Status ACT_Retreat(int client) {
     return BT_RUNNING;
 }
 
+// ============================================================================
+// v3.2: TERRAIN DETECTION FRAMEWORK
+// ============================================================================
+// Classifies SI's current position into terrain types to enable context-aware
+// attack strategies. Results are cached in the blackboard for 0.5s intervals.
+//
+// Terrain types (stored in _terrain):
+//   0 = unknown / unclassified
+//   1 = narrow   (corridor, tunnel — both sides blocked)
+//   2 = open     (3+ directions clear beyond 600u)
+//   3 = ledge    (forward trace detects drop-off within 500u)
+//   4 = semi     (one side blocked, mixed — wall/cover on one side)
+//
+// Detection runs in two passes:
+//   Pass 1: horizontal traces (left/right for narrow, 4-way for open)
+//   Pass 2: forward ledge trace (3 step-down checks)
+// ============================================================================
+
+#define TERRAIN_UNKNOWN 0
+#define TERRAIN_NARROW  1
+#define TERRAIN_OPEN    2
+#define TERRAIN_LEDGE   3
+#define TERRAIN_SEMI    4
+
+#define TERRAIN_CHECK_INTERVAL 0.5
+#define TERRAIN_NARROW_WIDTH   200.0   // left/right trace distance for narrow check
+#define TERRAIN_OPEN_DIST      600.0   // 4-direction trace for open check
+#define TERRAIN_LEDGE_FWD_MAX  500.0   // max forward distance for ledge check
+#define TERRAIN_LEDGE_DOWN     400.0   // downward trace for ledge check
+
 // ---------------------------------------------------------------------------
+// Internal trace helpers — filter out the SI itself and other infected
+// ---------------------------------------------------------------------------
+
+public bool TerrainTraceFilter(int entity, int contentsMask, any data) {
+    if (entity == data) return false;   // skip self
+    if (entity < 1 || entity > MaxClients) return true;  // world geometry
+    // Skip other infected bots (they're not terrain)
+    if (IsClientInGame(entity) && GetClientTeam(entity) == 3) return false;
+    return true;
+}
+
+// Trace in a horizontal direction from SI's position.
+// Returns true if trace hits something within maxDist.
+stock bool Terrain_HorzTraceHit(int client, float angleOffset, float maxDist) {
+    float pos[3], ang[3], fwd[3], end[3];
+    GetClientAbsOrigin(client, pos);
+    GetClientEyeAngles(client, ang);
+    ang[1] += angleOffset;
+    ang[0] = 0.0;  // horizontal only
+
+    GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+    NormalizeVector(fwd, fwd);
+    end[0] = pos[0] + fwd[0] * maxDist;
+    end[1] = pos[1] + fwd[1] * maxDist;
+    end[2] = pos[2];
+
+    TR_TraceRayFilter(pos, end, MASK_PLAYERSOLID, RayType_EndPoint, TerrainTraceFilter, client);
+    return TR_DidHit();
+}
+
+// Forward ledge check: trace down at forwardDist ahead, return drop height.
+// Positive = ground is below. Negative = ground is above (ramp). 0 = no hit.
+stock float Terrain_LedgeDropAt(int client, float forwardDist) {
+    float pos[3], ang[3], fwd[3], start[3];
+    GetClientAbsOrigin(client, pos);
+    GetClientEyeAngles(client, ang);
+    ang[0] = 0.0;
+
+    GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+    NormalizeVector(fwd, fwd);
+
+    start[0] = pos[0] + fwd[0] * forwardDist;
+    start[1] = pos[1] + fwd[1] * forwardDist;
+    start[2] = pos[2] + 50.0;  // start a bit above
+
+    float end[3];
+    end[0] = start[0];
+    end[1] = start[1];
+    end[2] = start[2] - TERRAIN_LEDGE_DOWN;
+
+    TR_TraceRayFilter(start, end, MASK_PLAYERSOLID, RayType_EndPoint, TerrainTraceFilter, client);
+    if (!TR_DidHit()) return -999.0;  // no ground at all (cliff!)
+
+    float hitPos[3];
+    TR_GetEndPosition(hitPos);
+    return start[2] - hitPos[2];  // positive = ground is below start point
+}
+
+// Full terrain classification — runs once per interval, caches result.
+// When ai_terrain_enable=0: skips all traces, sets terrain to UNKNOWN.
+// This causes all terrain condition nodes to return FAIL, and the BT
+// selector falls through to the standard (non-terrain) behavior — the
+// default strategies that were battle-tested in v2.4/v3.0.
+stock void Terrain_Classify(int client) {
+    // -- v3.2: Check if terrain system is enabled --
+    if (g_hCvarTerrainEnable == INVALID_HANDLE || !GetConVarBool(g_hCvarTerrainEnable)) {
+        // Terrain detection disabled — force UNKNOWN.
+        // All terrain conditions will fail → BT falls back to standard behavior.
+        BB_SetInt(client, "_terrain", TERRAIN_UNKNOWN);
+        BB_SetFloat(client, "_terrain_next", GetGameTime() + TERRAIN_CHECK_INTERVAL);
+        return;
+    }
+
+    // Rate-limit: only reclassify every TERRAIN_CHECK_INTERVAL seconds
+    float now = GetGameTime();
+    float nextCheck = BB_GetFloat(client, "_terrain_next", 0.0);
+    if (nextCheck > 0.0 && now < nextCheck) return;
+    BB_SetFloat(client, "_terrain_next", now + TERRAIN_CHECK_INTERVAL);
+
+    // Reset ledge priority flag (only set when terrain is TERRAIN_LEDGE)
+    BB_SetBool(client, "_terrain_ledge_prio", false);
+
+    // ---- Pass 1: horizontal traces ----
+    bool leftBlocked  = Terrain_HorzTraceHit(client, -90.0, TERRAIN_NARROW_WIDTH);
+    bool rightBlocked = Terrain_HorzTraceHit(client,  90.0, TERRAIN_NARROW_WIDTH);
+
+    // Count clear directions for open-area detection (0°, 90°, 180°, 270°)
+    int clearDirs = 0;
+    float openAngles[4];
+    openAngles[0] = 0.0;    // forward
+    openAngles[1] = 90.0;   // right
+    openAngles[2] = 180.0;  // backward
+    openAngles[3] = 270.0;  // left
+    for (int i = 0; i < 4; i++) {
+        if (!Terrain_HorzTraceHit(client, openAngles[i], TERRAIN_OPEN_DIST)) {
+            clearDirs++;
+        }
+    }
+
+    // ---- Pass 2: ledge check ----
+    float drop150 = Terrain_LedgeDropAt(client, 150.0);
+    float drop350 = Terrain_LedgeDropAt(client, 350.0);
+    float drop500 = Terrain_LedgeDropAt(client, 500.0);
+    bool nearLedge = false;
+    // Ledge: close ground is solid but farther is missing or steep drop
+    if (drop150 > -900.0 && (drop350 < -800.0 || drop350 > 200.0 || drop500 < -800.0 || drop500 > 250.0)) {
+        nearLedge = true;
+    }
+    // Also ledge if ground drops more than 150u between 150u and 350u ahead
+    if (drop150 > -900.0 && drop350 > -900.0 && (drop350 - drop150) > 150.0) {
+        nearLedge = true;
+    }
+
+    // ---- Classification ----
+    int terrainType = TERRAIN_UNKNOWN;
+
+    // Ledge takes priority (dangerous to move forward)
+    if (nearLedge) {
+        terrainType = TERRAIN_LEDGE;
+        // Check if ledge is between SI and nearest survivor → useful for Smoker
+        float myPos[3], ang[3], fwd[3];
+        GetClientAbsOrigin(client, myPos);
+        GetClientEyeAngles(client, ang);
+        ang[0] = 0.0;
+        GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+        NormalizeVector(fwd, fwd);
+
+        int nearest = GetClosestSurvivor(myPos);
+        if (nearest > 0) {
+            float sPos[3], toSurv[3];
+            GetClientAbsOrigin(nearest, sPos);
+            MakeVectorFromPoints(myPos, sPos, toSurv);
+            NormalizeVector(toSurv, toSurv);
+            // If survivor is roughly in front (within 45°), ledge is between them
+            if (GetVectorDotProduct(fwd, toSurv) > 0.7) {
+                BB_SetBool(client, "_terrain_ledge_prio", true);
+            }
+        }
+    } else if (leftBlocked && rightBlocked) {
+        terrainType = TERRAIN_NARROW;
+    } else if (clearDirs >= 3) {
+        terrainType = TERRAIN_OPEN;
+    } else {
+        terrainType = TERRAIN_SEMI;  // one wall, partial cover
+    }
+
+    BB_SetInt(client, "_terrain", terrainType);
+
+    // Store directional info for narrow spaces (which side is blocked)
+    BB_SetBool(client, "_terrain_left_blocked", leftBlocked);
+    BB_SetBool(client, "_terrain_right_blocked", rightBlocked);
+
+    // Store open direction count for open areas
+    BB_SetInt(client, "_terrain_clear_dirs", clearDirs);
+}
+
+// ============================================================================
+// v3.2: Terrain condition nodes (use with BT_CreateCondition)
+//
+// All terrain conditions first check ai_terrain_enable cvar via Terrain_Classify.
+// When disabled, terrain is set to UNKNOWN and ALL conditions return FAIL,
+// causing BT selectors to fall through to standard (non-terrain) strategies.
+// ============================================================================
+
+// Master switch: returns SUCCESS only when terrain system is active
+BT_Status CND_IsTerrainEnabled(int client) {
+    if (g_hCvarTerrainEnable != INVALID_HANDLE && !GetConVarBool(g_hCvarTerrainEnable))
+        return BT_FAILURE;
+    return BT_SUCCESS;
+}
+
+// Returns SUCCESS when terrain is unclassified or classification failed.
+// Useful as an explicit fallback guard in BT branches.
+BT_Status CND_IsTerrainUnknown(int client) {
+    Terrain_Classify(client);
+    return (BB_GetInt(client, "_terrain", TERRAIN_UNKNOWN) == TERRAIN_UNKNOWN) ? BT_SUCCESS : BT_FAILURE;
+}
+
+BT_Status CND_IsNarrowSpace(int client) {
+    Terrain_Classify(client);
+    // cvar check: if disabled, Terrain_Classify forces UNKNOWN → condition fails
+    return (BB_GetInt(client, "_terrain", 0) == TERRAIN_NARROW) ? BT_SUCCESS : BT_FAILURE;
+}
+
+BT_Status CND_IsOpenArea(int client) {
+    Terrain_Classify(client);
+    return (BB_GetInt(client, "_terrain", 0) == TERRAIN_OPEN) ? BT_SUCCESS : BT_FAILURE;
+}
+
+BT_Status CND_IsNearLedge(int client) {
+    Terrain_Classify(client);
+    return (BB_GetInt(client, "_terrain", 0) == TERRAIN_LEDGE) ? BT_SUCCESS : BT_FAILURE;
+}
+
+BT_Status CND_IsSemiOpen(int client) {
+    Terrain_Classify(client);
+    return (BB_GetInt(client, "_terrain", 0) == TERRAIN_SEMI) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// Check if ledge is between SI and nearest survivor (for Smoker pull strategy)
+BT_Status CND_IsLedgeBetweenTarget(int client) {
+    Terrain_Classify(client);
+    int terrain = BB_GetInt(client, "_terrain", 0);
+    if (terrain != TERRAIN_LEDGE) return BT_FAILURE;
+    return BB_GetBool(client, "_terrain_ledge_prio", false) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// ============================================================================
+// v3.2: Terrain-aware actions
+// ============================================================================
+
+// Move toward a flanking position (90° offset from direct approach)
+// Used by Hunter/Charger in open areas to attack from the side
+BT_Status ACT_FlankApproach(int client) {
+    float now = GetGameTime();
+    float nextSwitch = BB_GetFloat(client, "_flank_next", 0.0);
+    bool flankRight = BB_GetBool(client, "_flank_right", false);
+
+    if (nextSwitch <= 0.0 || now >= nextSwitch) {
+        flankRight = (GetRandomInt(0, 1) == 0);
+        BB_SetBool(client, "_flank_right", flankRight);
+        BB_SetFloat(client, "_flank_next", now + GetRandomFloat(1.5, 3.0));
+    }
+
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        return BT_RUNNING;
+    }
+
+    // Aim at target but offset by ±60° for flank approach
+    float sPos[3], tPos[3], dir[3], ang[3];
+    GetClientAbsOrigin(client, sPos);
+    GetClientAbsOrigin(target, tPos);
+    MakeVectorFromPoints(sPos, tPos, dir);
+    GetVectorAngles(dir, ang);
+
+    // Offset approach angle for flanking
+    ang[1] += flankRight ? 60.0 : -60.0;
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+
+    // Strafe toward flank direction while moving forward
+    if (flankRight) {
+        BT_AddButton(client, IN_MOVERIGHT);
+    } else {
+        BT_AddButton(client, IN_MOVELEFT);
+    }
+    BT_AddButton(client, IN_FORWARD);
+    return BT_RUNNING;
+}
+
+// Move along a wall (perpendicular to facing, toward the unblocked side)
+// Used in narrow/semi spaces to use walls for cover
+BT_Status ACT_HugWall(int client) {
+    bool leftBlocked  = BB_GetBool(client, "_terrain_left_blocked", false);
+    bool rightBlocked = BB_GetBool(client, "_terrain_right_blocked", false);
+
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+
+    // Hug the wall: strafe toward the blocked side
+    if (leftBlocked && !rightBlocked) {
+        BT_AddButton(client, IN_MOVELEFT);   // move toward left wall
+    } else if (rightBlocked && !leftBlocked) {
+        BT_AddButton(client, IN_MOVERIGHT);  // move toward right wall
+    } else {
+        // Both blocked (narrow corridor) — move straight
+    }
+    BT_AddButton(client, IN_FORWARD);
+    return BT_RUNNING;
+}
+
+// Block a choke point — stand ground in narrow space facing the survivor
+// Used by Tank/Boomer to body-block corridors
+BT_Status ACT_HoldChokepoint(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+    // Don't move forward — just face the target and hold position
+    // (Tank will punch, Boomer will vomit, etc.)
+    return BT_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+

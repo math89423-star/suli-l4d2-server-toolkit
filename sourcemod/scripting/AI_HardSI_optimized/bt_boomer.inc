@@ -1,5 +1,5 @@
 // ============================================================================
-// bt_boomer.inc — Boomer Behavior Tree
+// bt_boomer.inc — Boomer Behavior Tree (v3.2)
 // ============================================================================
 // v3.1: Post-vomit behavior — 80% approach survivors (body-block, death-splode),
 //       20% retreat. Fixed broken tree where ACT_AcquireClosestTarget always
@@ -8,6 +8,10 @@
 //   - Flank approach (strafe when survivor is watching)
 //   - Direct approach (charge straight when not watched)
 //   - Vomit triggers coordination attack window
+// v3.2 terrain-aware additions:
+//   - Narrow corridor: hold chokepoint → vomit covers entire passage
+//   - Open area: flank behind cover → vomit from unexpected angle
+//   - Semi-open: hug wall → use corner for ambush vomit
 // ============================================================================
 
 #if defined _bt_boomer_included
@@ -101,6 +105,35 @@ BT_Status BoomerAct_Vomit(int client) {
 // ============================================================================
 
 stock int BT_CreateBoomerTree() {
+    // --- v3.2: Terrain-aware vomit strategies ---
+    // Narrow corridor: hold chokepoint → vomit to cover entire passage
+    int narrowHoldVomit = BT_CreateSequence(6,
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(350.0),
+        BT_CreateAction(ACT_HoldChokepoint),
+        BT_CreateAction(BoomerAct_Vomit)
+    );
+
+    // Open area: flank approach → ambush vomit
+    int openFlankVomit = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateIsInRange(400.0),
+        BT_CreateAction(ACT_FlankApproach),
+        BT_CreateAction(BoomerAct_Vomit)
+    );
+
+    // Semi-open: hug wall for cover → corner ambush vomit
+    int semiHugVomit = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsSemiOpen),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateIsInRange(350.0),
+        BT_CreateAction(ACT_HugWall),
+        BT_CreateAction(BoomerAct_Vomit)
+    );
+
     // --- Post-vomit behavior: 80% approach / 20% retreat ---
     int postVomitApproach = BT_CreateSequence(3,
         BT_CreateCondition(BoomerCnd_PostVomitApproach),
@@ -133,10 +166,15 @@ stock int BT_CreateBoomerTree() {
         BT_CreateAction(BoomerAct_FlankApproach)
     );
 
+    // Root selector — terrain branches (2-4) fail when disabled/unknown
+    // → falls through to standard vomit (5) and approach (6-7).
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, postVomitSeq);
-    BT_AddChild(root, vomitSeq);
-    BT_AddChild(root, approachSeq);
+    BT_AddChild(root, narrowHoldVomit);    // 2. v3.2: narrow → block + vomit
+    BT_AddChild(root, openFlankVomit);     // 3. v3.2: open → flank vomit
+    BT_AddChild(root, semiHugVomit);       // 4. v3.2: semi → corner ambush
+    BT_AddChild(root, vomitSeq);           // 5. ← FALLBACK: standard vomit
+    BT_AddChild(root, approachSeq);        // 6. ← FALLBACK: approach
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
 
     return root;

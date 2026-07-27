@@ -1,5 +1,5 @@
 // ============================================================================
-// bt_hunter.inc — Hunter Behavior Tree
+// bt_hunter.inc — Hunter Behavior Tree (v3.2)
 // ============================================================================
 // Replaces the old AI_Hunter.sp flat logic with a BT-driven decision tree.
 // Key behaviors preserved from v2.4:
@@ -11,6 +11,10 @@
 //   - Gaussian-angle pounce (via ability_use event hook, unchanged)
 //   - Fake direction (via ability_use event hook, unchanged)
 //   - Wall detection (via ability_use event hook, unchanged)
+// v3.2 terrain-aware additions:
+//   - Narrow corridor: wall-bounce pounce (un-dodgeable in tight spaces)
+//   - Open area: flank approach → pounce from unexpected angles
+//   - Semi-open (one wall): hug wall approach → use cover
 // ============================================================================
 
 #if defined _bt_hunter_included
@@ -160,45 +164,84 @@ stock int BT_CreateHunterTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
         BT_CreateSequence(2,
-            BT_CreateRandomChance(0.35),       // 35% chance
+            BT_CreateRandomChance(0.35),
             BT_CreateAction(HunterAct_ClimbHighGround)
         )
     );
 
-    int wallCheck = BT_CreateCondition(HunterCond_WallAhead);
+    // --- v3.2: Terrain-aware pounce strategies ---
+    // Narrow corridor: wall-bounce pounce — aim forward + ATTACK
+    // In tight spaces, survivors can't dodge → just pounce straight
+    int narrowPounceSeq = BT_CreateSequence(5,
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_IsDucking),
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(800.0)  // longer range in corridors
+    );
+    int narrowAttackSeq = BT_CreateSequence(3,
+        BT_CreateAction(ACT_SnapAimToTarget),
+        BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(ACT_SignalAttack)
+    );
+    BT_AddChild(narrowPounceSeq, narrowAttackSeq);
 
-    // Fast pounce: cooldown-gated attack sequence
+    // Open area: flank approach → get off-angle for unpredictable pounce
+    int openApproachSeq = BT_CreateSequence(4,
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_IsDucking),
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateInverter(BT_CreateIsInRange(500.0))  // keep distance while flanking
+    );
+    int openFlankAction = BT_CreateSequence(3,
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_FlankApproach),      // 60° offset approach
+        BT_CreateAction(ACT_Crouch)
+    );
+    BT_AddChild(openApproachSeq, openFlankAction);
+
+    // Semi-open / one wall: hug wall for cover while approaching
+    int semiApproachSeq = BT_CreateSequence(4,
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_IsDucking),
+        BT_CreateCondition(CND_IsSemiOpen),
+        BT_CreateInverter(BT_CreateCondition(CND_HasLOS))
+    );
+    int semiHugAction = BT_CreateSequence(3,
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_HugWall),            // move along wall
+        BT_CreateAction(ACT_Crouch)
+    );
+    BT_AddChild(semiApproachSeq, semiHugAction);
+
+    // --- Standard fast pounce (unchanged from v2.4) ---
     int fastPounceSeq = BT_CreateSequence(2,
-        // Pre-conditions
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking)
     );
 
     int pounceInnerSeq = BT_CreateSequence(3,
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(1000.0),           // fast pounce proximity
-        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))  // don't dogpile
+        BT_CreateIsInRange(1000.0),
+        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
     );
 
     int attackActionSeq = BT_CreateSequence(3,
-        BT_CreateAction(ACT_StrafeRandom),     // zigzag strafe
-        BT_CreateAction(ACT_SnapAimToTarget),  // aim at target
-        BT_CreateAction(ACT_QueueLunge)        // press ATTACK
+        BT_CreateAction(ACT_StrafeRandom),
+        BT_CreateAction(ACT_SnapAimToTarget),
+        BT_CreateAction(ACT_QueueLunge)
     );
 
-    // Wrap attack in cooldown (based on z_lunge_interval)
     int cooldownAttack = BT_CreateCooldown(1.0, attackActionSeq);
-
     int signalCoord = BT_CreateAction(ACT_SignalAttack);
 
     // Approach: move toward target
     int approachSeq = BT_CreateSequence(3,
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateAction(ACT_StrafeRandom),     // zigzag while approaching
+        BT_CreateAction(ACT_StrafeRandom),
         BT_CreateAction(ACT_MoveToTarget)
     );
 
-    // Duck to prepare pounce
     int crouchSeq = BT_CreateSequence(1,
         BT_CreateAction(ACT_Crouch)
     );
@@ -210,35 +253,30 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_AcquireClosestTarget)
     );
 
-    // Wander as last resort
     int wander = BT_CreateAction(ACT_Wander);
 
     // --- Build main tree ---
-    // Priority order:
-    //   1. Escape after missed pounce
-    //   2. High-pounce positioning (35% chance)
-    //   3. Fast pounce (within range, has LOS, target not pinned)
-    //   4. Approach target (zigzag, crouch when close)
-    //   5. Wander
-
-    // Start with the missed escape at highest priority
     BT_AddChild(fastPounceSeq, pounceInnerSeq);
     BT_AddChild(fastPounceSeq, cooldownAttack);
     BT_AddChild(fastPounceSeq, signalCoord);
 
-    // Build approach subtree: approach → crouch when getting close
     int approachFull = BT_Create(BTN_SEQUENCE);
     BT_AddChild(approachFull, approachSeq);
     BT_AddChild(approachFull, crouchSeq);
 
-    // Root selector
+    // Root selector — terrain-aware branches take priority over generic fallbacks.
+    // FALLBACK: when ai_terrain_enable=0 or terrain=UNKNOWN, all v3.2 branches
+    // (3/4/5) return FAIL → selector falls through to standard behavior (6-9).
     int root = BT_Create(BTN_SELECTOR);
-    BT_AddChild(root, missEscSeq);
-    BT_AddChild(root, highPounceSeq);
-    BT_AddChild(root, fastPounceSeq);
-    BT_AddChild(root, approachFull);
-    BT_AddChild(root, crouchApproachSeq);
-    BT_AddChild(root, wander);
+    BT_AddChild(root, missEscSeq);         // 1. escape after miss
+    BT_AddChild(root, highPounceSeq);      // 2. high-ground positioning
+    BT_AddChild(root, narrowPounceSeq);    // 3. v3.2: narrow → straight pounce
+    BT_AddChild(root, openApproachSeq);    // 4. v3.2: open → flank approach
+    BT_AddChild(root, semiApproachSeq);    // 5. v3.2: semi → hug wall
+    BT_AddChild(root, fastPounceSeq);      // 6. ← FALLBACK: standard fast pounce
+    BT_AddChild(root, approachFull);       // 7. ← FALLBACK: approach → crouch
+    BT_AddChild(root, crouchApproachSeq);  // 8. ← FALLBACK: crouch approach
+    BT_AddChild(root, wander);             // 9. ← FALLBACK: wander
 
     return root;
 }

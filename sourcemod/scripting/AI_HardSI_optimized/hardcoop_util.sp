@@ -537,6 +537,7 @@ float g_fSIBoomerHitExpire;
 
 new Handle:g_hCvarCoordEnable;
 new Handle:g_hCvarCoordWindow;
+new Handle:g_hCvarTerrainEnable;  // v3.2: terrain detection toggle
 
 stock SI_UpdateCoordination() {
 	g_bSIBoomerHit = (g_fSIBoomerHitExpire > 0.0 && GetGameTime() < g_fSIBoomerHitExpire);

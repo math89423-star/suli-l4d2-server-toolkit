@@ -1,5 +1,5 @@
 // ============================================================================
-// bt_tank.inc — Tank Behavior Tree (v2.2 → BT)
+// bt_tank.inc — Tank Behavior Tree (v2.2 → BT v3.2)
 // ============================================================================
 // Preserved v2.2 features:
 //   - Smart bhop (adaptive cooldown, momentum, obstacle evasion, terrain sense)
@@ -8,6 +8,10 @@
 //   - Smart rock blocking (via L4D2_OnSelectTankAttack, unchanged)
 //   - Target selection (damager > low HP > incapped execute > default)
 //   - Rage multiplier (on fire: faster/stronger bhops)
+// v3.2 terrain-aware additions:
+//   - Narrow corridor: body-block chokepoint + melee punch (survivors trapped)
+//   - Open area: prefer rock throw + bhop chase (maximum reach)
+//   - Near ledge: punch survivors off cliffs (aim toward edge)
 // ============================================================================
 
 #if defined _bt_tank_included
@@ -255,7 +259,32 @@ stock int BT_CreateTankTree() {
     BT_AddChild(targetSelector, selectDefault);
 
     // ==========================================
-    // Attack type subtree
+    // v3.2: Terrain-aware attack types
+    // ==========================================
+    // Narrow corridor: hold chokepoint + melee (survivors can't run past)
+    int narrowHoldSeq = BT_CreateSequence(4,
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(400.0),
+        BT_CreateAction(ACT_HoldChokepoint)
+    );
+
+    // Open area: rock throw when far, bhop chase when medium range
+    int openRockSeq = BT_CreateSequence(4,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateCondition(TankCond_RockEligible),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateAction(ACT_Attack2)           // throw rock
+    );
+
+    // Ledge: punch survivors off — charge at them near the edge
+    int ledgePunchSeq = BT_CreateSequence(4,
+        BT_CreateCondition(CND_IsNearLedge),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(300.0),
+        BT_CreateAction(ACT_Attack)            // melee toward ledge
+    );
+
     // ==========================================
     int punchJumpSeq = BT_CreateSequence(2,
         BT_CreateCondition(TankCond_PunchJumpReady),
@@ -274,11 +303,17 @@ stock int BT_CreateTankTree() {
         BT_CreateAction(TankAct_Bhop)
     );
 
+    // Attack selector — terrain strategies (1-3) fail when disabled/unknown
+    // → falls through to standard attack types (4-7) from v2.2.
     int attackSelector = BT_Create(BTN_SELECTOR);
-    BT_AddChild(attackSelector, punchJumpSeq);
-    BT_AddChild(attackSelector, executeSeq);
-    BT_AddChild(attackSelector, rockSeq);
-    BT_AddChild(attackSelector, bhopSeq);
+    BT_AddChild(attackSelector, ledgePunchSeq);     // 1. v3.2: ledge → punch off cliff
+    BT_AddChild(attackSelector, narrowHoldSeq);     // 2. v3.2: narrow → hold chokepoint
+    BT_AddChild(attackSelector, openRockSeq);       // 3. v3.2: open → rock throw
+    // ↓ FALLBACK: standard strategies (battle-tested since v2.2)
+    BT_AddChild(attackSelector, punchJumpSeq);      // 4. ← punch-jump combo
+    BT_AddChild(attackSelector, executeSeq);        // 5. ← execute incapped
+    BT_AddChild(attackSelector, rockSeq);           // 6. ← standard rock throw
+    BT_AddChild(attackSelector, bhopSeq);           // 7. ← bhop chase
 
     // ==========================================
     // Root

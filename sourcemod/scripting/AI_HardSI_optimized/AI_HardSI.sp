@@ -1,5 +1,5 @@
 // ============================================================================
-// AI_HardSI.sp — L4D2 Special Infected AI (Behavior Tree v3.0)
+// AI_HardSI.sp — L4D2 Special Infected AI (Behavior Tree v3.2)
 // ============================================================================
 // Original v2.4 by Breezy — flat if-then-else per-SI logic.
 // v3.0 refactored with composable Behavior Tree framework for hierarchical,
@@ -42,10 +42,10 @@
 // ============================================================================
 
 public Plugin:myinfo = {
-    name = "AI: Hard SI (Behavior Tree v3.0)",
+    name = "AI: Hard SI (Behavior Tree v3.2)",
     author = "Breezy, refactored by Claude",
-    description = "Improves the AI of special infected — BT-driven decision engine",
-    version = "3.0",
+    description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
+    version = "3.2",
     url = "github.com/breezyplease"
 };
 
@@ -80,7 +80,12 @@ public OnPluginStart() {
     HookEvent("ability_use",       Event_AbilityUse,       EventHookMode_Pre);
     HookEvent("player_shoved",     Event_PlayerShoved,     EventHookMode_Pre);
     HookEvent("player_jump",       Event_PlayerJump,       EventHookMode_Pre);
-    HookEvent("tongue_release",    Event_TongueRelease,    EventHookMode_Pre);
+    // v3.2: tongue_release suicide REMOVED — Smoker BT now handles re-engagement naturally
+
+    // --- v3.2: Terrain detection cvar ---
+    g_hCvarTerrainEnable = CreateConVar("ai_terrain_enable", "1",
+        "Enable terrain-aware AI strategies (narrow/open/ledge detection): 0=OFF, 1=ON",
+        FCVAR_NONE, true, 0.0, true, 1.0);
 
     // --- Coordination cvars ---
     g_hCvarCoordEnable = CreateConVar("ai_coordination_enable", "1",
@@ -219,7 +224,8 @@ public Action:OnPlayerRunCmd(int client, int &buttons, int &impulse,
 // Event Hooks (preserved from v2.4 — game events, not BT logic)
 // ============================================================================
 
-// On ability use: handle pounce angle modification, smoker/spitter suicide
+// On ability use: handle pounce angle modification, coordination signals
+// v3.2: removed suicide logic — all SI now have BT post-ability behaviors
 public Action:Event_AbilityUse(Handle:event, String:name[], bool:dontBroadcast) {
     int client = GetClientOfUserId(GetEventInt(event, "userid"));
     if (!IsBotInfected(client)) return Plugin_Handled;
@@ -242,21 +248,11 @@ public Action:Event_AbilityUse(Handle:event, String:name[], bool:dontBroadcast) 
         return Plugin_Handled;
 
     } else if (StrEqual(abilityName, "ability_spit")) {
-        // Only Smoker suicides after ability use.
-        // Spitter now has post-spit behavior in the BT (approach/retreat).
-        if (GetInfectedClass(client) != L4D2Infected_Spitter) {
-            RequestFrame(SuicideFrame, any:client);
-        }
+        // Spitter post-spit behavior handled by BT (approach/retreat).
+        // No suicide — Spitter re-engages after spit cooldown.
+        return Plugin_Handled;
     }
     return Plugin_Handled;
-}
-
-public Action:Event_TongueRelease(Handle:event, String:name[], bool:dontBroadcast) {
-    int client = GetClientOfUserId(GetEventInt(event, "userid"));
-    if (IsBotInfected(client)) {
-        RequestFrame(SuicideFrame, any:client);
-    }
-    return Plugin_Continue;
 }
 
 public Action:Event_PlayerShoved(Handle:event, String:name[], bool:dontBroadcast) {

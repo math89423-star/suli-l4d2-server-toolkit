@@ -1,11 +1,15 @@
 // ============================================================================
-// bt_witch.inc — Witch Behavior Tree (NEW — previously no AI at all!)
+// bt_witch.inc — Witch Behavior Tree (v3.2)
 // ============================================================================
-// The Witch currently has empty stubs in AI_HardSI v2.4. This is the first
-// implementation of Witch AI. Behaviors:
+// The Witch previously had empty stubs in AI_HardSI v2.4.
+// v3.0: First implementation of Witch AI. Behaviors:
 //   - Enraged: chase and claw the survivor who startled her
 //   - Idle: sit in place (default behavior)
 //   - Retreat: move away from survivors who get too close (pre-startle)
+// v3.2 terrain-aware additions:
+//   - Narrow space: no retreat possible → become more aggressive (lower startle threshold)
+//   - Open area: standard retreat behavior
+//   - When blocked: fight instead of trying to retreat into walls
 // ============================================================================
 
 #if defined _bt_witch_included
@@ -131,9 +135,19 @@ stock int BT_CreateWitchTree() {
         )
     );
 
-    // Branch 2: Survivors too close but not startled → move away
-    int retreatSeq = BT_CreateSequence(3,
+    // --- v3.2: Terrain-aware retreat ---
+    // Narrow space: survivors too close → can't retreat, become aggressive
+    int narrowThreatened = BT_CreateSequence(4,
         BT_CreateInverter(BT_CreateCondition(WitchCond_IsEnraged)),
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateCondition(WitchCond_SurvivorsTooClose),
+        BT_CreateAction(WitchAct_ChaseTarget)   // move toward, not away
+    );
+
+    // Open/semi: survivors too close → retreat normally
+    int openRetreatSeq = BT_CreateSequence(4,
+        BT_CreateInverter(BT_CreateCondition(WitchCond_IsEnraged)),
+        BT_CreateInverter(BT_CreateCondition(CND_IsNarrowSpace)),
         BT_CreateCondition(WitchCond_SurvivorsTooClose),
         BT_CreateAction(WitchAct_Retreat)
     );
@@ -141,10 +155,15 @@ stock int BT_CreateWitchTree() {
     // Branch 3: Default idle (sit in place)
     int idleSeq = BT_CreateAction(WitchAct_Idle);
 
+    // Root selector — when terrain=UNKNOWN:
+    //   narrowThreatened fails (not narrow) → openRetreatSeq matches
+    //   (NOT narrow = true) → if SurvivorsTooClose → retreat.
+    //   If not too close → idle. Same as pre-v3.2 behavior (safe fallback).
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, enragedSeq);
-    BT_AddChild(root, retreatSeq);
-    BT_AddChild(root, idleSeq);
+    BT_AddChild(root, narrowThreatened);   // 2. v3.2: narrow → aggressive
+    BT_AddChild(root, openRetreatSeq);     // 3. ← FALLBACK (when not narrow, incl UNKNOWN)
+    BT_AddChild(root, idleSeq);            // 4. ← FALLBACK: idle
 
     return root;
 }

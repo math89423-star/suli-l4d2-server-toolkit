@@ -1,5 +1,5 @@
 // ============================================================================
-// bt_jockey.inc — Jockey Behavior Tree
+// bt_jockey.inc — Jockey Behavior Tree (v3.2)
 // ============================================================================
 // Key behaviors preserved from v2.4:
 //   - Alternating jump/leap cycle
@@ -8,6 +8,10 @@
 //   - Lateral strafing during approach
 //   - Target lowest-HP survivor during coordination
 //   - Stumble bystanders (via jockey_ride event hook, unchanged)
+// v3.2 terrain-aware additions:
+//   - Narrow corridor: approach along wall → leap from cover
+//   - Open area: flank leap → ride survivor away from team
+//   - Near ledge: ride survivor toward cliff/ledge
 // ============================================================================
 
 #if defined _bt_jockey_included
@@ -49,15 +53,42 @@ stock int BT_CreateJockeyTree() {
         BT_CreateAction(ACT_HoldVictim)
     );
 
-    // Hop attack subtree
+    // --- v3.2: Terrain-aware leap strategies ---
+    // Narrow: hug wall approach → leap from cover
+    int narrowLeapSeq = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(600.0),
+        BT_CreateAction(ACT_HugWall)
+    );
+
+    // Open area: flank approach → leap from unexpected angle
+    int openFlankSeq = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(800.0),
+        BT_CreateAction(ACT_FlankApproach)
+    );
+
+    // Ledge: approach survivor who is near edge → ride them off
+    int ledgeRideSeq = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsNearLedge),
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(500.0),
+        BT_CreateAction(ACT_FlankApproach)
+    );
+
+    // --- Standard hop attack ---
     int hopPreCond = BT_CreateSequence(3,
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_HasLOS),
         BT_CreateIsInRange(700.0)
     );
 
-    int hopAcquireTarget = BT_CreateAction(JockeyAct_AlternatingHop);  // handles the jump/leap cycle
-
+    int hopAcquireTarget = BT_CreateAction(JockeyAct_AlternatingHop);
     int hopWithCooldown = BT_CreateCooldown(2.0, hopAcquireTarget);
 
     int hopSeq = BT_CreateSequence(3,
@@ -66,16 +97,21 @@ stock int BT_CreateJockeyTree() {
         hopWithCooldown
     );
 
-    // Approach: always strafe while closing in (avoids being headshot while running straight)
+    // Approach: always strafe while closing in
     int strafeApproach = BT_CreateSequence(2,
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
+    // Root selector — terrain branches (2-4) fail when disabled/unknown
+    // → falls through to standard hop (5) and approach (6-7).
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, rideSeq);
-    BT_AddChild(root, hopSeq);
-    BT_AddChild(root, strafeApproach);
+    BT_AddChild(root, ledgeRideSeq);        // 2. v3.2: ledge → flank + leap
+    BT_AddChild(root, narrowLeapSeq);       // 3. v3.2: narrow → hug wall
+    BT_AddChild(root, openFlankSeq);        // 4. v3.2: open → flank
+    BT_AddChild(root, hopSeq);              // 5. ← FALLBACK: standard hop
+    BT_AddChild(root, strafeApproach);      // 6. ← FALLBACK: approach
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
 
     return root;
