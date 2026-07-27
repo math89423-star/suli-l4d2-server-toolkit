@@ -1,0 +1,30 @@
+"Phrases"
+{
+    "No Vote"
+    {
+        "en"        "No vote is currently in progress!"
+    }
+    "No Access"
+    {
+        "#format"   "{1:s},{2:s}"
+        "en"        "{1} was prevented from starting a {2} vote! Reason: no access!"
+    }
+    "Vote Passed"
+    {
+        "en"        "Called vote has passed!"
+    }
+    "Vote Failed"
+    {
+        "en"        "Called vote has failed!"
+    }
+    "Passed"
+    {
+        "#format"   "{1:s}"
+        "en"        "{1} has passed current vote!"
+    }
+    "Vetoed"
+    {
+        "#format"   "{1:s}"
+        "en"        "{1} has vetoed current vote!"
+    }
+}

@@ -1,0 +1,30 @@
+# Compiled plugins
+*.smx
+compiled/
+
+# Compiler binaries
+spcomp
+spcomp64
+
+# Logs
+logs/
+*.log
+
+# Temp files
+*.tmp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Binary extensions (platform-specific)
+extensions/*.dll
+extensions/*.so
+
+# Binaries
+bin/*.so
+bin/*.x86.so
+
+# Test/temp files
+test_write
