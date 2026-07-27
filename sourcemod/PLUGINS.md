@@ -44,7 +44,8 @@
 |------|------|
 | `specialspawner.smx` | 特感生成控制器——2 + 0.5×人数 配置，限 nav mesh 地图 |
 | `spawn_infected_nolimit.smx` | 移除特感生成数量限制 |
-| `AI_HardSI.smx` | 特感 AI 强化——精准扑击、冲锋、连跳、投石 |
+| `si_composition_manager.smx` | 特感刷新组合管理——6种战术模式轮换 + Tank协同，按比例动态分配类型 |
+| `AI_HardSI_bt.smx` | 特感 AI 强化——行为树 v3.2，精准扑击、冲锋、连跳、投石 |
 
 ## 📺 HUD / 公告 / 提示
 
