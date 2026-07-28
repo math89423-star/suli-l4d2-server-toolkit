@@ -819,18 +819,21 @@ stock void AStar_ReconstructPath(ArrayList outCells)
 
         // Ground snap: nav area center Z is the area's average height, not
         // the actual walkable floor. Trace down to find the real surface.
+        // v4.4: widened trace range (100 up / 300 down) for steep slopes
+        // and multi-story buildings. Add +2 fudge after hit to stay above
+        // the surface so beams don't embed in slight floor undulations.
         float traceStart[3], traceEnd[3], traceHit[3];
         traceStart[0] = cell.center[0];
         traceStart[1] = cell.center[1];
-        traceStart[2] = cell.center[2] + 50.0;
+        traceStart[2] = cell.center[2] + 100.0;
         traceEnd[0] = cell.center[0];
         traceEnd[1] = cell.center[1];
-        traceEnd[2] = cell.center[2] - 200.0;
+        traceEnd[2] = cell.center[2] - 300.0;
         TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
         if (TR_DidHit())
         {
             TR_GetEndPosition(traceHit);
-            cell.center[2] = traceHit[2];
+            cell.center[2] = traceHit[2] + 2.0; // +2 above floor surface
         }
 
         cell.flow = startFlow + (goalFlow - startFlow) * (float(ni) / float(pathLen - 1));
@@ -880,7 +883,10 @@ stock int AStar_IdentifyStart()
         Address area = view_as<Address>(areaInt);
 
         float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
-        if (flow < 0.0 || flow > g_fMaxFlow) continue;
+        // Only filter by flow when valid flow data is available.
+        // g_fMaxFlow=0 means no flow data on this map → skip filtering
+        // so A* can identify start/goal via spatial heuristics alone.
+        if (g_fMaxFlow > 0.0 && (flow < 0.0 || flow > g_fMaxFlow)) continue;
 
         int spawnAttrs = L4D_GetNavArea_SpawnAttributes(area);
         bool isPlayerStart = (spawnAttrs & NAV_SPAWN_PLAYER_START) != 0;
@@ -944,10 +950,16 @@ stock int AStar_IdentifyGoal(int startIndex)
     // toward the escape — the max-flow area IS the evacuation destination.
     // We verify reachability so disconnected components (locked doors,
     // finale-only areas) don't produce unreachable goals.
+    //
+    // v4.4: Also track the farthest-spatial reachable node. When the reachable
+    // set is very small (< BFS_FRAGMENTED_THRESHOLD nodes — fragmented nav mesh
+    // on custom maze maps), use the farthest-spatial node instead of max-flow.
+    // This ensures A* produces a multi-cell path spanning the full reachable
+    // area instead of collapsing to a single area near the start.
     if (startIndex >= 0 && g_fMaxFlow > 0.0)
     {
-        // BFS from start to build reachability set.
-        // During BFS, track the highest-flow reachable node.
+        #define BFS_FRAGMENTED_THRESHOLD 100
+
         StringMap reachable = new StringMap();
         ArrayList bfsQueue = new ArrayList();
         bfsQueue.Push(startIndex);
@@ -956,9 +968,14 @@ stock int AStar_IdentifyGoal(int startIndex)
         IntToString(startIndex, rkey, sizeof(rkey));
         reachable.SetValue(rkey, 1);
 
-        int bestReachableIdx = startIndex;
-        float bestReachableFlow = L4D2Direct_GetTerrorNavAreaFlow(
+        int bestFlowIdx = startIndex;
+        float bestFlow = L4D2Direct_GetTerrorNavAreaFlow(
             view_as<Address>(g_hAStarNodes.Get(startIndex)));
+        int bestDistIdx = startIndex;
+        float bestDistSq = 0.0;
+
+        float startC[3];
+        g_hAStarCenters.GetArray(startIndex, startC, 3);
 
         int bfsLimit = 5000; // cap to prevent excessive iteration on giant maps
 
@@ -969,13 +986,24 @@ stock int AStar_IdentifyGoal(int startIndex)
             int current = bfsQueue.Get(0);
             bfsQueue.Erase(0);
 
-            // Track max-flow reachable node
             int areaInt = g_hAStarNodes.Get(current);
+
+            // Track max-flow reachable node
             float flow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(areaInt));
-            if (flow > bestReachableFlow)
+            if (flow > bestFlow)
             {
-                bestReachableFlow = flow;
-                bestReachableIdx = current;
+                bestFlow = flow;
+                bestFlowIdx = current;
+            }
+
+            // Track farthest-spatial reachable node
+            float center[3];
+            g_hAStarCenters.GetArray(current, center, 3);
+            float distSq = GetVectorDistance(startC, center, true);
+            if (distSq > bestDistSq)
+            {
+                bestDistSq = distSq;
+                bestDistIdx = current;
             }
 
             Address area = view_as<Address>(areaInt);
@@ -1005,14 +1033,31 @@ stock int AStar_IdentifyGoal(int startIndex)
         delete bfsQueue;
         delete reachable;
 
-        if (bestReachableIdx >= 0)
+        // Pick goal: farthest-spatial for fragmented meshes, max-flow for normal maps
+        int chosenIdx;
+        if (bfsNodeCount > 0 && bfsNodeCount < BFS_FRAGMENTED_THRESHOLD && bestDistIdx != bestFlowIdx)
         {
-            float goalCenter[3];
-            g_hAStarCenters.GetArray(bestReachableIdx, goalCenter, 3);
-            LogMessage("[PTG] A* goal: max-flow reachable index %d (flow=%.1f, z=%.0f, bfs_nodes=%d)",
-                bestReachableIdx, bestReachableFlow, goalCenter[2], bfsNodeCount);
-            return bestReachableIdx;
+            chosenIdx = bestDistIdx;
+            float gc[3];
+            g_hAStarCenters.GetArray(chosenIdx, gc, 3);
+            LogMessage("[PTG] A* goal: farthest reachable (fragmented nav, %d nodes) index %d (dist=%.0f, z=%.0f)",
+                bfsNodeCount, chosenIdx, SquareRoot(bestDistSq), gc[2]);
         }
+        else if (bestFlowIdx >= 0)
+        {
+            chosenIdx = bestFlowIdx;
+            float gc[3];
+            g_hAStarCenters.GetArray(chosenIdx, gc, 3);
+            LogMessage("[PTG] A* goal: max-flow reachable index %d (flow=%.1f, z=%.0f, bfs_nodes=%d)",
+                chosenIdx, bestFlow, gc[2], bfsNodeCount);
+        }
+        else
+        {
+            chosenIdx = -1;
+        }
+
+        if (chosenIdx >= 0)
+            return chosenIdx;
     }
 
     // Strategy 3: Farthest Euclidean among areas at similar Z-level (±200u).

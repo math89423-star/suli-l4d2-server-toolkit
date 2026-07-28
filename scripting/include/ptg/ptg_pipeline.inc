@@ -69,6 +69,7 @@ void Guide_Cleanup()
 {
     g_iPrepStage = STAGE_NONE; // tell guide prep to cancel
     guide_prep = false;
+    g_bPathDirty = false;
     g_iBuildPhase = 0;
     g_iPortalBatchIdx = 0;
     g_iHPAClusterCount = 0;
@@ -171,13 +172,9 @@ void OnFramePrep(bool new_frame = true)
             {
                 LogMessage("[PTG] Build phase 0: node index");
                 g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
-                if (g_fMaxFlow <= 0.0)
-                {
-                    guide_prep = false;
-                    g_iPrepStage = STAGE_NONE;
-                    return;
-                }
 
+                // Build node index FIRST — we may need it to compute max flow ourselves
+                // if the engine's MapMaxFlowDistance is 0 (common on custom maps without nav_analyze).
                 AStar_BuildNodeIndex();
                 if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
                 {
@@ -185,6 +182,32 @@ void OnFramePrep(bool new_frame = true)
                     g_iPrepStage = STAGE_NONE;
                     LogMessage("[PTG] A* node index failed: too few nav areas");
                     return;
+                }
+
+                // If engine didn't compute MapMaxFlowDistance (common on custom/maze maps),
+                // compute it ourselves from per-area flow values.
+                if (g_fMaxFlow <= 0.0)
+                {
+                    float maxAreaFlow = 0.0;
+                    for (int fi = 0; fi < g_hAStarNodes.Length; fi++)
+                    {
+                        int areaInt = g_hAStarNodes.Get(fi);
+                        float areaFlow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(areaInt));
+                        if (areaFlow > maxAreaFlow)
+                            maxAreaFlow = areaFlow;
+                    }
+                    if (maxAreaFlow > 0.0)
+                    {
+                        g_fMaxFlow = maxAreaFlow;
+                        LogMessage("[PTG] Engine MapMaxFlowDistance was 0, computed from nav areas: %.1f", g_fMaxFlow);
+                    }
+                    else
+                    {
+                        // No valid flow data at all — keep g_fMaxFlow=0 as sentinel.
+                        // AStar_IdentifyStart will skip flow filtering,
+                        // AStar_IdentifyGoal will fall through to Euclidean distance strategies.
+                        LogMessage("[PTG] No flow data available — using spatial-only A* (no nav_analyze on this map)");
+                    }
                 }
 
                 g_iBuildPhase = 1;

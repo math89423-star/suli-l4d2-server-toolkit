@@ -17,7 +17,7 @@
 #include <dhooks>
 #include <l4d_path_to_goal>
 
-#define PLUGIN_VERSION 			"3.0 2026-07-25"
+#define PLUGIN_VERSION 			"3.1 2026-07-28"
 
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
 // Per-client: each player toggles their own guide independently
@@ -175,6 +175,7 @@ public void OnPluginStart()
 	HookEvent("finale_radio_start", 	  evtFinaleStart,    EventHookMode_PostNoCopy);
     HookEvent("finale_vehicle_ready", 	  evtFinaleVehicle,  EventHookMode_PostNoCopy);
     HookEvent("player_first_spawn",       evtFirstSpawn,     EventHookMode_PostNoCopy);
+    HookEvent("player_spawn",             evtPlayerSpawn,    EventHookMode_PostNoCopy);
     if (g_bL4D2)
     {
     HookEvent("gauntlet_finale_start", 	  evtGauntletStart,  EventHookMode_PostNoCopy);
@@ -306,12 +307,10 @@ Action CmdRequestGuide(int client, int args)
     if (gap > 0.5)
         return Plugin_Continue; // ignore single press, wait for double-tap
 
-    // Double-tap detected — check if flow is broken first
-    if (L4D2Direct_GetMapMaxFlowDistance() <= 0.0)
-    {
-        ReplyToCommand(client, "[PTG] \x04%t", "ptg_flow_broken");
-        return Plugin_Continue;
-    }
+    // Double-tap detected — proceed to toggle or force guide prep.
+    // (Don't pre-check MapMaxFlowDistance here — let the pipeline determine
+    //  if the map is guidable. Custom maps without nav_analyze can still
+    //  work via spatial-only A* with Euclidean distance goal detection.)
 
     // Force guide prep if needed
     if (!guide_ready)
@@ -333,11 +332,26 @@ Action CmdRequestGuide(int client, int args)
     }
     else
     {
-        // Turn ON — draw for this client, redraw every 15s (beams last 20s)
+        // Turn ON — validate we can actually draw before confirming
+        // v4.2: Don't show "Guide ON" if g_GuideCells is null/empty.
+        // That would mean the path was cleaned up (NavChanged, integrity check, etc.)
+        // and hasn't been rebuilt yet. Tell the user the real status.
         g_bGuideToggled[client] = true;
-        AutoGuideDrawPath(client);
         Guide_UpdateRedrawTimer();
-        ReplyToCommand(client, "[PTG] \x05Guide ON");
+
+        if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
+        {
+            AutoGuideDrawPath(client);
+            ReplyToCommand(client, "[PTG] \x05Guide ON");
+        }
+        else
+        {
+            // Path not ready — prep is either already running or will start now.
+            // The toggle is ON; beams will appear as soon as the pipeline finishes.
+            if (!guide_prep)
+                Guide_Prep();
+            ReplyToCommand(client, "[PTG] \x04Guide queued — drawing as soon as path is ready...");
+        }
     }
 
     return Plugin_Continue;
@@ -365,12 +379,23 @@ void Guide_UpdateRedrawTimer()
 Action Timer_ToggleRedraw(Handle timer)
 {
     bool anyOn = false;
+    bool pathAvailable = (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2);
+
     for (int i = 1; i <= MaxClients; i++)
     {
         if (g_bGuideToggled[i] && IsValidClient(i) && !IsFakeClient(i))
         {
             anyOn = true;
-            AutoGuideDrawPath(i);
+            if (pathAvailable)
+            {
+                AutoGuideDrawPath(i);
+            }
+            else if (!guide_prep)
+            {
+                // v4.2: Path lost while client has toggle ON.
+                // Trigger rebuild — beams will appear when pipeline finishes.
+                Guide_Prep();
+            }
         }
     }
 
@@ -574,6 +599,7 @@ void MapStarted()
     g_iPrepAttempts = 0;
     g_iFallbackStage = 0;
     g_iFallbackRetries = 0;
+    g_bPathDirty = false;
 
     // Re-create check timer on every map load (OnPluginStart only fires once;
     // OnMapEnd kills it, so we must recreate here after each map change)
@@ -661,6 +687,23 @@ Action Timer_AutoCheck(Handle timer)
         return Plugin_Stop;
     }
 
+    // v4.2: Dirty path rebuild — NavChanged(true) flagged the path as stale
+    // (blocked cells detected by PathIntegrityCheck or nav_blocked events).
+    // Now it's safe to tear down the old path and rebuild in the background.
+    // We delay the rebuild to this timer tick so toggled clients continue to see
+    // the old (slightly stale) path rather than nothing at all.
+    // This fires regardless of auto pulse mode — manual toggle clients also
+    // need their path rebuilt when it goes stale.
+    if (g_bPathDirty && guide_ready && !guide_prep)
+    {
+        LogMessage("[PTG] Rebuilding dirty path (%d cells, auto=%d)",
+            g_GuideCells != null ? g_GuideCells.Length : 0,
+            g_hCvarAutoEnable.BoolValue);
+        g_bPathDirty = false;
+        Guide_Cleanup();
+        Guide_Prep();
+    }
+
     // Auto pulse mode (only when cvar enabled)
     if (!g_hCvarAutoEnable.BoolValue) return Plugin_Stop;
 
@@ -700,15 +743,7 @@ void Guide_Prep_Fallback()
 {
     if (!enable || !gamemode_guidable || !map_started || !nav_started) return;
 
-    g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
-    if (g_fMaxFlow <= 0.0)
-    {
-        LogMessage("[PTG] Fallback failed: MapMaxFlowDistance = %.1f", g_fMaxFlow);
-        g_iFallbackStage = 2;
-        return;
-    }
-
-    // Build A* node index if not already done
+    // Build A* node index if not already done (may have been built by standard prep)
     if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
     {
         AStar_BuildNodeIndex();
@@ -719,6 +754,30 @@ void Guide_Prep_Fallback()
         LogMessage("[PTG] Fallback failed: A* node index is empty");
         g_iFallbackStage = 2;
         return;
+    }
+
+    // Compute max flow — prefer engine value, fall back to per-area scan
+    g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
+    if (g_fMaxFlow <= 0.0)
+    {
+        float maxAreaFlow = 0.0;
+        for (int fi = 0; fi < g_hAStarNodes.Length; fi++)
+        {
+            int areaInt = g_hAStarNodes.Get(fi);
+            float areaFlow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(areaInt));
+            if (areaFlow > maxAreaFlow)
+                maxAreaFlow = areaFlow;
+        }
+        if (maxAreaFlow > 0.0)
+        {
+            g_fMaxFlow = maxAreaFlow;
+            LogMessage("[PTG] Fallback: engine MapMaxFlowDistance was 0, computed from nav areas: %.1f", g_fMaxFlow);
+        }
+        else
+        {
+            // No valid flow data — keep g_fMaxFlow=0 as sentinel for spatial-only A*
+            LogMessage("[PTG] Fallback: no flow data available — using spatial-only A*");
+        }
     }
 
     // Track rescue vehicle
@@ -815,30 +874,50 @@ void AutoGuideDrawPath(int client = -1)
 
     int count = g_GuideCells.Length;
 
-    // v2.2: For per-client requests, start drawing from the nearest cell to the player
-    // instead of from the map start. This auto-updates as the player moves because
-    // the redraw timer fires every 0.6s. Each redraw finds the new nearest cell.
+    // v2.2/v4.2: For per-client requests, start drawing from the nearest cell to the player.
+    // This auto-updates as the player moves because the redraw timer fires every 0.6s.
+    // v4.2: Handle dead/spectating/idle players — use observer target position instead
+    // of falling back to index 0 (which draws beams at the map start, invisible to the
+    // dead player's camera following another survivor).
     int startIndex = 0;
-    if (client > 0 && IsValidClient(client) && IsPlayerAlive(client))
+    if (client > 0 && IsValidClient(client) && !IsFakeClient(client))
     {
         float clientPos[3];
-        GetClientAbsOrigin(client, clientPos);
-        float bestDist = -1.0;
-        int bestIdx = 0;
-        for (int j = 0; j < count; j++)
+        bool alive = IsPlayerAlive(client);
+        int target = client;
+
+        if (!alive)
         {
-            Cell cell;
-            g_GuideCells.GetArray(j, cell, sizeof(Cell));
-            float d = GetVectorDistance(clientPos, cell.center, true); // sq dist
-            if (bestDist < 0.0 || d < bestDist)
+            // Dead/spectating/idle — get the position of who they're watching
+            int observermode = GetEntProp(client, Prop_Send, "m_iObserverMode");
+            if (observermode == 4 || observermode == 5) // in-eye or chase cam
             {
-                bestDist = d;
-                bestIdx = j;
+                target = GetEntPropEnt(client, Prop_Send, "m_hObserverTarget");
+                if (target < 1 || target > MaxClients || !IsClientInGame(target))
+                    target = client;
             }
         }
-        // Start 1-2 cells before nearest so the player can see the immediate next step
-        // Also shows the path behind — important for maps that require backtracking
-        startIndex = bestIdx > 1 ? bestIdx - 2 : 0;
+
+        if (alive || target != client)
+        {
+            GetEntPropVector(target, Prop_Send, "m_vecOrigin", clientPos);
+            float bestDist = -1.0;
+            int bestIdx = 0;
+            for (int j = 0; j < count; j++)
+            {
+                Cell cell;
+                g_GuideCells.GetArray(j, cell, sizeof(Cell));
+                float d = GetVectorDistance(clientPos, cell.center, true); // sq dist
+                if (bestDist < 0.0 || d < bestDist)
+                {
+                    bestDist = d;
+                    bestIdx = j;
+                }
+            }
+            // Start 1-2 cells before nearest so the player can see the immediate next step
+            // Also shows the path behind — important for maps that require backtracking
+            startIndex = bestIdx > 1 ? bestIdx - 2 : 0;
+        }
     }
 
     // On very dense nav meshes (complex 3rd-party maps), subsample to avoid
@@ -868,7 +947,7 @@ void AutoGuideDrawPath(int client = -1)
             float beaconPos[3], beaconEnd[3];
             beaconPos = cell1.center;
             beaconEnd = cell1.center;
-            beaconEnd[2] += 6.0; // tiny vertical line as marker
+            beaconEnd[2] += 28.0; // above floor so beam is visible
             int color_beacon[4] = {255, 100, 50, 255}; // bright red-orange
             TE_SetupBeamPoints(beaconPos, beaconEnd, laser, 0, 0, 0,
                 duration * 0.5, 2.0, 4.0, 0, 0.0, color_beacon, 0);
@@ -899,17 +978,20 @@ void AutoGuideDrawPath(int client = -1)
                 vpos[1] = cell1.center[1];
                 vpos[2] = cell2.center[2];
 
-                // Vertical segment: thin, cool blue-white tint
+                // Vertical segment: thin, cool blue-white tint — lift above floor
                 int color_vert[4] = {200, 220, 255, 180};
-                TE_SetupBeamPoints(cell1.center, vpos, laser, 0, 0, 0,
+                float ve1[3], ve2[3];
+                ve1 = cell1.center; ve1[2] += 28.0;
+                ve2 = vpos; ve2[2] += 28.0;
+                TE_SetupBeamPoints(ve1, ve2, laser, 0, 0, 0,
                     duration, 0.3, 3.0, 0, 0.0, color_vert, 0);
                 if (client > 0) TE_SendToClient(client);
                 else TE_SendToAll();
 
                 // Horizontal bridge to next cell
                 float pos1_bridge[3], pos2_bridge[3];
-                pos1_bridge = vpos; pos1_bridge[2] -= 13.0;
-                pos2_bridge = cell2.center; pos2_bridge[2] -= 13.0;
+                pos1_bridge = vpos; pos1_bridge[2] += 28.0;
+                pos2_bridge = cell2.center; pos2_bridge[2] += 28.0;
                 TE_SetupBeamPoints(pos1_bridge, pos2_bridge, laser, 0, 0, 0,
                     duration, 0.6, 2.0, 0, 0.0, color_trail, 0);
                 if (client > 0) TE_SendToClient(client);
@@ -920,8 +1002,8 @@ void AutoGuideDrawPath(int client = -1)
         }
 
         float pos1[3], pos2[3];
-        pos1 = cell1.center; pos1[2] -= 13.0;
-        pos2 = cell2.center; pos2[2] -= 13.0;
+        pos1 = cell1.center; pos1[2] += 28.0;
+        pos2 = cell2.center; pos2[2] += 28.0;
 
         TE_SetupBeamPoints(pos1, pos2, laser, 0, 0, 0,
             duration, 0.8, 2.5, 0, 0.0, color_trail, 0);
@@ -958,15 +1040,15 @@ void AutoGuideDrawPath(int client = -1)
 
         tip[0] = cell1.center[0] + dir[0] * arrowLen;
         tip[1] = cell1.center[1] + dir[1] * arrowLen;
-        tip[2] = cell1.center[2] - 13.0;
+        tip[2] = cell1.center[2] + 28.0;
 
         baseLeft[0] = cell1.center[0] + perp[0] * halfWidth;
         baseLeft[1] = cell1.center[1] + perp[1] * halfWidth;
-        baseLeft[2] = cell1.center[2] - 13.0;
+        baseLeft[2] = cell1.center[2] + 28.0;
 
         baseRight[0] = cell1.center[0] - perp[0] * halfWidth;
         baseRight[1] = cell1.center[1] - perp[1] * halfWidth;
-        baseRight[2] = cell1.center[2] - 13.0;
+        baseRight[2] = cell1.center[2] + 28.0;
 
         // Left blade
         TE_SetupBeamPoints(tip, baseLeft, laser, 0, 0, 0,
@@ -1012,6 +1094,29 @@ void evtFirstSpawn(Event event, const char[] name, bool dontBroadcast)
     if (userid <= 0) return;
     // Delay bind until after client config.cfg has executed (~5s after first spawn)
     CreateTimer(5.0, Timer_FirstSpawnBind, userid, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// v4.2: Redraw beams immediately when a player respawns after death or takes over a bot.
+// The redraw timer fires every 0.6s and would eventually pick up the new position,
+// but immediate redraw eliminates the visible gap after respawn.
+void evtPlayerSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+    if (event == null) return;
+    int userid = event.GetInt("userid");
+    int client = GetClientOfUserId(userid);
+    if (client < 1 || client > MaxClients) return;
+    if (!IsClientInGame(client) || IsFakeClient(client)) return;
+    if (!g_bGuideToggled[client]) return;
+
+    if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
+    {
+        AutoGuideDrawPath(client);
+    }
+    else if (!guide_prep && !g_bPathDirty)
+    {
+        // Path lost while player was dead — try to rebuild
+        Guide_Prep();
+    }
 }
 
 Action Timer_FirstSpawnBind(Handle timer, int userid)
