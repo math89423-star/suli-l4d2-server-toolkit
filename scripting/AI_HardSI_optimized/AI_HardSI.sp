@@ -1,5 +1,5 @@
 // ============================================================================
-// AI_HardSI.sp — L4D2 Special Infected AI (Behavior Tree v3.2)
+// AI_HardSI.sp — L4D2 Special Infected AI (Behavior Tree v3.4)
 // ============================================================================
 // Original v2.4 by Breezy — flat if-then-else per-SI logic.
 // v3.0 refactored with composable Behavior Tree framework for hierarchical,
@@ -42,10 +42,10 @@
 // ============================================================================
 
 public Plugin:myinfo = {
-    name = "AI: Hard SI (Behavior Tree v3.3)",
+    name = "AI: Hard SI (Behavior Tree v3.4)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "3.3",
+    version = "3.4",
     url = "github.com/breezyplease"
 };
 
@@ -288,16 +288,6 @@ public Action:Event_PlayerJump(Handle:event, String:name[], bool:dontBroadcast) 
         g_bHasBeenShoved[jumpingPlayer] = false;
     }
     return Plugin_Continue;
-}
-
-// ============================================================================
-// Suicide frame (called via RequestFrame after ability use)
-// ============================================================================
-
-public void SuicideFrame(any:client) {
-    if (IsValidClient(client) && IsBotInfected(client) && IsPlayerAlive(client)) {
-        ForcePlayerSuicide(client);
-    }
 }
 
 // ============================================================================

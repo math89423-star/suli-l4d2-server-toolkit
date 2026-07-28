@@ -42,13 +42,6 @@ stock int BT_CreateRandomChance(float probability) {
     return id;
 }
 
-stock int BT_CreateIsInRangeCoordTarget(float maxDist) {
-    int id = BT_Create(BTN_CONDITION);
-    g_hBTFunc[id] = CND_IsInRangeCoordTarget;
-    g_fBTNodeUserParam1[id] = maxDist;
-    return id;
-}
-
 // ---------------------------------------------------------------------------
 // Simple conditions (no params — use BT_CreateCondition directly)
 // ---------------------------------------------------------------------------
@@ -153,18 +146,6 @@ BT_Status CND_IsInRange(int client) {
     GetClientAbsOrigin(client, pos);
     int dist = GetSurvivorProximity(pos);
     return (dist > 0 && float(dist) <= maxDist) ? BT_SUCCESS : BT_FAILURE;
-}
-
-// Check distance to current coordination target
-BT_Status CND_IsInRangeCoordTarget(int client) {
-    int nodeId = g_iBTCurrentTickNode;
-    float maxDist = g_fBTNodeUserParam1[nodeId];
-    int target = SI_GetCoordinatedTarget(client);
-    if (target <= 0 || !IsSurvivor(target)) return BT_FAILURE;
-    float pos[3], tPos[3];
-    GetClientAbsOrigin(client, pos);
-    GetClientAbsOrigin(target, tPos);
-    return (GetVectorDistance(pos, tPos) <= maxDist) ? BT_SUCCESS : BT_FAILURE;
 }
 
 // Check if the targeted survivor is watching this bot
@@ -355,35 +336,6 @@ BT_Status ACT_QueueLunge(int client) {
     // The Cooldown decorator handles the timing.
     BT_AddButton(client, IN_ATTACK);
     return BT_SUCCESS;
-}
-
-// Face away from target briefly (fake direction — tricks survivors)
-// UserParam1 = probability (0.0-1.0). Should be wrapped in CND_RandomChance.
-BT_Status ACT_FakeDirection(int client) {
-    float ang[3];
-    GetClientEyeAngles(client, ang);
-    ang[1] += GetRandomFloat(25.0, 40.0) * (GetRandomInt(0, 1) ? 1.0 : -1.0);
-    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
-    return BT_SUCCESS;
-}
-
-// Snap aim to a specified survivor class target (for Smoker → farthest, Jockey → lowest HP)
-// UserParam1 = target preference: 1=SMOKER(farthest), 2=JOCKEY(lowest HP), 0=default
-BT_Status ACT_AcquireCoordTarget(int client) {
-    int nodeId = g_iBTCurrentTickNode;
-    int preferClass = RoundToNearest(g_fBTNodeUserParam1[nodeId]);
-    int target = SI_GetCoordinatedTarget(client, preferClass);
-    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
-        BB_SetInt(client, "target", target);
-        float sPos[3], tPos[3], dir[3], ang[3];
-        GetClientAbsOrigin(client, sPos);
-        GetClientAbsOrigin(target, tPos);
-        MakeVectorFromPoints(sPos, tPos, dir);
-        GetVectorAngles(dir, ang);
-        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
-        return BT_SUCCESS;
-    }
-    return BT_FAILURE;
 }
 
 // Strafe + move toward blackboard target (combined action for SI approach).

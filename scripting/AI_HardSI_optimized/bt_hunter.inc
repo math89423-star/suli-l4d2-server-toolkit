@@ -131,31 +131,6 @@ BT_Status HunterAct_ClimbHighGround(int client) {
     return BT_SUCCESS;
 }
 
-// Condition: Is there a wall too close ahead?
-BT_Status HunterCond_WallAhead(int client) {
-    int wallDist = GetConVarInt(FindConVar("ai_wall_detection_distance"));
-    if (wallDist <= 0) return BT_FAILURE;
-
-    float hunterPos[3], hunterAng[3];
-    GetClientAbsOrigin(client, hunterPos);
-    GetClientEyeAngles(client, hunterAng);
-
-    TR_TraceRayFilter(hunterPos, hunterAng, MASK_PLAYERSOLID, RayType_Infinite, TracerayFilter, client);
-    float impactPos[3];
-    TR_GetEndPosition(impactPos);
-
-    return (GetVectorDistance(hunterPos, impactPos) < float(wallDist)) ? BT_SUCCESS : BT_FAILURE;
-}
-
-// Action: Briefly face away from target (fake direction)
-BT_Status HunterAct_FakeDirection(int client) {
-    float ang[3];
-    GetClientEyeAngles(client, ang);
-    ang[1] += GetRandomFloat(25.0, 40.0) * (GetRandomInt(0, 1) ? 1.0 : -1.0);
-    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
-    return BT_SUCCESS;
-}
-
 // ============================================================================
 // v3.3 NEW ACTIONS: sprint approach + crouch approach
 // ============================================================================
@@ -225,8 +200,10 @@ BT_Status HunterAct_CrouchApproach(int client) {
     }
     if (BB_GetBool(client, "_strafe_left", false)) {
         BT_AddButton(client, IN_MOVELEFT);
+        BT_RemoveButton(client, IN_MOVERIGHT);
     } else {
         BT_AddButton(client, IN_MOVERIGHT);
+        BT_RemoveButton(client, IN_MOVELEFT);
     }
 
     // Move forward toward target (crouched) + stay ducked

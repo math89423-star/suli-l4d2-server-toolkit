@@ -38,6 +38,14 @@ BT_Status ChargerAct_Charge(int client) {
     return BT_SUCCESS;
 }
 stock int BT_CreateChargerTree() {
+    // --- Read charge-range cvars (v3.4 FIX: were created but never read) ---
+    float fChargeProx = 500.0;
+    int   iHpThreshold = 200;
+    ConVar hCvar = FindConVar("ai_charge_proximity");
+    if (hCvar != null) fChargeProx = GetConVarFloat(hCvar);
+    hCvar = FindConVar("ai_health_threshold_charger");
+    if (hCvar != null) iHpThreshold = GetConVarInt(hCvar);
+
     // --- v3.2: Terrain-aware charge strategies ---
     // Narrow corridor: hold chokepoint → charge when survivor is close
     // Blocking the corridor prevents survivors from advancing
@@ -66,7 +74,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_IsOpenArea),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(500.0),
+        BT_CreateIsInRange(fChargeProx),
         BT_CreateAction(ChargerAct_Charge)
     );
 
@@ -81,8 +89,8 @@ stock int BT_CreateChargerTree() {
 
     // Low-health desperation charge
     int lowHpSeq = BT_CreateSequence(3,
-        BT_CreateHealthBelow(200.0),
-        BT_CreateIsInRange(500.0),
+        BT_CreateHealthBelow(float(iHpThreshold)),
+        BT_CreateIsInRange(fChargeProx),
         BT_CreateAction(ChargerAct_Charge)
     );
 
@@ -97,7 +105,7 @@ stock int BT_CreateChargerTree() {
     int defaultChargeSeq = BT_CreateSequence(4,
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(500.0),
+        BT_CreateIsInRange(fChargeProx),
         BT_CreateAction(ChargerAct_Charge)
     );
 
@@ -107,14 +115,14 @@ stock int BT_CreateChargerTree() {
     int noLosApproach = BT_CreateSequence(4,
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
-        BT_CreateIsInRange(500.0),
+        BT_CreateIsInRange(fChargeProx),
         BT_CreateAction(ACT_StrafeMoveToTarget)   // keep moving, may regain LOS
     );
 
     // Standard approach: strafe toward target when too far to charge
     int approachSeq = BT_CreateSequence(3,
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateInverter(BT_CreateIsInRange(500.0)),
+        BT_CreateInverter(BT_CreateIsInRange(fChargeProx)),
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 

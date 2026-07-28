@@ -554,14 +554,19 @@ BT_Status BT_TickNode(int nodeId, int client) {
         }
 
         case BTN_WAIT: {
+            // v3.4 FIX: per-node wait key (was shared "_bt_wait_start" across
+            // all Wait nodes — same bug Cooldown had before v3.2 fix).
+            char waitKey[32];
+            Format(waitKey, sizeof(waitKey), "_bt_wait_%d", nodeId);
+
             float now = GetGameTime();
-            float waitStart = BB_GetFloat(client, "_bt_wait_start");
+            float waitStart = BB_GetFloat(client, waitKey);
             if (waitStart <= 0.0) {
-                BB_SetFloat(client, "_bt_wait_start", now);
+                BB_SetFloat(client, waitKey, now);
                 return BT_RUNNING;
             }
             if ((now - waitStart) >= g_fBTParam[nodeId]) {
-                BB_SetFloat(client, "_bt_wait_start", 0.0);
+                BB_SetFloat(client, waitKey, 0.0);
                 return BT_SUCCESS;
             }
             return BT_RUNNING;

@@ -166,16 +166,23 @@ stock int BT_CreateSpitterTree() {
     );
 
     // --- Spit on pinned survivors (combo damage) ---
-    int spitOnPinned = BT_CreateSequence(3,
+    // v3.4 FIX: added CND_HasLOS + IsInRange — without these, Spitter would
+    // spit toward pinned survivors through walls from across the map.
+    int spitOnPinned = BT_CreateSequence(5,
         BT_CreateCondition(CND_AnySurvivorPinned),
         BT_CreateAction(SpitterAct_FindPinnedTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(900.0),
         BT_CreateAction(SpitterAct_Spit)
     );
 
     // --- Spit on boomed survivors ---
-    int spitOnBoomed = BT_CreateSequence(3,
+    // v3.4 FIX: added CND_HasLOS + IsInRange (same rationale as spitOnPinned).
+    int spitOnBoomed = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsBoomerActive),
         BT_CreateAction(SpitterAct_FindBoomedTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(900.0),
         BT_CreateAction(SpitterAct_Spit)
     );
 

@@ -34,6 +34,13 @@ float g_fTankLastPunchJump[MAXPLAYERS + 1];
 
 // Forward declarations
 
+// v3.4: cached ConVar handles (initialized in Tank_OnModuleStart after CreateConVar)
+ConVar g_hCvarTankBhop_cached = null;
+ConVar g_hCvarTankRock_cached = null;
+ConVar g_hCvarTankBhopMinDist_cached = null;
+ConVar g_hCvarTankBhopMaxDist_cached = null;
+ConVar g_hCvarTankBhopMomentum_cached = null;
+
 
 // ============================================================================
 // Target Selection
@@ -163,8 +170,8 @@ BT_Status TankAct_ExecuteIncapped(int client) {
 // ============================================================================
 
 BT_Status TankCond_RockEligible(int client) {
-    // v3.2 FIX: check ai_tank_rock master switch (was created but never read)
-    if (!GetConVarBool(FindConVar("ai_tank_rock"))) return BT_FAILURE;
+    // v3.4 FIX: use cached handle instead of FindConVar per tick
+    if (g_hCvarTankRock_cached == null || !GetConVarBool(g_hCvarTankRock_cached)) return BT_FAILURE;
 
     int target = BB_GetInt(client, "target", -1);
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return BT_FAILURE;
@@ -180,8 +187,8 @@ BT_Status TankCond_RockEligible(int client) {
 // ============================================================================
 
 BT_Status TankCond_BhopEligible(int client) {
-    // v3.2 FIX: check ai_tank_bhop master switch (was created but never read)
-    if (!GetConVarBool(FindConVar("ai_tank_bhop"))) return BT_FAILURE;
+    // v3.4 FIX: use cached handle instead of FindConVar per tick
+    if (g_hCvarTankBhop_cached == null || !GetConVarBool(g_hCvarTankBhop_cached)) return BT_FAILURE;
 
     int flags = GetEntityFlags(client);
     if (!(flags & FL_ONGROUND)) return BT_FAILURE;
@@ -197,14 +204,12 @@ BT_Status TankCond_BhopEligible(int client) {
     GetClientAbsOrigin(client, tPos);
     int target = BB_GetInt(client, "target", -1);
 
-    // v3.2 FIX: enforce min_dist (was created as cvar but never checked).
-    // Tank should punch at close range, not bhop.
-    int minDist = GetConVarInt(FindConVar("ai_tank_bhop_min_dist"));
+    // v3.4 FIX: enforce min_dist using cached handle
+    int minDist = (g_hCvarTankBhopMinDist_cached != null) ? GetConVarInt(g_hCvarTankBhopMinDist_cached) : 200;
     if (GetSurvivorProximity(tPos, target) < minDist) return BT_FAILURE;
 
-    // v3.2 FIX: enforce max_dist too (check was reversed: >800 returned FAIL,
-    // but intended behavior is FAIL when farther than max_dist).
-    int maxDist = GetConVarInt(FindConVar("ai_tank_bhop_max_dist"));
+    // v3.4 FIX: enforce max_dist using cached handle
+    int maxDist = (g_hCvarTankBhopMaxDist_cached != null) ? GetConVarInt(g_hCvarTankBhopMaxDist_cached) : 800;
     if (GetSurvivorProximity(tPos, target) > maxDist) return BT_FAILURE;
 
     return BT_SUCCESS;
@@ -232,7 +237,7 @@ BT_Status TankAct_Bhop(int client) {
 
     // Momentum
     float boost = BASE_BOOST_FORWARD;
-    if (GetConVarBool(FindConVar("ai_tank_bhop_momentum"))) {
+    if (g_hCvarTankBhopMomentum_cached != null && GetConVarBool(g_hCvarTankBhopMomentum_cached)) {
         boost += float(g_iTankBhopChain[client]) * MOMENTUM_PER_HOP;
         if (boost > MAX_BOOST_FORWARD) boost = MAX_BOOST_FORWARD;
     }
@@ -352,6 +357,13 @@ public Tank_OnModuleStart() {
     CreateConVar("ai_tank_punch_instakill", "1",   "Instakill: melee punch incaps survivors", FCVAR_NONE);
     CreateConVar("ai_tank_punch_damage",    "150", "Damage per punch when instakill enabled (>100=incap)", FCVAR_NONE);
     CreateConVar("ai_tank_aggro_bhop",      "1",   "Aggressive bhop: Tank relentlessly bhops toward target", FCVAR_NONE);
+
+    // v3.4: cache handles to avoid per-tick FindConVar in BT callbacks
+    g_hCvarTankBhop_cached = FindConVar("ai_tank_bhop");
+    g_hCvarTankRock_cached = FindConVar("ai_tank_rock");
+    g_hCvarTankBhopMinDist_cached = FindConVar("ai_tank_bhop_min_dist");
+    g_hCvarTankBhopMaxDist_cached = FindConVar("ai_tank_bhop_max_dist");
+    g_hCvarTankBhopMomentum_cached = FindConVar("ai_tank_bhop_momentum");
 
     HookEvent("player_hurt", Tank_OnPlayerHurt, EventHookMode_Pre);
 }
