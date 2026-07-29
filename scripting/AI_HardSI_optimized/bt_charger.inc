@@ -30,6 +30,23 @@ BT_Status ChargerAct_BlockCharge(int client) {
     return BT_RUNNING;
 }
 
+// v3.8: Aim at blackboard target before charging.
+// Fixes "charging into empty walls" — previously ChargerAct_Charge fired
+// IN_ATTACK+IN_FORWARD in whatever direction the previous BT branch left,
+// which could be WANDER's random angle pointing at a wall.
+BT_Status ChargerAct_AimAtTarget(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+    return BT_SUCCESS;
+}
+
 // Execute charge — press ATTACK after aiming
 BT_Status ChargerAct_Charge(int client) {
     BT_AddButton(client, IN_ATTACK);
@@ -37,60 +54,146 @@ BT_Status ChargerAct_Charge(int client) {
     SI_SignalAttack(client);
     return BT_SUCCESS;
 }
+
+// v3.6: Blind charge — charge even without LOS (30% chance).
+// Charger's charge has a wide hitbox that can clip survivors around corners.
+// Sometimes a blind charge is better than circling forever.
+BT_Status ChargerAct_BlindCharge(int client) {
+    // Face the acquired target direction even without LOS
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+    BT_AddButton(client, IN_ATTACK);
+    BT_AddButton(client, IN_FORWARD);
+    SI_SignalAttack(client);
+    return BT_SUCCESS;
+}
+
+// v3.6: Step-back then charge — when too close (<200u), back up briefly
+// to create optimal charge distance, then charge.
+BT_Status ChargerAct_StepBackCharge(int client) {
+    float now = GetGameTime();
+    float backUntil = BB_GetFloat(client, "_charger_backup_until", 0.0);
+
+    if (backUntil <= 0.0) {
+        // Start backing up
+        BB_SetFloat(client, "_charger_backup_until", now + 0.4);
+    }
+
+    if (now < backUntil) {
+        // Backpedal: face target, move backward
+        int target = BB_GetInt(client, "target", -1);
+        if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+            float sPos[3], tPos[3], dir[3], ang[3];
+            GetClientAbsOrigin(client, sPos);
+            GetClientAbsOrigin(target, tPos);
+            MakeVectorFromPoints(sPos, tPos, dir);
+            GetVectorAngles(dir, ang);
+            BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        }
+        BT_AddButton(client, IN_BACK);
+        return BT_RUNNING;
+    }
+
+    // v3.8 FIX: Re-check LOS before charging. During the 0.4s back-up,
+    // the survivor may have moved behind cover. If LOS is lost, abort
+    // and let the selector try another branch (approach/blind charge).
+    if (GetEntProp(client, Prop_Send, "m_hasVisibleThreats") <= 0) {
+        BB_SetFloat(client, "_charger_backup_until", 0.0);
+        return BT_FAILURE;
+    }
+
+    // Back-up complete → charge now
+    BB_SetFloat(client, "_charger_backup_until", 0.0);
+    return ChargerAct_Charge(client);
+}
 stock int BT_CreateChargerTree() {
     // --- Read charge-range cvars (v3.4 FIX: were created but never read) ---
-    float fChargeProx = 500.0;
+    float fChargeProx = 750.0;  // v3.6: increased from 500 for more aggressive charging
     int   iHpThreshold = 200;
     ConVar hCvar = FindConVar("ai_charge_proximity");
     if (hCvar != null) fChargeProx = GetConVarFloat(hCvar);
     hCvar = FindConVar("ai_health_threshold_charger");
     if (hCvar != null) iHpThreshold = GetConVarInt(hCvar);
 
-    // --- v3.2: Terrain-aware charge strategies ---
-    // Narrow corridor: hold chokepoint → charge when survivor is close
-    // Blocking the corridor prevents survivors from advancing
+    // --- v3.2 terrain strategies: narrow ---
     int narrowHoldSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateIsInRange(600.0),             // survivor in corridor
-        BT_CreateAction(ACT_HoldChokepoint)    // face them, block passage
+        BT_CreateIsInRange(600.0),
+        BT_CreateAction(ACT_HoldChokepoint)
     );
-    int narrowChargeSeq = BT_CreateSequence(5,
+    int narrowChargeSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(400.0),             // close enough to charge
+        BT_CreateIsInRange(400.0),
+        BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
 
-    // Open area: flank approach → charge from unexpected angle
-    int openFlankSeq = BT_CreateSequence(4,
+    // === v3.5: Open terrain — 3-way random strategies ===
+    int openStrategyRoll = BT_CreateSequence(2,
         BT_CreateCondition(CND_IsOpenArea),
-        BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateInverter(BT_CreateIsInRange(600.0)),  // still far
-        BT_CreateAction(ACT_FlankApproach)     // circle around
+        BT_CreateRollStrategy(3)
     );
-    int openChargeSeq = BT_CreateSequence(5,
-        BT_CreateCondition(CND_IsOpenArea),
+    // Strat 0: Flank charge — circle around → charge from side
+    int openS0_Approach = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateIsNotInRange(600.0),
+        BT_CreateAction(ACT_FlankApproach)
+    );
+    int openS0_Charge = BT_CreateSequence(7,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
         BT_CreateIsInRange(fChargeProx),
+        BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
+    // Strat 1: Erratic charge — zigzag approach → charge
+    int openS1_Approach = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateIsNotInRange(500.0),
+        BT_CreateAction(ACT_ErraticApproach)
+    );
+    int openS1_Charge = BT_CreateSequence(7,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(fChargeProx),
+        BT_CreateAction(ChargerAct_AimAtTarget),
+        BT_CreateAction(ChargerAct_Charge)
+    );
+    // Strat 2: Standard — falls through to defaultChargeSeq below
 
     // Ledge nearby: charge toward survivors near the edge
-    int ledgeChargeSeq = BT_CreateSequence(5,
+    int ledgeChargeSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNearLedge),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
         BT_CreateIsInRange(450.0),
+        BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
 
-    // Low-health desperation charge
-    int lowHpSeq = BT_CreateSequence(3,
+    // Low-health desperation charge (v3.8 FIX: added AcquireClosestTarget + HasLOS
+    // + AimAtTarget — previously had none of these, would charge in whatever
+    // direction the previous BT branch left, often straight into a wall)
+    int lowHpSeq = BT_CreateSequence(6,
         BT_CreateHealthBelow(float(iHpThreshold)),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateCondition(CND_HasLOS),
         BT_CreateIsInRange(fChargeProx),
+        BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
 
@@ -102,10 +205,11 @@ stock int BT_CreateChargerTree() {
     );
 
     // Default charge: in range + LOS → charge (v3.2 fix: was missing)
-    int defaultChargeSeq = BT_CreateSequence(4,
+    int defaultChargeSeq = BT_CreateSequence(5,
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
         BT_CreateIsInRange(fChargeProx),
+        BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
 
@@ -126,22 +230,57 @@ stock int BT_CreateChargerTree() {
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
-    // Root selector — terrain branches (2-6) fail when ai_terrain_enable=0 or
-    // terrain=UNKNOWN → falls through to standard behavior (7-13).
+    // ==========================================
+    // v3.6: Aggressive charge — blind charge + step-back charge.
+    // Charger's charge has a wide hitbox; a blind charge around corners
+    // is often better than circling forever. When too close (<200u),
+    // step back briefly to create optimal charge distance.
+    // ==========================================
+    // v3.7 FIX (P0): Removed RandomChance from stepBackCharge.
+    // RandomChance re-evaluates every tick → step-back was being aborted mid-way
+    // when the dice roll changed. Now always step back when too close.
+    // Close range + HasLOS → step back 0.4s then charge. If charge is on
+    // cooldown, IN_ATTACK becomes melee punch (valid fallback 贴脸近战).
+    int stepBackCharge = BT_CreateSequence(4,
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(200.0),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ChargerAct_StepBackCharge)
+    );
+    // v3.7 FIX (P0): Removed ForceSuccess wrapper from blindCharge.
+    // ForceSuccess caused deadlock: when RandomChance failed, ForceSuccess
+    // returned SUCCESS anyway → selector consumed → Charger did nothing
+    // every tick. Now blindCharge fails naturally, selector moves to
+    // next branch (noLosApproach / approachSeq / Wander).
+    int blindCharge = BT_CreateSequence(5,
+        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
+        BT_CreateIsInRange(400.0),
+        BT_CreateRandomChance(0.30),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ChargerAct_BlindCharge)
+    );
+
+    // Root selector — terrain branches fail when disabled → fallback to standard.
     int root = BT_Create(BTN_SELECTOR);
-    BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor));
-    BT_AddChild(root, ledgeChargeSeq);          // 2. v3.2: ledge → charge
-    BT_AddChild(root, narrowChargeSeq);         // 3. v3.2: narrow → charge
-    BT_AddChild(root, narrowHoldSeq);           // 4. v3.2: narrow → hold
-    BT_AddChild(root, openChargeSeq);           // 5. v3.2: open → flank charge
-    BT_AddChild(root, openFlankSeq);            // 6. v3.2: open → approach
-    BT_AddChild(root, lowHpSeq);                // 7. ← FALLBACK: low HP charge
-    BT_AddChild(root, coordSeq);                // 8. ← FALLBACK: coordination
-    BT_AddChild(root, defaultChargeSeq);        // 9. ← FALLBACK: default charge
-    BT_AddChild(root, noLosApproach);           // 10. ← FALLBACK: in-range no-LOS approach
-    BT_AddChild(root, approachSeq);             // 11. ← FALLBACK: approach with strafe
-    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 12. ← FALLBACK
-    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 13. ← FALLBACK
+    BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor)); // 1
+    BT_AddChild(root, stepBackCharge);         // 2. v3.7: too close → step back + charge
+    BT_AddChild(root, blindCharge);            // 3. v3.7: no LOS + close → 30% blind charge
+    BT_AddChild(root, ledgeChargeSeq);         // 4. v3.2: ledge → charge
+    BT_AddChild(root, narrowChargeSeq);        // 5. v3.2: narrow → charge
+    BT_AddChild(root, narrowHoldSeq);          // 6. v3.2: narrow → hold
+    BT_AddChild(root, openStrategyRoll);        // 7a. v3.5: open → roll token
+    BT_AddChild(root, openS0_Charge);           // 7b. v3.5: open strat0 → flank charge
+    BT_AddChild(root, openS0_Approach);         // 7c. v3.5: open strat0 → flank approach
+    BT_AddChild(root, openS1_Charge);           // 8a. v3.5: open strat1 → erratic charge
+    BT_AddChild(root, openS1_Approach);         // 8b. v3.5: open strat1 → erratic approach
+    // 8c: open strat2 → falls through to defaultChargeSeq
+    BT_AddChild(root, lowHpSeq);                // 9. ← FALLBACK: low HP charge
+    BT_AddChild(root, coordSeq);                // 10. ← FALLBACK: coordination
+    BT_AddChild(root, defaultChargeSeq);        // 11. ← FALLBACK: default charge (prox=750)
+    BT_AddChild(root, noLosApproach);           // 12. ← FALLBACK: in-range no-LOS approach
+    BT_AddChild(root, approachSeq);             // 13. ← FALLBACK: approach from far
+    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 14.
+    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 15.
 
     return root;
 }
