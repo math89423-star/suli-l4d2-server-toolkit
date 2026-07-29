@@ -22,6 +22,7 @@
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
 // Per-client: each player toggles their own guide independently
 bool g_bGuideToggled[MAXPLAYERS+1];
+StringMap g_hReconnectToggle;  // SteamID → 1, persists toggle across disconnect/reconnect
 Handle g_hToggleTimer = null;
 float g_fLastPtgTime[MAXPLAYERS+1];
 
@@ -38,6 +39,8 @@ public void OnPluginStart()
 {
     AutoExecConfig(true, CONFIG_FILENAME);
     LoadTranslations("l4d_path_to_goal.phrases");
+
+    g_hReconnectToggle = new StringMap();
 
     RegConsoleCmd("path_to_goal",       CmdRequestGuide, "Point where to go to progress in the map.");
     RegConsoleCmd("pathtogoal",         CmdRequestGuide, "Point where to go to progress in the map.");
@@ -175,7 +178,7 @@ public void OnPluginStart()
 	HookEvent("finale_radio_start", 	  evtFinaleStart,    EventHookMode_PostNoCopy);
     HookEvent("finale_vehicle_ready", 	  evtFinaleVehicle,  EventHookMode_PostNoCopy);
     HookEvent("player_first_spawn",       evtFirstSpawn,     EventHookMode_PostNoCopy);
-    HookEvent("player_spawn",             evtPlayerSpawn,    EventHookMode_PostNoCopy);
+    HookEvent("player_spawn",             evtPlayerSpawn,    EventHookMode_Post);
     if (g_bL4D2)
     {
     HookEvent("gauntlet_finale_start", 	  evtGauntletStart,  EventHookMode_PostNoCopy);
@@ -624,10 +627,21 @@ public void OnMapEnd()
     if (g_hAutoCheckTimer != null) { KillTimer(g_hAutoCheckTimer); g_hAutoCheckTimer = null; }
     if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); g_hToggleTimer = null; }
     for (int i = 1; i <= MaxClients; i++) g_bGuideToggled[i] = false;
+    g_hReconnectToggle.Clear(); // purge stale reconnect toggle entries
 }
 
 public void OnClientDisconnect(int client)
 {
+    // v4.2: Save toggle state by SteamID so it can be restored
+    // if the same player reconnects in the same session.
+    if (g_bGuideToggled[client] && !IsFakeClient(client))
+    {
+        char auth[64];
+        if (GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
+        {
+            g_hReconnectToggle.SetValue(auth, 1);
+        }
+    }
     g_bGuideToggled[client] = false;
     g_fLastPtgTime[client] = 0.0;
 }
@@ -637,6 +651,7 @@ public void OnPluginEnd()
     Guide_Cleanup();
     guide_prep = false;
     g_iPrepStage = STAGE_NONE;
+    delete g_hReconnectToggle;
 }
 
 // --- Auto-Guide System (Overwatch-style pulse beacon) ---
@@ -1085,6 +1100,36 @@ public void OnClientPutInServer(int client)
     if (!IsValidClient(client) || IsFakeClient(client)) return;
     beams_cooldown_reset(client,true); // reset cooldown and last request from client
     g_sCustomKeys[client] = "";
+}
+
+// v4.2: Restore guide toggle state for players who rejoin after disconnecting.
+// OnClientPostAdminCheck fires after Steam auth is complete, so GetClientAuthId
+// returns a valid SteamID. OnClientPutInServer is too early for auth.
+public void OnClientPostAdminCheck(int client)
+{
+    if (!IsValidClient(client) || IsFakeClient(client)) return;
+
+    char auth[64];
+    if (GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
+    {
+        int toggleVal;
+        if (g_hReconnectToggle.GetValue(auth, toggleVal) && toggleVal == 1)
+        {
+            g_hReconnectToggle.Remove(auth); // consume — don't reapply on further callbacks
+            g_bGuideToggled[client] = true;
+            Guide_UpdateRedrawTimer();
+
+            // Immediate draw if path is ready; otherwise queue a rebuild
+            if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
+            {
+                AutoGuideDrawPath(client);
+            }
+            else if (!guide_prep && !g_bPathDirty)
+            {
+                Guide_Prep();
+            }
+        }
+    }
 }
 
 void evtFirstSpawn(Event event, const char[] name, bool dontBroadcast)
