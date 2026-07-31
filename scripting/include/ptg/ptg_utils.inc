@@ -74,15 +74,14 @@ bool twopos_traversable(float pos1[3], float pos2[3], bool world_only = true, fl
 
 bool TraceFilterStatic(int entity, int contentsMask)
 {
-    if (entity == 0)
-    {
-        //LogMessage("TraceFilterStatic hit %d", entity);
-        return true;
-    }
+    // v4.5: When accuracy mode is on, delegate to expanded walkable filter
+    if (g_bAccuracyEnabled)
+        return TraceFilterWalkable(entity, contentsMask);
+
+    if (entity == 0) return true;
     if (entity > 0 && entity <= MaxClients) return false;
     static char class[16];
     GetEntityClassname(entity,class,sizeof(class));
-    //LogMessage("TraceFilterStatic hit %d %s", entity, class);
     switch (class[0])
     {
         case 'p':
@@ -93,10 +92,101 @@ bool TraceFilterStatic(int entity, int contentsMask)
         {
             if (strncmp(class,"func_brush",10,false)==0) return true;
             if (strncmp(class,"func_simpleladder",17,false)==0) return false;
-            //g_bHitLadder = strncmp(class,"func_simpleladder",17,false)==0;
         }
     }
     return false;
+}
+
+// v4.5 Expanded trace filter — blocks against world geometry PLUS common
+// impassable entities that the legacy Static filter misses: doors, breakables,
+// physics props, and solid triggers.
+//
+// TraceFilterStatic only checks world (entity 0), prop_static, and func_brush.
+// On custom maps especially, paths would route through closed doors, barricades,
+// and physics-blocked corridors because those entities were invisible to the
+// hull trace.  This filter catches them while respecting open-door state.
+//
+// Regression risk analysis:
+//   - Doors that are OPEN are NOT blocked (m_eDoorState check)
+//   - Breakables with 0 health (already destroyed) are NOT blocked
+//   - Non-solid entities are skipped first (entity_solid check)
+//   - Strictly MORE blocking than Static → paths that were going through walls
+//     will now either: (a) find a real route around, (b) get repaired in REPAIR
+//     stage, or (c) be correctly shortened to the last walkable point.
+//     In all cases, this is better than showing a path through an impassable wall.
+bool TraceFilterWalkable(int entity, int contentsMask)
+{
+    if (entity == 0) return true;                    // world geometry — always solid
+    if (entity > 0 && entity <= MaxClients) return false; // skip players
+
+    // Non-solid entities can never block a player (debris, triggers, items, etc.)
+    if (!entity_solid(entity)) return false;
+
+    static char class[64];
+    GetEntityClassname(entity, class, sizeof(class));
+
+    // ── prop_* entities ──
+    if (class[0] == 'p')
+    {
+        if (strncmp(class, "prop_static", 11) == 0) return true;
+
+        // prop_door_rotating: only block when closed or closing.
+        // m_eDoorState: 0=closed, 1=opening, 2=open, 3=closing
+        if (strncmp(class, "prop_door", 9) == 0)
+        {
+            int doorState = GetEntProp(entity, Prop_Send, "m_eDoorState");
+            return (doorState == 0 || doorState == 3); // closed or closing
+        }
+
+        // prop_physics / prop_physics_multiplayer — blocks if solid
+        if (strncmp(class, "prop_physics", 12) == 0) return true;
+
+        // prop_dynamic_override — sometimes used as a barrier
+        if (strncmp(class, "prop_dynamic_override", 21) == 0) return true;
+
+        return false;
+    }
+
+    // ── func_* brush entities ──
+    if (class[0] == 'f')
+    {
+        if (strncmp(class, "func_brush", 10) == 0) return true;
+
+        // func_door / func_door_rotating — only block when closed
+        if (strncmp(class, "func_door", 9) == 0)
+        {
+            // m_eDoorState for func_door: same enum as prop_door
+            int doorState = GetEntProp(entity, Prop_Send, "m_eDoorState");
+            return (doorState == 0 || doorState == 3); // closed or closing
+        }
+
+        // func_breakable / func_breakable_surf — only block if not yet broken
+        if (strncmp(class, "func_breakable", 14) == 0)
+        {
+            int health = GetEntProp(entity, Prop_Data, "m_iHealth");
+            return (health > 0); // broken if health <= 0
+        }
+
+        // func_simpleladder — always pass-through
+        if (strncmp(class, "func_simpleladder", 17) == 0) return false;
+
+        // func_wall / func_wall_toggle — invisible walls (map boundaries)
+        if (strncmp(class, "func_wall", 9) == 0) return true;
+
+        // func_physbox — physics brush, blocks until destroyed/moved
+        if (strncmp(class, "func_physbox", 12) == 0) return true;
+
+        return false;
+    }
+
+    // ── trigger_* volumes ──
+    // Most triggers are non-solid (filtered above). Solid triggers are rare
+    // but exist as invisible barriers (trigger_push fences, etc.)
+    if (strncmp(class, "trigger_", 8) == 0)
+        return false; // triggers that pass entity_solid() are intentional barriers
+
+    // Default: block unknown solid entities (safe — unknown → assume obstacle)
+    return true;
 }
 
 bool TraceFilterNoClients(int entity, int contentsMask)
@@ -206,23 +296,29 @@ stock bool midpoint_valid_ground(float pos1[3], float pos2[3])
 }
 
 #define GROUND_WIDTH 16.0
+#define GROUND_TRACE_DOWN_NEAR 100.0   // v4.5: first attempt — near ground
+#define GROUND_TRACE_DOWN_FAR  500.0   // v4.5: second attempt — steep drops
 
 stock bool valid_ground(float pos[3])
 {
     static float pos_down[3];
-    pos_down = pos; pos_down[2] -= 48.0;
+
+    // First try: moderate range (100u), tight hull — catches most cases fast
+    pos_down = pos; pos_down[2] -= GROUND_TRACE_DOWN_NEAR;
+    TR_TraceHullFilter(pos,pos_down,{-GROUND_WIDTH,-GROUND_WIDTH,2.0},{GROUND_WIDTH,GROUND_WIDTH,5.0},MASK_PTG|MASK_WATER,TraceFilterStatic);
+    if (TR_DidHit(INVALID_HANDLE)) return true;
+
+    // Second try: full range (500u), wider hull — catches steep slopes,
+    // multi-story drops, and nav areas whose center Z is far above the floor
+    pos_down = pos; pos_down[2] -= GROUND_TRACE_DOWN_FAR;
+    TR_TraceHullFilter(pos,pos_down,{-24.0,-24.0,2.0},{24.0,24.0,5.0},MASK_PTG|MASK_WATER,TraceFilterStatic);
+    if (TR_DidHit(INVALID_HANDLE)) return true;
+
+    // Third try: upward trace (64u) — catches cases where pos is slightly
+    // below a low ceiling or embedded in a thin floor surface
+    pos_down = pos; pos_down[2] += 64.0;
     TR_TraceHullFilter(pos,pos_down,{-GROUND_WIDTH,-GROUND_WIDTH,2.0},{GROUND_WIDTH,GROUND_WIDTH,5.0},MASK_PTG|MASK_WATER,TraceFilterStatic);
     return TR_DidHit(INVALID_HANDLE);
-    //if (TR_DidHit(INVALID_HANDLE))
-    //{
-        //static float pos_hit[3],normal[3];
-        //TR_GetPlaneNormal(INVALID_HANDLE,normal);
-        //LogMessage("Ground hit %f %f %f", normal[0], normal[1], normal[2]);
-    //    return true;
-    //}
-    // TR_GetEndPosition(float pos[3], Handle hndl)
-    // TR_GetPlaneNormal(Handle hndl, float normal[3])
-    //return false;
 }
 
 // Determine if entity is solid to players and zombies from m_CollisionGroup, m_nSolidType and m_usSolidFlags
@@ -559,7 +655,30 @@ stock bool PathIntegrityCheck()
 
 stock void NavChanged(bool recompute = false)
 {
-    Guide_Cleanup();
+    // v4.2: Soft path invalidation.
+    // recompute=false: full nav mesh change (round_start_post_nav, nav_generate).
+    //   Must clean up — the old nav data is invalid.
+    // recompute=true: path integrity found blocked cells or flow was recomputed.
+    //   Keep the current path active for toggled clients (it may be slightly stale
+    //   but drawing something is better than nothing). Flag as dirty so auto-check
+    //   timer triggers a background rebuild.
+    if (!recompute)
+    {
+        Guide_Cleanup();
+        g_bPathDirty = false;
+    }
+    else
+    {
+        // Don't nuke the path — just mark it stale and let auto-check handle rebuild.
+        // If already dirty, don't spam (PathIntegrityCheck fires every 6s and
+        // would keep calling NavChanged(true) until rebuild completes).
+        if (!g_bPathDirty)
+        {
+            g_bPathDirty = true;
+            LogMessage("[PTG] Path marked dirty — rebuild scheduled (old path stays active for toggled clients)");
+        }
+    }
+
     t_nav = GetGameTime();
     if (recompute) t_nav = t_nav - NAV_COOLDOWN + 0.1;
     if (!enable || !gamemode_guidable || !map_started || !nav_started || timer_nav != null) return;

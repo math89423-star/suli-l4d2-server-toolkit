@@ -110,8 +110,13 @@ stock void SpatialHash_Insert(float center[3], int navAreaInt)
         g_hSpatialHash.SetValue(key, cellList);
     }
 
-    // Cap cell size to prevent perf issues on dense nav meshes
-    if (cellList.Length >= 64) return;
+    // Cap cell size to prevent perf issues on dense nav meshes.
+    // v4.5: raised from 64→256 to prevent silent data loss on dense custom maps.
+    if (cellList.Length >= 256)
+    {
+        LogMessage("[PTG] SpatialHash cell overflow at %s (%d entries) — nav area %d dropped. Consider increasing SPATIAL_CELL_SIZE.", key, cellList.Length, navAreaInt);
+        return;
+    }
 
     cellList.Push(navAreaInt);
     cellList.PushArray(center, 3);
@@ -825,15 +830,28 @@ stock void AStar_ReconstructPath(ArrayList outCells)
         float traceStart[3], traceEnd[3], traceHit[3];
         traceStart[0] = cell.center[0];
         traceStart[1] = cell.center[1];
-        traceStart[2] = cell.center[2] + 100.0;
+        traceStart[2] = cell.center[2] + 200.0;  // v4.5: 100→200 up (tall buildings)
         traceEnd[0] = cell.center[0];
         traceEnd[1] = cell.center[1];
-        traceEnd[2] = cell.center[2] - 300.0;
+        traceEnd[2] = cell.center[2] - 800.0;   // v4.5: 300→800 down (steep slopes)
         TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
         if (TR_DidHit())
         {
             TR_GetEndPosition(traceHit);
             cell.center[2] = traceHit[2] + 2.0; // +2 above floor surface
+        }
+        // v4.5: upward fallback — if downward trace found nothing, try tracing up
+        // (cell center may be below the actual walkable floor on inverted surfaces)
+        else
+        {
+            traceStart[2] = cell.center[2] - 16.0;
+            traceEnd[2]   = cell.center[2] + 128.0;
+            TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
+            if (TR_DidHit())
+            {
+                TR_GetEndPosition(traceHit);
+                cell.center[2] = traceHit[2] + 2.0;
+            }
         }
 
         cell.flow = startFlow + (goalFlow - startFlow) * (float(ni) / float(pathLen - 1));
@@ -853,16 +871,117 @@ stock void AStar_ReconstructPath(ArrayList outCells)
 
             if (!twopos_traversable(c1.center, c2.center))
             {
-                float lifted[3];
-                lifted[0] = c2.center[0];
-                lifted[1] = c2.center[1];
-                lifted[2] = c2.center[2] + 24.0;
-                if (twopos_traversable(c1.center, lifted))
+                bool repaired = false;
+
+                // v4.5: Multi-strategy cell validation cascade.
+                // Each strategy tries independently; first success wins.
+
+                // Strategy A: Lift cell2 Z incrementally (8,16,24,32,48)
+                if (!repaired)
                 {
-                    c2.center[0] = lifted[0];
-                    c2.center[1] = lifted[1];
-                    c2.center[2] = lifted[2];
-                    outCells.SetArray(i, c2, sizeof(Cell));
+                    float zOffsets[5] = {8.0, 16.0, 24.0, 32.0, 48.0};
+                    for (int z = 0; z < 5 && !repaired; z++)
+                    {
+                        float lifted[3];
+                        lifted[0] = c2.center[0];
+                        lifted[1] = c2.center[1];
+                        lifted[2] = c2.center[2] + zOffsets[z];
+                        if (twopos_traversable(c1.center, lifted))
+                        {
+                            c2.center = lifted;
+                            outCells.SetArray(i, c2, sizeof(Cell));
+                            repaired = true;
+                        }
+                    }
+                }
+
+                // Strategy B: Lower cell2 Z (handles waypoints inside ceilings)
+                if (!repaired)
+                {
+                    float zOffsets[4] = {-8.0, -16.0, -24.0, -32.0};
+                    for (int z = 0; z < 4 && !repaired; z++)
+                    {
+                        float lowered[3];
+                        lowered[0] = c2.center[0];
+                        lowered[1] = c2.center[1];
+                        lowered[2] = c2.center[2] + zOffsets[z];
+                        if (twopos_traversable(c1.center, lowered))
+                        {
+                            c2.center = lowered;
+                            outCells.SetArray(i, c2, sizeof(Cell));
+                            repaired = true;
+                        }
+                    }
+                }
+
+                // Strategy C: Lift both ends (+8 each)
+                if (!repaired)
+                {
+                    float l1[3], l2[3];
+                    l1 = c1.center; l1[2] += 8.0;
+                    l2 = c2.center; l2[2] += 8.0;
+                    if (twopos_traversable(l1, l2))
+                    {
+                        c1.center = l1; c2.center = l2;
+                        outCells.SetArray(i - 1, c1, sizeof(Cell));
+                        outCells.SetArray(i, c2, sizeof(Cell));
+                        repaired = true;
+                    }
+                }
+
+                // Strategy D: Horizontal offset perpendicular to beam direction
+                if (!repaired)
+                {
+                    float dir[3];
+                    dir[0] = c2.center[0] - c1.center[0];
+                    dir[1] = c2.center[1] - c1.center[1];
+                    float lenXY = SquareRoot(dir[0]*dir[0] + dir[1]*dir[1]);
+                    if (lenXY > 1.0)
+                    {
+                        float perp[3];
+                        perp[0] = -dir[1] / lenXY;
+                        perp[1] =  dir[0] / lenXY;
+                        perp[2] = 0.0;
+
+                        float offsets[4] = {32.0, -32.0, 64.0, -64.0};
+                        for (int o = 0; o < 4 && !repaired; o++)
+                        {
+                            float s[3], e[3];
+                            s[0] = c1.center[0] + perp[0] * offsets[o];
+                            s[1] = c1.center[1] + perp[1] * offsets[o];
+                            s[2] = c1.center[2] + 28.0;
+                            e[0] = c2.center[0] + perp[0] * offsets[o];
+                            e[1] = c2.center[1] + perp[1] * offsets[o];
+                            e[2] = c2.center[2] + 28.0;
+                            if (twopos_traversable(s, e))
+                            {
+                                s[2] -= 28.0; e[2] -= 28.0;
+                                c1.center = s; c2.center = e;
+                                outCells.SetArray(i - 1, c1, sizeof(Cell));
+                                outCells.SetArray(i, c2, sizeof(Cell));
+                                repaired = true;
+                            }
+                        }
+                    }
+                }
+
+                // Strategy E: Insert midpoint from overlapping nav area geometry.
+                // Uses the center of the two nav areas as an intermediate waypoint
+                // that the player can pass through.
+                if (!repaired && c1.navArea != Address_Null && c2.navArea != Address_Null)
+                {
+                    float mid[3], centerA[3], centerB[3];
+                    L4D_GetNavAreaCenter(c1.navArea, centerA);
+                    L4D_GetNavAreaCenter(c2.navArea, centerB);
+                    mid[0] = (centerA[0] + centerB[0]) / 2.0;
+                    mid[1] = (centerA[1] + centerB[1]) / 2.0;
+                    mid[2] = (centerA[2] > centerB[2] ? centerA[2] : centerB[2]) + 16.0;
+                    if (twopos_traversable(c1.center, mid) && twopos_traversable(mid, c2.center))
+                    {
+                        c2.center = mid;
+                        outCells.SetArray(i, c2, sizeof(Cell));
+                        repaired = true;
+                    }
                 }
             }
         }
@@ -977,7 +1096,7 @@ stock int AStar_IdentifyGoal(int startIndex)
         float startC[3];
         g_hAStarCenters.GetArray(startIndex, startC, 3);
 
-        int bfsLimit = 5000; // cap to prevent excessive iteration on giant maps
+        int bfsLimit = 20000; // v4.5: raised from 5000 for ultra-large custom maps
 
         if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
 
@@ -1191,6 +1310,19 @@ stock void AStar_ComputePortals()
             if (halfWidth > dLen * 0.4) halfWidth = dLen * 0.4;
 
             float zGround = (cA[2] > cB[2]) ? cA[2] : cB[2];
+            // v4.5: Use L4D_NavArea_GetZ for accurate floor height at portal XY.
+            // max(centerZ) places portals in mid-air on stairs and slopes.
+            {
+                float testPos[3];
+                testPos[0] = portal.center[0];
+                testPos[1] = portal.center[1];
+                testPos[2] = 0.0;
+                float zNavA = L4D_NavArea_GetZ(areaA, testPos);
+                float zNavB = L4D_NavArea_GetZ(nc.navArea, testPos);
+                float zNav = (zNavA > zNavB) ? zNavA : zNavB;
+                if (zNav > 0.0 && zNav < 50000.0)
+                    zGround = zNav + 16.0; // standing height above actual nav mesh floor
+            }
             portal.center[2] = zGround;
             portal.ep1[2] = zGround;
             portal.ep2[2] = zGround;
@@ -1285,6 +1417,19 @@ stock bool AStar_ComputePortalsBatch(int startIdx, int count)
 
             // Z: use higher of the two areas (safe walkable height at +16 above ground)
             float zGround = (cA[2] > cB[2]) ? cA[2] : cB[2];
+            // v4.5: Use L4D_NavArea_GetZ for accurate floor height at portal XY.
+            // max(centerZ) places portals in mid-air on stairs and slopes.
+            {
+                float testPos[3];
+                testPos[0] = portal.center[0];
+                testPos[1] = portal.center[1];
+                testPos[2] = 0.0;
+                float zNavA = L4D_NavArea_GetZ(areaA, testPos);
+                float zNavB = L4D_NavArea_GetZ(nc.navArea, testPos);
+                float zNav = (zNavA > zNavB) ? zNavA : zNavB;
+                if (zNav > 0.0 && zNav < 50000.0)
+                    zGround = zNav + 16.0; // standing height above actual nav mesh floor
+            }
             portal.center[2] = zGround;
             portal.ep1[2] = zGround;
             portal.ep2[2] = zGround;
@@ -1590,7 +1735,7 @@ stock void DetectNavMeshBridges()
     int reachableCount = 1;
 
     // Cap BFS at 5000 nodes to prevent excessive iteration
-    int bfsLimit = 5000;
+    int bfsLimit = 20000; // v4.5: raised from 5000 (bridge detection)
     while (bfsQueue.Length > 0 && reachableCount < bfsLimit)
     {
         int current = bfsQueue.Get(0);
@@ -1641,7 +1786,7 @@ stock void DetectNavMeshBridges()
     // spatial proximity that could be traversed (jump/drop/walk gap).
     float bridgeMaxDist = 256.0; // max distance to search for bridge
     int unreachableScanned = 0;
-    int unreachableLimit = 2000; // cap to avoid excessive processing
+    int unreachableLimit = 10000; // v4.5: raised from 2000 for large disconnected maps
 
     for (int i = 0; i < nodeCount && unreachableScanned < unreachableLimit; i++)
     {
