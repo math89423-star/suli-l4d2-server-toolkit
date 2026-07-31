@@ -41,14 +41,11 @@ float g_fPrepStartTime;
 
 void Guide_Prep()
 {
-    // Recovery: if a previous prep was aborted by an error (e.g., A* crash on broken nav),
-    // guide_prep may be stuck true forever, blocking all retries. Reset after 30s timeout.
-    if (guide_prep && g_fPrepStartTime > 0.0 && (GetEngineTime() - g_fPrepStartTime) > 30.0)
-    {
-        guide_prep = false;
-        g_iPrepStage = STAGE_NONE;
-        g_fPrepStartTime = 0.0;
-    }
+    // v4.6: Old 30s total-time watchdog removed. It killed SLOW pipelines on big
+    // maps (unbounded build time → infinite fallback retry loop → permanent path
+    // loss). Progress-based watchdog lives in Timer_AutoCheck + OnFramePrep:
+    // it only resets a pipeline whose frame chain has fully stalled.
+    // g_fPrepStartTime kept as a diagnostic field.
 
     if (!enable || !gamemode_guidable || !map_started || !nav_started || guide_prep || is_prep_cooldown()) return;
     #if DEBUG>1
@@ -74,6 +71,7 @@ void Guide_Cleanup()
     g_iPortalBatchIdx = 0;
     g_iHPAClusterCount = 0;
     g_fPrepStartTime = 0.0;
+    g_fLastPrepProgressTime = 0.0;
 
     if (guide_ready)
     {
@@ -144,6 +142,11 @@ void OnFramePrep(bool new_frame = true)
     static float pos[3];
     static Cell cell, cell_before, cell_after;
     bool budget_spent = false; // same variable for all stages
+    // v4.6 watchdog: every OnFramePrep call (new frame or recursive) is pipeline
+    // progress. Must be AFTER the abort guards — a guard reset should not refresh
+    // the timestamp (the stalled chain we're detecting is the one that never
+    // reaches this point).
+    g_fLastPrepProgressTime = GetEngineTime();
     if (new_frame)
     {
         #if DEBUG
@@ -643,8 +646,11 @@ void OnFramePrep(bool new_frame = true)
     {
         guide_prep = false;
         guide_ready = true;
+        g_bPathDirty = false; // v4.6: fresh path supersedes any pending dirty rebuild
         LogMessage("[PTG] Pipeline done: %d guide cells ready", g_GuideCells != null ? g_GuideCells.Length : -1);
         Guide_ValidateWalkable(); // v2.2: hull-trace validate all beams against world geometry
+        // v4.5: Immediately redraw for all toggled clients — no 0.3s gap
+        Guide_RedrawAllToggled();
         beams_cooldown_reset(); // reset cooldowns but not requests to draw
         #if DEBUG
         g_fPrepTotalTime += (GetEngineTime()-g_tFrameStart);

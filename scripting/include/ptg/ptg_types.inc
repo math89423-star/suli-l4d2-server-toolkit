@@ -208,11 +208,21 @@ ConVar g_hCvarBeaconEnable;
 ConVar g_hCvarThetaStar, g_hCvarThetaLosMax;
 ConVar g_hCvarHpaEnable, g_hCvarHpaCellSize;
 ConVar g_hCvarFlowWeight, g_hCvarZCostFactor;
+ConVar g_hCvarAccuracy;
+bool g_bAccuracyEnabled = true; // v4.5: master switch for accuracy improvements (Fix 1/2/4/5/8)
+ConVar g_hCvarLegacyMode;
 Handle g_hAutoTimer = null;
 Handle g_hAutoCheckTimer = null;
 bool gamemode_guidable, guide_ready, guide_prep, map_started, nav_started, enable, g_bL4D2, finale, finale_rescue, finale_gauntlet;
 bool g_bGlobalBeams = false; // When true, DrawBeam sends to all clients (auto-guide mode)
 int g_iMapGeneration = 0; // incremented on each map start; async frame callbacks abort if stale
+
+// v4.6 watchdog: stage-level progress detection — kills only STUCK pipelines,
+// never slow ones. OnFramePrep refreshes this timestamp every frame; if the
+// frame chain stops advancing for PREP_STALL_SECONDS (lost RequestFrame,
+// event race), Timer_AutoCheck resets the pipeline and it restarts.
+float g_fLastPrepProgressTime = 0.0;
+#define PREP_STALL_SECONDS 10.0
 
 // Forward-declare optional newer left4dhooks natives (may not be in server's include)
 enum NavCornerType {
@@ -236,6 +246,7 @@ DynamicDetour g_hRecomputeFlowDetour;
 Handle g_hRecomputeFlow;
 bool g_bFlowRecomputeHooked;
 
+bool g_bPathDirty; // path needs rebuild (blocked cells detected) but old path is still active for toggled clients
 bool finale_stitched; // finale guide was drawn
 bool finale_backwards; // rescue vehicle is not at max flow -> flow cannot be used for guiding
 
@@ -272,6 +283,20 @@ void GetCvars()
         enable = g_hCvarEnable.BoolValue;
         if (!enable && guide_ready) Guide_Cleanup();
         beams_cooldown_reset(_,true); // reset all requests and cooldowns
+
+    // v4.5: Sync accuracy + legacy globals from ConVars
+    if (g_hCvarAccuracy != null)
+        g_bAccuracyEnabled = g_hCvarAccuracy.BoolValue;
+
+    if (g_hCvarLegacyMode != null && g_hCvarLegacyMode.BoolValue)
+    {
+        g_bAccuracyEnabled = false;
+        if (g_hCvarThetaStar != null) g_hCvarThetaStar.SetBool(false);
+        if (g_hCvarHpaEnable != null) g_hCvarHpaEnable.SetBool(false);
+        if (g_hCvarFunnel3D != null) g_hCvarFunnel3D.SetBool(false);
+        if (g_hCvarRepairEnable != null) g_hCvarRepairEnable.SetBool(false);
+        if (g_hCvarBeaconEnable != null) g_hCvarBeaconEnable.SetBool(false);
+    }
     }
 }
 

@@ -17,13 +17,14 @@
 #include <dhooks>
 #include <l4d_path_to_goal>
 
-#define PLUGIN_VERSION 			"3.1 2026-07-28"
+#define PLUGIN_VERSION 			"4.5 2026-07-30"
 
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
 // Per-client: each player toggles their own guide independently
 bool g_bGuideToggled[MAXPLAYERS+1];
 StringMap g_hReconnectToggle;  // SteamID → 1, persists toggle across disconnect/reconnect
 Handle g_hToggleTimer = null;
+int g_iBeamsMissed = 0; // v4.5: beam health tracking
 float g_fLastPtgTime[MAXPLAYERS+1];
 
 public Plugin myinfo =
@@ -162,6 +163,15 @@ public void OnPluginStart()
     g_hCvarZCostFactor = CreateConVar("l4d_path_to_goal_z_cost_factor", "4.0",
     "Vertical cost multiplier in A* edge weights. Higher values strongly prefer level paths over climbing.",FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
+    // ── v4.5 Accuracy + Legacy ConVars ──
+    g_hCvarAccuracy = CreateConVar("l4d_path_to_goal_accuracy", "1",
+    "Master switch for v4.5 accuracy improvements (expanded trace filter, deeper ground snap, GetZ portal Z). 0=legacy, 1=improved.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_hCvarAccuracy.AddChangeHook(ConVarChanged_Cvars);
+
+    g_hCvarLegacyMode = CreateConVar("l4d_path_to_goal_legacy_mode", "0",
+    "Emergency rollback: set to 1 to disable ALL v3.1+ features and revert to original behavior.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_hCvarLegacyMode.AddChangeHook(ConVarChanged_Cvars);
+
   	g_hCvarMPGameMode = FindConVar("mp_gamemode");
   	g_hCvarMPGameMode.AddChangeHook(ConVarGameMode);
     
@@ -264,7 +274,12 @@ void evtPostNav(Event event, const char[] name, bool dontBroadcast)
     finale = false;
     finale_rescue = false;
     finale_gauntlet = false;
-    NavChanged();
+    finale_stitched = false; // v4.6: ensure new round re-stitches finale if it starts
+    // v4.6: soft-dirty instead of full cleanup. round_start_post_nav fires every
+    // round — on large maps a full Guide_Cleanup meant a 30s+ blackout and the
+    // death/rejoin "path lost" symptom. NavChanged(true) keeps the old path
+    // drawing for toggled clients while the background rebuild runs (≤2s).
+    NavChanged(true);
 }
 
 void evtNavBlocked(Event event, const char[] name, bool dontBroadcast)
@@ -368,21 +383,34 @@ void Guide_UpdateRedrawTimer()
         if (g_bGuideToggled[i]) { anyOn = true; break; }
     }
 
+    // v4.5: Reset beam-missed counter when toggle state changes
+    if (anyOn)
+        g_iBeamsMissed = 0;
+
     if (anyOn && g_hToggleTimer == null)
     {
-        g_hToggleTimer = CreateTimer(0.6, Timer_ToggleRedraw, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+        // v4.5: Recursive one-shot (TIMER_REPEAT doesn't fire on empty servers).
+        // Reduced interval from 0.6→0.3s for faster beam-loss recovery.
+        g_hToggleTimer = CreateTimer(0.3, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
     }
     else if (!anyOn && g_hToggleTimer != null)
     {
         KillTimer(g_hToggleTimer);
         g_hToggleTimer = null;
+        g_iBeamsMissed = 0;
     }
 }
 
+
 Action Timer_ToggleRedraw(Handle timer)
 {
+    // v4.5: Recursive one-shot — reschedule before any return.
+    // TIMER_REPEAT doesn't fire on empty servers (SourceMod bug).
+    g_hToggleTimer = CreateTimer(0.3, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
+
     bool anyOn = false;
     bool pathAvailable = (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2);
+    int beamsDrawn = 0;
 
     for (int i = 1; i <= MaxClients; i++)
     {
@@ -392,6 +420,7 @@ Action Timer_ToggleRedraw(Handle timer)
             if (pathAvailable)
             {
                 AutoGuideDrawPath(i);
+                beamsDrawn++;
             }
             else if (!guide_prep)
             {
@@ -405,9 +434,42 @@ Action Timer_ToggleRedraw(Handle timer)
     if (!anyOn)
     {
         g_hToggleTimer = null;
+        g_iBeamsMissed = 0;
         return Plugin_Stop;
     }
-    return Plugin_Continue;
+
+    // v4.5: Beam health check.
+    // If path is available but no beams were drawn (path says ready but
+    // g_GuideCells is null/empty — race condition), track consecutive misses.
+    // After 5 misses (1.5s), force a rebuild.
+    if (pathAvailable && beamsDrawn == 0)
+    {
+        g_iBeamsMissed++;
+        if (g_iBeamsMissed > 5)
+        {
+            LogMessage("[PTG] Beam health check: %d consecutive ticks with 0 beams drawn — forcing rebuild", g_iBeamsMissed);
+            g_iBeamsMissed = 0;
+            Guide_Prep();
+        }
+    }
+    else
+    {
+        g_iBeamsMissed = 0;
+    }
+
+    return Plugin_Stop;
+}
+
+// v4.5: Immediately redraw beams for all toggled clients.
+// Called after pipeline completion to eliminate the 0-0.3s gap.
+void Guide_RedrawAllToggled()
+{
+    if (g_GuideCells == null || g_GuideCells.Length < 2) return;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (g_bGuideToggled[i] && IsValidClient(i) && !IsFakeClient(i))
+            AutoGuideDrawPath(i);
+    }
 }
 
 //Action TransmitInfoTarget(int entity, int client)
@@ -581,6 +643,12 @@ Action CmdRecomputeFlow(int client, int args)
 
 public void OnMapStart()
 {
+    // v4.6: Bump generation FIRST — OnMapStart is the earliest map-change
+    // callback, so any stale OnFramePrep/Validate/Repair frames queued by the
+    // previous map run AFTER this point and abort on the generation mismatch.
+    // (MapStarted itself is a RequestFrame callback that can fire after old-map
+    // pipeline frames, so it cannot be the only increment point.)
+    g_iMapGeneration++;
 	g_iLaser = PrecacheModel(VMT_LASERBEAM, true);
     g_iLaserWhite = PrecacheModel(VMT_LASERBEAM_WHITE, true);
     g_iLaserCustom = PrecacheModel(VMT_LASERBEAM_CUSTOM, true);
@@ -590,8 +658,9 @@ public void OnMapStart()
 
 // Global state for auto-guide fallback
 int g_iPrepAttempts = 0;
-int g_iFallbackStage = 0; // 0=normal, 1=fallback pending, 2=fallback done
+int g_iFallbackStage = 0; // 0=normal, 1=fallback pending, 2=fallback done, 3=backoff
 int g_iFallbackRetries = 0;
+float g_fFallbackBackoffUntil = 0.0; // v4.6: engine time until fallback retries are allowed
 #define MAX_FALLBACK_RETRIES 2
 
 void MapStarted()
@@ -602,6 +671,8 @@ void MapStarted()
     g_iPrepAttempts = 0;
     g_iFallbackStage = 0;
     g_iFallbackRetries = 0;
+    g_fFallbackBackoffUntil = 0.0;
+    g_fLastPrepProgressTime = 0.0;
     g_bPathDirty = false;
 
     // Re-create check timer on every map load (OnPluginStart only fires once;
@@ -612,6 +683,9 @@ void MapStarted()
 
 public void OnMapEnd()
 {
+    // v4.6: double-insurance bump covering the OnMapEnd→OnMapStart gap —
+    // kills any stale async frames from the ending map's pipeline.
+    g_iMapGeneration++;
     map_started = false;
     nav_started = false;
     t_nav = -1.0;
@@ -661,10 +735,39 @@ Action Timer_AutoCheck(Handle timer)
     // Always reschedule (recursive one-shot — TIMER_REPEAT won't fire on empty servers)
     g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
 
+    // v4.6 watchdog: stage-level progress detection. OnFramePrep refreshes
+    // g_fLastPrepProgressTime on every frame; if the frame chain stalls for
+    // >PREP_STALL_SECONDS (lost RequestFrame, event race), reset the pipeline.
+    // The prep block below restarts it. Does NOT touch g_bPathDirty — a dirty
+    // rebuild request is still valid and is handled by the dirty block.
+    if (guide_prep && g_fLastPrepProgressTime > 0.0
+        && (GetEngineTime() - g_fLastPrepProgressTime) > PREP_STALL_SECONDS)
+    {
+        LogMessage("[PTG] Watchdog: pipeline stalled (no frame progress for %.0fs) — resetting", PREP_STALL_SECONDS);
+        guide_prep = false;
+        g_iPrepStage = STAGE_NONE;
+        g_fLastPrepProgressTime = 0.0;
+        g_fPrepStartTime = 0.0;
+        timer_nav = null;
+    }
+
     // Always keep guide prepped in background, even when auto pulse is off.
     // This way !ptg is instant when a player uses it.
     if (!guide_ready && !guide_prep && g_iFallbackStage < 2)
     {
+        // v4.6: backoff gate — maps where every build strategy fails burn CPU
+        // forever in the old loop (standard 2x → fallback 2x → reset → repeat).
+        // After fallback exhausts retries we enter 60s backoff for background
+        // prebuilding only; explicit player requests bypass this gate entirely.
+        if (g_iFallbackStage >= 3)
+        {
+            if (GetEngineTime() < g_fFallbackBackoffUntil)
+                return Plugin_Stop; // still in backoff window — no background work
+            g_iFallbackStage = 0;   // backoff over — retry standard prep
+            g_iFallbackRetries = 0;
+            g_iPrepAttempts = 0;
+        }
+
         if (g_iPrepAttempts >= 2 && g_iFallbackStage == 0)
         {
             LogMessage("[PTG] Standard prep failed after %d attempts. Trying fallback nav collection...", g_iPrepAttempts);
@@ -693,11 +796,15 @@ Action Timer_AutoCheck(Handle timer)
         }
         else
         {
-            // Give up on fallback, try standard prep again from scratch
-            LogMessage("[PTG] Fallback pipeline exhausted retries. Resetting to standard prep attempts.");
-            g_iFallbackStage = 0;
+            // v4.6: give up on fallback AND stop hammering standard prep.
+            // 60s backoff — map may be inherently unbuildable (broken nav,
+            // no flow data, unreachable goal). Player requests still work:
+            // CmdRequestGuide → Guide_Prep() bypasses Timer_AutoCheck.
+            LogMessage("[PTG] Fallback exhausted retries. Entering 60s backoff.");
+            g_iFallbackStage = 3;
             g_iFallbackRetries = 0;
             g_iPrepAttempts = 0;
+            g_fFallbackBackoffUntil = GetEngineTime() + 60.0;
         }
         return Plugin_Stop;
     }
@@ -709,13 +816,16 @@ Action Timer_AutoCheck(Handle timer)
     // the old (slightly stale) path rather than nothing at all.
     // This fires regardless of auto pulse mode — manual toggle clients also
     // need their path rebuilt when it goes stale.
-    if (g_bPathDirty && guide_ready && !guide_prep)
+    // v4.6: condition relaxed from guide_ready && ... — NavChanged(true) can
+    // now fire while guide_ready is false (round_start_post_nav soft-dirty).
+    // Cleanup only when a path actually exists to tear down.
+    if (g_bPathDirty && !guide_prep)
     {
         LogMessage("[PTG] Rebuilding dirty path (%d cells, auto=%d)",
             g_GuideCells != null ? g_GuideCells.Length : 0,
             g_hCvarAutoEnable.BoolValue);
         g_bPathDirty = false;
-        Guide_Cleanup();
+        if (guide_ready) Guide_Cleanup();
         Guide_Prep();
     }
 
@@ -734,6 +844,7 @@ Action Timer_AutoCheck(Handle timer)
         g_iPrepAttempts = 0;
         g_iFallbackStage = 0;
         g_iFallbackRetries = 0;
+        g_fFallbackBackoffUntil = 0.0;
     }
 
     // --- Path integrity poll: check every 6s (every 3rd 2s tick) ---
