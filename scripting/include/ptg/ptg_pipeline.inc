@@ -381,9 +381,14 @@ void OnFramePrep(bool new_frame = true)
                 case 2: // IdentifyGoal BFS frames
                 {
                     if (AStar_IdentifyGoal_Frame(BFS_NODES_PER_FRAME))
-                        g_iPostStep = 3; // BFS complete
-                    else
-                        budget_spent = true; // continue next frame
+                        g_iPostStep = 3; // BFS complete — finish next frame
+                    // v4.6 FIX: budget_spent must be set in BOTH branches.
+                    // Missing it here advanced g_iPrepStage to STAGE_ASTAR with
+                    // case 3 (goal) and case 4 (AStar_Init+SetStart) never run
+                    // → null open set → "A* failed: no reachable nodes".
+                    // (First build after map load failed, retry succeeded only
+                    //  by racing the frame-budget check.)
+                    budget_spent = true;
                 }
                 case 3: // IdentifyGoal finish + validate start/goal
                 {
