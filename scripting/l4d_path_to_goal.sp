@@ -161,6 +161,9 @@ public void OnPluginStart()
     g_hCvarHpaEnable = CreateConVar("l4d_path_to_goal_hpa_enable", "1",
     "Enable HPA* hierarchical pathfinding for large maps (3000+ nav areas). 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
+    g_hCvarLazyLargeMaps = CreateConVar("l4d_path_to_goal_lazy_large_maps", "1",
+    "Skip background prebuild on maps with more nav areas than the lazy threshold (see source, default 8000). Path builds on first player request instead — keeps CPU idle on huge third-party maps. 0=always prebuild.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
     g_hCvarHpaCellSize = CreateConVar("l4d_path_to_goal_hpa_cell_size", "1024.0",
     "HPA* cluster cell size (units). Smaller = finer hierarchy, more clusters.",FCVAR_NOTIFY, true, 256.0, true, 4096.0);
 
@@ -682,6 +685,8 @@ void MapStarted()
     g_fFallbackBackoffUntil = 0.0;
     g_fLastPrepProgressTime = 0.0;
     g_bPathDirty = false;
+    g_iNavAreaCount = -1;           // v4.6: lazy-build counting starts fresh per map
+    g_bLazyBuildRequested = false;
 
     // Re-create check timer on every map load (OnPluginStart only fires once;
     // OnMapEnd kills it, so we must recreate here after each map change)
@@ -775,6 +780,23 @@ Action Timer_AutoCheck(Handle timer)
             g_iFallbackStage = 0;   // backoff over — retry standard prep
             g_iFallbackRetries = 0;
             g_iPrepAttempts = 0;
+        }
+
+        // v4.6: lazy build gate for large maps — count nav areas once (cheap,
+        // µs-level fill) and skip the background prebuild until a player
+        // actually requests the guide. Dirty rebuilds and fallback recovery
+        // below bypass this gate (they are real needs).
+        if (g_hCvarLazyLargeMaps != null && g_hCvarLazyLargeMaps.BoolValue && g_iNavAreaCount < 0 && nav_started)
+        {
+            ArrayList tmp = new ArrayList();
+            L4D_GetAllNavAreas(tmp);
+            g_iNavAreaCount = tmp.Length;
+            delete tmp;
+        }
+        if (g_hCvarLazyLargeMaps != null && g_hCvarLazyLargeMaps.BoolValue
+            && g_iNavAreaCount > LAZY_MAP_THRESHOLD && !g_bLazyBuildRequested)
+        {
+            return Plugin_Stop; // large map, nobody asked — keep CPU idle
         }
 
         if (g_iPrepAttempts >= 2 && g_iFallbackStage == 0)

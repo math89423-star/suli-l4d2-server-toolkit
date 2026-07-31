@@ -111,8 +111,10 @@ stock void SpatialHash_Insert(float center[3], int navAreaInt)
     }
 
     // Cap cell size to prevent perf issues on dense nav meshes.
-    // v4.5: raised from 64→256 to prevent silent data loss on dense custom maps.
-    if (cellList.Length >= 256)
+    // v4.5: raised from 64→256; v4.6: raised to 512 for dense third-party maps
+    // (256 cells in a 256u cube is only ~4 areas per 64u — hot spots on
+    // cluttered custom maps silently dropped nav areas).
+    if (cellList.Length >= 512)
     {
         LogMessage("[PTG] SpatialHash cell overflow at %s (%d entries) — nav area %d dropped. Consider increasing SPATIAL_CELL_SIZE.", key, cellList.Length, navAreaInt);
         return;
@@ -547,6 +549,7 @@ stock void AStar_Init()
     }
 
     g_bAStarPathFound = false;
+    g_bAStarPartialPath = false; // v4.6: reset partial-path flag per search
     g_iAStarBestIdx = -1;
     g_fAStarBestG = -1.0;
 }
@@ -579,6 +582,7 @@ stock int AStar_SearchFrame(int maxNodes)
         {
             LogMessage("[PTG] A* exhausted open set. Using best reachable node %d (g=%.0f) as effective goal.",
                 g_iAStarBestIdx, g_fAStarBestG);
+            g_bAStarPartialPath = true; // v4.6: dead-end beacon on partial paths
             g_iAStarGoalIndex = g_iAStarBestIdx;
             g_bAStarPathFound = true;
             return 1;
@@ -738,6 +742,7 @@ stock int AStar_SearchFrame(int maxNodes)
         {
             LogMessage("[PTG] A* goal unreachable (disconnected nav mesh). Using best reachable node %d (g=%.0f) as effective goal.",
                 g_iAStarBestIdx, g_fAStarBestG);
+            g_bAStarPartialPath = true; // v4.6: dead-end beacon on partial paths
             g_iAStarGoalIndex = g_iAStarBestIdx;
             g_bAStarPathFound = true;
             return 1;
@@ -1815,10 +1820,11 @@ stock void DetectNavMeshBridges()
 
     // Cap BFS at 5000 nodes to prevent excessive iteration
     int bfsLimit = 20000; // v4.5: raised from 5000 (bridge detection)
-    while (bfsQueue.Length > 0 && reachableCount < bfsLimit)
+    int bfsHead = 0; // v4.6: head cursor — Erase(0) was O(V²) on 20K nodes
+    while (bfsHead < bfsQueue.Length && reachableCount < bfsLimit)
     {
-        int current = bfsQueue.Get(0);
-        bfsQueue.Erase(0);
+        int current = bfsQueue.Get(bfsHead);
+        bfsHead++;
 
         int areaInt = g_hAStarNodes.Get(current);
         Address area = view_as<Address>(areaInt);
@@ -1854,11 +1860,21 @@ stock void DetectNavMeshBridges()
         reachableCount, nodeCount, (float(reachableCount) / nodeCount) * 100.0);
     #endif
 
-    // If most nodes are reachable, bridges aren't needed
-    if (reachableCount > nodeCount * 0.9 || reachableCount >= bfsLimit)
+    // If most nodes are reachable, bridges aren't needed.
+    // v4.6: removed `|| reachableCount >= bfsLimit` — a truncated BFS on a
+    // huge map no longer abandons bridge detection entirely. The partial
+    // reachable set is used as-is; spurious candidates from misjudged
+    // "unreachable" nodes are filtered by physical validation (Jump/DropArc)
+    // + the 256u distance cap. Worst case: a redundant high-cost edge.
+    if (reachableCount > nodeCount * 0.9)
     {
         delete reachableMap;
         return;
+    }
+    if (reachableCount >= bfsLimit)
+    {
+        LogMessage("[PTG] Bridge detection: BFS hit %d-node limit — reachable set is PARTIAL (%d/%d). Bridges computed on partial data.",
+            bfsLimit, reachableCount, nodeCount);
     }
 
     // For each UNREACHABLE node, look for nearby REACHABLE nodes within

@@ -204,6 +204,7 @@ ConVar g_hCvarGapDzMax, g_hCvarGapXyRatio, g_hCvarBeamMinDist, g_hCvarGapVertica
 // v4.0 new cvars
 ConVar g_hCvarFunnel3D, g_hCvarFunnelZStep;
 ConVar g_hCvarRepairEnable, g_hCvarRepairAttempts;
+ConVar g_hCvarLazyLargeMaps; // v4.6: 1=skip background prebuild on maps over LAZY_MAP_THRESHOLD nav areas
 ConVar g_hCvarBeaconEnable;
 ConVar g_hCvarThetaStar, g_hCvarThetaLosMax;
 ConVar g_hCvarHpaEnable, g_hCvarHpaCellSize;
@@ -255,6 +256,18 @@ int g_iFunnelIdx;
 
 // ── v4.6 HPA large-map degradation ──
 #define HPA_SKIP_THRESHOLD 5000 // above this nav area count, skip HPA clustering entirely
+
+// ── v4.6 partial-path dead-end beacon ──
+// A* open set exhausted (disconnected nav mesh) — the path stops at the best
+// reachable node. Separate from g_hBeaconCells so REPAIR's lifecycle
+// (delete/rebuild per pipeline run) can't wipe it.
+bool g_bAStarPartialPath = false;
+ArrayList g_hPartialBeacon; // 1 entry: dead-end position (float[3])
+
+// ── v4.6 lazy build for large maps ──
+int g_iNavAreaCount = -1;     // -1 = unknown; counted via L4D_GetAllNavAreas once nav_started
+bool g_bLazyBuildRequested = false; // true once any real build request consumed the gate
+#define LAZY_MAP_THRESHOLD 8000
 
 // Forward-declare optional newer left4dhooks natives (may not be in server's include)
 enum NavCornerType {

@@ -48,6 +48,10 @@ void Guide_Prep()
     // g_fPrepStartTime kept as a diagnostic field.
 
     if (!enable || !gamemode_guidable || !map_started || !nav_started || guide_prep || is_prep_cooldown()) return;
+    // v4.6: any real build request (player command, dirty rebuild, fallback
+    // recovery) consumes the large-map lazy-build gate — only the background
+    // prebuild in Timer_AutoCheck is gated.
+    g_bLazyBuildRequested = true;
     #if DEBUG>1
     LogMessage("Guide_Prep");
     #endif
@@ -86,6 +90,9 @@ void Guide_Cleanup()
     g_hSmoothNodePath = null;
     delete g_hFunnelResult;
     g_hFunnelResult = null;
+    delete g_hPartialBeacon; // v4.6: partial-path dead-end beacon
+    g_hPartialBeacon = null;
+    g_bAStarPartialPath = false;
 
     if (guide_ready)
     {
@@ -563,6 +570,18 @@ void OnFramePrep(bool new_frame = true)
                         explored_finale.Clear();
                     }
 
+                    // v4.6: partial path (A* open set exhausted — disconnected
+                    // nav mesh): beacon the dead end. Separate from
+                    // g_hBeaconCells so REPAIR's rebuild can't wipe it.
+                    if (g_bAStarPartialPath && g_hCvarBeaconEnable != null && g_hCvarBeaconEnable.BoolValue)
+                    {
+                        delete g_hPartialBeacon;
+                        g_hPartialBeacon = new ArrayList(3);
+                        Cell lastCell;
+                        g_GuideCells.GetArray(g_GuideCells.Length - 1, lastCell, sizeof(Cell));
+                        g_hPartialBeacon.PushArray(lastCell.center, 3);
+                    }
+
                     g_iLoop = 1;
                     g_iSmoothStep = 0; // reset for next build
                     budget_spent = true;
@@ -775,7 +794,8 @@ void OnFramePrep(bool new_frame = true)
         guide_prep = false;
         guide_ready = true;
         g_bPathDirty = false; // v4.6: fresh path supersedes any pending dirty rebuild
-        LogMessage("[PTG] Pipeline done: %d guide cells ready", g_GuideCells != null ? g_GuideCells.Length : -1);
+        LogMessage("[PTG] Pipeline done: %d guide cells ready%s", g_GuideCells != null ? g_GuideCells.Length : -1,
+            g_bAStarPartialPath ? " — PARTIAL path (disconnected nav mesh, dead-end beacon placed)" : "");
         Guide_ValidateWalkable(); // v2.2: hull-trace validate all beams against world geometry
         // v4.5: Immediately redraw for all toggled clients — no 0.3s gap
         Guide_RedrawAllToggled();

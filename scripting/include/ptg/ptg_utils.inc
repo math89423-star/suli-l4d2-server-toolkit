@@ -8,9 +8,16 @@ public bool TraceFilter_WorldOnly(int entity, int contentsMask, any data)
 }
 
 // Single hull test helper — returns true if walkable
+// v4.6: filter unified with path construction/validation. The old
+// TraceFilter_WorldOnly only saw world BSP, so REPAIR/validate passed beams
+// through closed doors, unbroken breakables and physics-blocked corridors
+// that the path itself (TraceFilterStatic) treats as impassable — two
+// standards, contradictory results. TraceFilterStatic with accuracy on =
+// TraceFilterWalkable (entities + door state + health); accuracy off =
+// legacy behavior (world + prop_static + func_brush).
 bool TryHull(float start[3], float end[3], const float mins[3], const float maxs[3])
 {
-    TR_TraceHullFilter(start, end, mins, maxs, MASK_PLAYERSOLID, TraceFilter_WorldOnly);
+    TR_TraceHullFilter(start, end, mins, maxs, MASK_PLAYERSOLID, TraceFilterStatic);
     return !TR_DidHit();
 }
 

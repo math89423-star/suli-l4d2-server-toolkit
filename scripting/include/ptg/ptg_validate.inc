@@ -339,7 +339,9 @@ void Guide_RepairBlocked_Frame(any unused)
 
                     float midMins[3] = {-14.0, -14.0, 0.0};
                     float midMaxs[3] = { 14.0,  14.0, 44.0};
-                    TR_TraceHullFilter(s1, e1, midMins, midMaxs, MASK_PLAYERSOLID, TraceFilter_WorldOnly);
+                    // v4.6: unified filter (was TraceFilter_WorldOnly) — REPAIR
+                    // must agree with path construction about what blocks.
+                    TR_TraceHullFilter(s1, e1, midMins, midMaxs, MASK_PLAYERSOLID, TraceFilterStatic);
                     if (!TR_DidHit())
                     {
                         cell1.center = s1;
@@ -380,7 +382,8 @@ void Guide_RepairBlocked_Frame(any unused)
                 bool allClear = true;
                 for (int s = 0; s < 3 && allClear; s++)
                 {
-                    TR_TraceHullFilter(segs[s], segs[s+1], midMins, midMaxs, MASK_PLAYERSOLID, TraceFilter_WorldOnly);
+                    // v4.6: unified filter (was TraceFilter_WorldOnly)
+                    TR_TraceHullFilter(segs[s], segs[s+1], midMins, midMaxs, MASK_PLAYERSOLID, TraceFilterStatic);
                     if (TR_DidHit()) allClear = false;
                 }
 
@@ -526,22 +529,33 @@ void Guide_DrawBeaconPillar(float pos[3], int client, float duration, float widt
     }
 }
 
-// Draw beacon markers at positions stored in g_hBeaconCells
+// Draw beacon markers: partial-path dead-end beacon + REPAIR beacons.
 void Guide_DrawBeacons(int client = -1)
 {
-    if (g_hBeaconCells == null || g_hBeaconCells.Length == 0) return;
     if (!g_hCvarBeaconEnable.BoolValue) return;
 
     float duration = g_hCvarAutoDuration.FloatValue;
     if (duration < 1.0) duration = 5.0;
 
-    // v4.6: snapshot before drawing — REPAIR may delete/rebuild
-    // g_hBeaconCells between redraw ticks (see Guide_RepairBlocked).
-    ArrayList snapshot = g_hBeaconCells.Clone();
     // v4.6: cap per-draw beacons — each beacon costs 7 temp entities
     int budget = (g_hCvarMax.IntValue > 8) ? g_hCvarMax.IntValue / 4 : 4;
     int drawn = 0;
 
+    // v4.6: partial-path dead-end beacon (A* open set exhausted — the path
+    // stops here because the nav mesh is disconnected)
+    if (g_hPartialBeacon != null && g_hPartialBeacon.Length > 0)
+    {
+        float pos[3];
+        g_hPartialBeacon.GetArray(0, pos, 3);
+        Guide_DrawBeaconPillar(pos, client, duration, 4.0);
+        drawn++;
+    }
+
+    if (g_hBeaconCells == null || g_hBeaconCells.Length == 0) return;
+
+    // v4.6: snapshot before drawing — REPAIR may delete/rebuild
+    // g_hBeaconCells between redraw ticks (see Guide_RepairBlocked).
+    ArrayList snapshot = g_hBeaconCells.Clone();
     for (int i = 0; i < snapshot.Length && drawn < budget; i++)
     {
         float pos[3];
