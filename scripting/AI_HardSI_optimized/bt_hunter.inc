@@ -214,6 +214,30 @@ BT_Status HunterAct_CrouchApproach(int client) {
 }
 
 // ============================================================================
+// v4.0: 高位扑概率 —— 地空协同 (mode 2) 时 65%，其他模式 35%。
+// 地空协同的战术 = Hunter 高空压制 + Charger 地面跟进，高位扑是核心。
+// ============================================================================
+
+BT_Status HunterCond_HighPounceChance(int client) {
+    float prob = (SI_GetActiveMode() == 2) ? 0.65 : 0.35;
+    return (GetRandomFloat(0.0, 1.0) < prob) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// ============================================================================
+// v3.5: Wide Gaussian angle offset — larger spread for open-terrain pounces.
+// Uses sum-of-3-uniforms to approximate Gaussian with ~25° std dev (vs 15° standard).
+// ============================================================================
+
+BT_Status HunterAct_WideGaussOffset(int client) {
+    float ang[3];
+    GetClientEyeAngles(client, ang);
+    float offset = (GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0)) * 25.0;
+    ang[1] += offset;
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    return BT_SUCCESS;
+}
+
+// ============================================================================
 // Tree builder
 // ============================================================================
 
@@ -240,7 +264,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateCondition(CND_IsDucking),
         BT_CreateCondition(HunterCond_HasHighGround),
         BT_CreateSequence(2,
-            BT_CreateRandomChance(0.35),
+            BT_CreateCondition(HunterCond_HighPounceChance),  // v4.0: mode 2 → 65%
             BT_CreateAction(HunterAct_ClimbHighGround)
         )
     );
@@ -262,19 +286,49 @@ stock int BT_CreateHunterTree() {
     );
     BT_AddChild(narrowPounceSeq, narrowAttackSeq);
 
-    // Open area: flank approach → get off-angle for unpredictable pounce
-    int openApproachSeq = BT_CreateSequence(4,
+    // ==========================================
+    // v3.5: Open terrain — 3-way random pounce strategies
+    // ==========================================
+    // Strategy roll
+    int openStrategyRoll = BT_CreateSequence(2,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateRollStrategy(3)
+    );
+    // Strategy 0: Wide flank pounce — wider Gaussian spread (±25°, harder to dodge)
+    int openStrat0_WidePounce = BT_CreateSequence(7,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateStrategyIs(0),
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(fPounceRange),
+        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
+    );
+    int widePounceAttack = BT_CreateSequence(3,
+        BT_CreateAction(ACT_SnapAimToTarget),
+        BT_CreateAction(HunterAct_WideGaussOffset),
+        BT_CreateAction(ACT_QueueLunge)
+    );
+    BT_AddChild(openStrat0_WidePounce, widePounceAttack);
+
+    // Strategy 1: Erratic pounce — standard Gauss offset + unpredictable approach
+    int openStrat1_ErraticPounce = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea),
-        BT_CreateInverter(BT_CreateIsInRange(500.0))  // keep distance while flanking
+        BT_CreateStrategyIs(1),
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_IsDucking),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(fPounceRange),
+        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
     );
-    int openFlankAction = BT_CreateSequence(3,
-        BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateAction(ACT_Crouch),             // duck first (before RUNNING blocks it)
-        BT_CreateAction(ACT_FlankApproach)       // 60° offset approach (RUNNING, last)
+    int erraticPounceAttack = BT_CreateSequence(3,
+        BT_CreateAction(ACT_SnapAimToTarget),
+        BT_CreateAction(ACT_GaussianAimOffset),
+        BT_CreateAction(ACT_QueueLunge)
     );
-    BT_AddChild(openApproachSeq, openFlankAction);
+    BT_AddChild(openStrat1_ErraticPounce, erraticPounceAttack);
+
+    // Strategy 2: Standard pounce — falls through to fastPounceSeq below
 
     // Semi-open / one wall: hug wall for cover while approaching
     int semiApproachSeq = BT_CreateSequence(4,
@@ -331,10 +385,12 @@ stock int BT_CreateHunterTree() {
     // Replaces the old approachFull which forced crouch BEFORE running.
     // Crouching cuts movement speed by ~50%, making Hunter crawl slowly.
     // This branch only fires when: OnGround + NOT ducking + > pounce range.
+    // v4.0: +150u hysteresis —— 进入扑击范围后不会在边界处 sprint↔crouch 反复横跳。
+    //       只有退到 fPounceRange+150 之外才重新冲刺，保证一次冲到底。
     int sprintApproachSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_OnGround),
         BT_CreateInverter(BT_CreateCondition(CND_IsDucking)),
-        BT_CreateInverter(BT_CreateIsInRange(fPounceRange)),
+        BT_CreateInverter(BT_CreateIsInRange(fPounceRange + 150.0)),
         BT_CreateSequence(2,
             BT_CreateAction(ACT_AcquireClosestTarget),
             BT_CreateAction(HunterAct_SprintApproach)
@@ -365,6 +421,27 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(HunterAct_CrouchApproach)
     );
 
+    // ==========================================
+    // v4.0: 分散扑（猎手集群 mode 4 / 巨兽协同 mode 6）
+    // 用协同分配目标（防 dogpile）：多 Hunter 扑不同目标。
+    // mode 4: 猎手集群的核心 —— 数量优势靠分散角度打出
+    // mode 6: 巨兽协同 —— 全员分散控制，减轻 Tank 被集火压力
+    // ==========================================
+    int coordPounceSeq = BT_CreateSequence(6,
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_IsDucking),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(fPounceRange),
+        BT_CreateIsModeAny(4, 6),
+        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
+    );
+    int coordPounceAttack = BT_CreateSequence(3,
+        BT_CreateAction(ACT_AcquireCoordTarget),
+        BT_CreateAction(ACT_SnapAimToTarget),
+        BT_CreateAction(ACT_QueueLunge)
+    );
+    BT_AddChild(coordPounceSeq, coordPounceAttack);
+
     int wander = BT_CreateAction(ACT_Wander);
 
     // --- Build main tree ---
@@ -372,11 +449,14 @@ stock int BT_CreateHunterTree() {
     BT_AddChild(fastPounceSeq, cooldownAttack);
     BT_AddChild(fastPounceSeq, signalCoord);
 
-    // Root selector — priority order:
+    // Root selector — priority order (v3.5):
     //   1. Escape after miss (safety first)
     //   2. High-ground positioning (tactical advantage)
     //   3. Narrow corridor → straight pounce
-    //   4. Open area → flank approach
+    //   4a. Open area → roll strategy token
+    //   4b. Open + strat0 → wide flank pounce (±25° Gauss)
+    //   4c. Open + strat1 → erratic pounce (standard ±15° Gauss)
+    //   4d. Open + strat2 → falls through to standard fast pounce
     //   5. Semi open → hug wall approach
     //   6. Close range (≤200) → direct pounce (no Gauss, faster) [v3.3]
     //   7. Standard fast pounce (ducking + LOS + inRange → pounce with Gauss)
@@ -390,17 +470,21 @@ stock int BT_CreateHunterTree() {
     //   Tick N+1: Entered pounce range → branch 8 (crouchPrep) fires, presses DUCK
     //   Tick N+2: FL_DUCKING set → branch 7 (fastPounce) fires, POUNCES!
     int root = BT_Create(BTN_SELECTOR);
-    BT_AddChild(root, missEscSeq);         // 1. escape after miss
-    BT_AddChild(root, highPounceSeq);      // 2. high-ground positioning
-    BT_AddChild(root, narrowPounceSeq);    // 3. v3.2: narrow → straight pounce
-    BT_AddChild(root, openApproachSeq);    // 4. v3.2: open → flank approach
-    BT_AddChild(root, semiApproachSeq);    // 5. v3.2: semi → hug wall
-    BT_AddChild(root, closePounceSeq);     // 6. v3.3: close-range direct pounce
-    BT_AddChild(root, fastPounceSeq);      // 7. standard fast pounce (Gauss angle)
-    BT_AddChild(root, crouchPrepSeq);      // 8. v3.3: inRange + noDuck → crouch
-    BT_AddChild(root, sprintApproachSeq);   // 9. v3.3: far away → SPRINT full speed
-    BT_AddChild(root, crouchApproachSeq);  // 10. v3.3: inRange + ducking + noLOS → strafe+forward
-    BT_AddChild(root, wander);             // 11. last resort
+    BT_AddChild(root, missEscSeq);              // 1. escape after miss
+    BT_AddChild(root, highPounceSeq);           // 2. high-ground positioning
+    BT_AddChild(root, narrowPounceSeq);         // 3. v3.2: narrow → straight pounce
+    BT_AddChild(root, coordPounceSeq);          // 3.5. v4.0: mode 4/6 分散扑（防 dogpile）
+    BT_AddChild(root, openStrategyRoll);        // 4a. v3.5: open → roll token
+    BT_AddChild(root, openStrat0_WidePounce);   // 4b. v3.5: open strat0 → wide pounce
+    BT_AddChild(root, openStrat1_ErraticPounce);// 4c. v3.5: open strat1 → erratic pounce
+    // 4d: open strat2 → falls through to fastPounceSeq
+    BT_AddChild(root, semiApproachSeq);         // 5. v3.2: semi → hug wall
+    BT_AddChild(root, closePounceSeq);          // 6. v3.3: close-range direct pounce
+    BT_AddChild(root, fastPounceSeq);           // 7. standard fast pounce (Gauss angle)
+    BT_AddChild(root, crouchPrepSeq);           // 8. v3.3: inRange + noDuck → crouch
+    BT_AddChild(root, sprintApproachSeq);       // 9. v3.3: far away → SPRINT full speed
+    BT_AddChild(root, crouchApproachSeq);       // 10. v3.3: inRange + ducking + noLOS → strafe+forward
+    BT_AddChild(root, wander);                  // 11. last resort
 
     return root;
 }

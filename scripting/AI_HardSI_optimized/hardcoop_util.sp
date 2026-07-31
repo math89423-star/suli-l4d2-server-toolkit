@@ -535,24 +535,66 @@ float g_fSIWindowEndTime;
 bool g_bSIBoomerHit;
 float g_fSIBoomerHitExpire;
 
+// v4.0: 语义化集火信号 —— 某 SI 刚 pin 住人时广播目标，队友据此集火
+int g_iSIPinTarget;              // 当前被 pin 的集火目标 (survivor index)
+float g_fSIPinTargetExpire;      // 集火目标过期时刻 (3s)
+bool g_bSIPreviouslyPinning[MAXPLAYERS+1];  // 上一轮是否处于 pin 状态（边沿检测）
+
+// v4.0: 战术模式（si_composition_manager 写入 si_comp_active_mode）
+// 0-5 = 6 种普通模式, 6 = Tank 巨兽协同, -1 = 未激活/未知
+int g_iActiveMode = -1;
+
 new Handle:g_hCvarCoordEnable;
 new Handle:g_hCvarCoordWindow;
 new Handle:g_hCvarTerrainEnable;  // v3.2: terrain detection toggle
+new Handle:g_hCvarActiveMode;     // v4.0: tactical mode from si_composition_manager
 
 stock SI_UpdateCoordination() {
 	g_bSIBoomerHit = (g_fSIBoomerHitExpire > 0.0 && GetGameTime() < g_fSIBoomerHitExpire);
+
+	// v4.0: 战术模式读取（si_composition_manager 写入，1s 粒度足够）
+	// 加载时序兜底：AI_HardSI 比 si_composition_manager 先加载时，
+	// OnPluginStart 的 FindConVar 拿不到句柄 —— 这里每秒重试一次。
+	if (g_hCvarActiveMode == INVALID_HANDLE) {
+		g_hCvarActiveMode = FindConVar("si_comp_active_mode");
+	}
+	if (g_hCvarActiveMode != INVALID_HANDLE) {
+		g_iActiveMode = GetConVarInt(g_hCvarActiveMode);
+	}
+
+	new Float:window = (g_hCvarCoordWindow != INVALID_HANDLE) ?
+		GetConVarFloat(g_hCvarCoordWindow) : 5.5;
+
+	// v4.0: 集结计数 —— 距离生还者 < 900 且未 pin 的 SI 数量
+	new rallyCount = 0;
 
 	for (new client = 1; client <= MaxClients; client++) {
 		if (!IsBotInfected(client) || !IsPlayerAlive(client)) {
 			g_iSIAttackState[client] = SI_IDLE;
 			g_iSIAttackTarget[client] = -1;
+			g_bSIPreviouslyPinning[client] = false;
 			continue;
 		}
 		if (IsPinningASurvivor(client)) {
+			// v4.0: pin 边沿检测 —— 刚进入 pin 状态的瞬间广播集火目标
+			if (!g_bSIPreviouslyPinning[client]) {
+				new victim = GetEntPropEnt(client, Prop_Send, "m_tongueVictim");
+				if (victim <= 0) victim = GetEntPropEnt(client, Prop_Send, "m_pounceVictim");
+				if (victim <= 0) victim = GetEntPropEnt(client, Prop_Send, "m_carryVictim");
+				if (victim <= 0) victim = GetEntPropEnt(client, Prop_Send, "m_pummelVictim");
+				if (victim <= 0) victim = GetEntPropEnt(client, Prop_Send, "m_jockeyVictim");
+				if (IsSurvivor(victim) && IsPlayerAlive(victim)) {
+					g_iSIPinTarget = victim;
+					g_fSIPinTargetExpire = GetGameTime() + 3.0;
+					g_fSIWindowEndTime = GetGameTime() + window;
+				}
+			}
+			g_bSIPreviouslyPinning[client] = true;
 			g_iSIAttackState[client] = SI_COMMITTED;
 			g_iSIAttackTarget[client] = GetClientAimTarget(client);
 			g_fSILastAttackTime[client] = GetGameTime();
 		} else {
+			g_bSIPreviouslyPinning[client] = false;
 			new Float:sinceAttack = (g_fSILastAttackTime[client] > 0.0) ?
 				GetGameTime() - g_fSILastAttackTime[client] : 999.0;
 			if (sinceAttack < 3.0) {
@@ -562,15 +604,26 @@ stock SI_UpdateCoordination() {
 				g_iSIAttackState[client] = (IsSurvivor(target)) ? SI_APPROACHING : SI_IDLE;
 				g_iSIAttackTarget[client] = target;
 			}
+			// v4.0: 集结计数
+			if (g_iSIAttackState[client] >= SI_APPROACHING) {
+				new Float:siPos[3];
+				GetClientAbsOrigin(client, siPos);
+				if (GetSurvivorProximity(siPos) < 900) {
+					rallyCount++;
+				}
+			}
 		}
 	}
-	for (new client = 1; client <= MaxClients; client++) {
-		if (g_iSIAttackState[client] == SI_COMMITTED) {
-			new Float:window = (g_hCvarCoordWindow != INVALID_HANDLE) ?
-				GetConVarFloat(g_hCvarCoordWindow) : 3.0;
-			g_fSIWindowEndTime = GetGameTime() + window;
-			break;
-		}
+
+	// v4.0: 集结进攻 —— 3+ SI 已到位且无窗口时，主动开攻击窗口
+	if (g_fSIWindowEndTime > 0.0 && GetGameTime() >= g_fSIWindowEndTime && rallyCount >= 3) {
+		g_fSIWindowEndTime = GetGameTime() + window;
+	}
+
+	// 集火目标过期清理
+	if (g_fSIPinTargetExpire > 0.0 && GetGameTime() > g_fSIPinTargetExpire) {
+		g_iSIPinTarget = -1;
+		g_fSIPinTargetExpire = 0.0;
 	}
 }
 
@@ -620,6 +673,17 @@ stock SI_SignalBoomerHit() {
 }
 
 stock SI_GetCoordinatedTarget(si, preferClass = -1) {
+	// v4.0: 攻击窗口内优先集火被 pin 目标（拉→骑→吐 连锁的核心）。
+	// 分散型模式除外：
+	//   mode 4 (猎手集群) —— 多 Hunter 必须分散扑不同目标，不 dogpile
+	//   mode 6 (巨兽协同) —— Tank 已锁定一个目标，其他 SI 分散控制更多
+	//                        生还者，减轻 Tank 被集火压力
+	//（下方 candidates 逻辑会排除已 pin 者，自然分散。）
+	if (SI_IsAttackWindow() && g_iActiveMode != 4 && g_iActiveMode != 6 && g_iSIPinTarget > 0
+		&& IsSurvivor(g_iSIPinTarget) && IsPlayerAlive(g_iSIPinTarget)) {
+		return g_iSIPinTarget;
+	}
+
 	new Float:siPos[3];
 	GetClientAbsOrigin(si, siPos);
 
@@ -689,6 +753,20 @@ stock SI_GetCoordinatedTarget(si, preferClass = -1) {
 		}
 	}
 	return (bestTarget > 0) ? bestTarget : GetClosestSurvivor(siPos);
+}
+
+// v4.0: 当前有效集火目标（pin 广播），过期/无效返回 -1
+stock SI_GetPinTarget() {
+	if (g_fSIPinTargetExpire > 0.0 && GetGameTime() < g_fSIPinTargetExpire
+		&& g_iSIPinTarget > 0 && IsSurvivor(g_iSIPinTarget) && IsPlayerAlive(g_iSIPinTarget)) {
+		return g_iSIPinTarget;
+	}
+	return -1;
+}
+
+// v4.0: 当前战术模式（0-5 普通, 6 Tank, -1 未知）
+stock int SI_GetActiveMode() {
+	return g_iActiveMode;
 }
 
 stock SI_SignalAttack(si) {

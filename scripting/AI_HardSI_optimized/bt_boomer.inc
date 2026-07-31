@@ -117,6 +117,31 @@ BT_Status BoomerAct_Vomit(int client) {
 // ============================================================================
 
 stock int BT_CreateBoomerTree() {
+    // ==========================================
+    // v4.0: 伏击等待 —— narrow 地形不冲脸，原地隐藏等目标进 300u 再吐。
+    // 真人 Boomer 会提前预判队伍行进路线，藏在必经之路上。
+    // 目标 < 300u 时本分支 FAIL → 落到 narrowHoldVomit/vomitSeq 吐。
+    // ==========================================
+    int ambushSeq = BT_CreateSequence(4,
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateIsNotInRange(300.0),
+        BT_CreateAction(ACT_AmbushHold)
+    );
+
+    // ==========================================
+    // v4.0: 暗影锁链 (mode 1) —— 吐被拉的人（解救时全家被喷）
+    // Smoker 拉中 → 窗口 → Boomer 吐被拉者：救他的人挤成一团全被喷
+    // ==========================================
+    int mode1Vomit = BT_CreateSequence(5,
+        BT_CreateIsMode(1),
+        BT_CreateCondition(CND_IsAttackWindow),
+        BT_CreateAction(ACT_AcquirePinTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(350.0),
+        BT_CreateAction(BoomerAct_Vomit)
+    );
+
     // --- v3.2: Terrain-aware vomit strategies ---
     // Narrow corridor: hold chokepoint → vomit to cover entire passage
     int narrowHoldVomit = BT_CreateSequence(6,
@@ -130,19 +155,39 @@ stock int BT_CreateBoomerTree() {
 
     // v3.2 FIX: Split into approach + vomit branches.
     // Previously FlankApproach(RUNNING) blocked BoomerAct_Vomit in the sequence.
-    // Open area: flank approach while far from target
-    int openFlankApproach = BT_CreateSequence(4,
+    // ==========================================
+    // v3.5: Open terrain — 2-way random + extended range (550u)
+    // ==========================================
+    int openStrategyRoll = BT_CreateSequence(2,
         BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateRollStrategy(2)
+    );
+    // Strat 0: Flank vomit — circle around → vomit from side
+    int openS0_Approach = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateInverter(BT_CreateIsInRange(400.0)),
+        BT_CreateIsNotInRange(550.0),
         BT_CreateAction(ACT_FlankApproach)
     );
-    // Open area: vomit when in range
-    int openFlankVomit = BT_CreateSequence(5,
-        BT_CreateCondition(CND_IsOpenArea),
+    int openS0_Vomit = BT_CreateSequence(6,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(400.0),
+        BT_CreateIsInRange(550.0),
+        BT_CreateAction(BoomerAct_Vomit)
+    );
+    // Strat 1: Erratic vomit — zigzag approach → vomit from varied angle
+    int openS1_Approach = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateIsNotInRange(500.0),
+        BT_CreateAction(ACT_ErraticApproach)
+    );
+    int openS1_Vomit = BT_CreateSequence(6,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(500.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -196,17 +241,21 @@ stock int BT_CreateBoomerTree() {
         BT_CreateAction(BoomerAct_FlankApproach)
     );
 
-    // Root selector — terrain branches (2-4) fail when disabled/unknown
-    // → falls through to standard vomit (5) and approach (6-7).
+    // Root selector — terrain branches fail when disabled → fallback to standard.
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, postVomitSeq);
+    BT_AddChild(root, ambushSeq);          // 1.5. v4.0: narrow → 伏击等待
+    BT_AddChild(root, mode1Vomit);         // 1.5. v4.0: mode 1 → 吐被拉者
     BT_AddChild(root, narrowHoldVomit);    // 2. v3.2: narrow → block + vomit
-    BT_AddChild(root, openFlankVomit);     // 3. v3.2: open → vomit
-    BT_AddChild(root, openFlankApproach);  // 3b. v3.2: open → flank approach (when far)
-    BT_AddChild(root, semiHugVomit);       // 4. v3.2: semi → vomit
-    BT_AddChild(root, semiHugApproach);    // 4b. v3.2: semi → hug wall approach (when far)
-    BT_AddChild(root, vomitSeq);           // 5. ← FALLBACK: standard vomit
-    BT_AddChild(root, approachSeq);        // 6. ← FALLBACK: approach
+    BT_AddChild(root, openStrategyRoll);   // 3a. v3.5: open → roll token
+    BT_AddChild(root, openS0_Vomit);       // 3b. v3.5: open strat0 → flank vomit
+    BT_AddChild(root, openS0_Approach);    // 3c. v3.5: open strat0 → flank approach
+    BT_AddChild(root, openS1_Vomit);       // 4a. v3.5: open strat1 → erratic vomit
+    BT_AddChild(root, openS1_Approach);    // 4b. v3.5: open strat1 → erratic approach
+    BT_AddChild(root, semiHugVomit);       // 5. v3.2: semi → vomit
+    BT_AddChild(root, semiHugApproach);    // 5b. v3.2: semi → hug wall
+    BT_AddChild(root, vomitSeq);           // 6. ← FALLBACK: standard vomit
+    BT_AddChild(root, approachSeq);        // 7. ← FALLBACK: approach
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
 
     return root;

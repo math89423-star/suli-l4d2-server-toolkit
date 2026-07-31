@@ -30,6 +30,28 @@ BT_Status ChargerAct_BlockCharge(int client) {
     return BT_RUNNING;
 }
 
+// v4.0: 酸液配合 —— 找站在 Spitter 酸液里的生还者作为冲撞目标。
+// Charger × Spitter 经典组合：把人撞倒在酸里 → 掉血 + 队友救人要趟酸 → 快速减员。
+// 被撞中后 pin 广播会触发 Spitter 吐被撞者（spitOnPinned 分支），形成闭环。
+BT_Status ChargerAct_AcquireAcidTarget(int client) {
+    int acid = -1;
+    float acidPos[3];
+    while ((acid = FindEntityByClassname(acid, "spit_acid")) != INVALID_ENT_REFERENCE) {
+        GetEntPropVector(acid, Prop_Send, "m_vecOrigin", acidPos);
+        for (int i = 1; i <= MaxClients; i++) {
+            if (!IsSurvivor(i) || !IsPlayerAlive(i)) continue;
+            if (IsPinned(i) || IsIncapacitated(i)) continue;
+            float p[3];
+            GetClientAbsOrigin(i, p);
+            if (GetVectorDistance(p, acidPos) < 200.0) {
+                BB_SetInt(client, "target", i);
+                return BT_SUCCESS;
+            }
+        }
+    }
+    return BT_FAILURE;
+}
+
 // v3.8: Aim at blackboard target before charging.
 // Fixes "charging into empty walls" — previously ChargerAct_Charge fired
 // IN_ATTACK+IN_FORWARD in whatever direction the previous BT branch left,
@@ -144,11 +166,12 @@ stock int BT_CreateChargerTree() {
         BT_CreateRollStrategy(3)
     );
     // Strat 0: Flank charge — circle around → charge from side
+    // v4.0: 大弧线绕后（CircleFlank）—— 120° 大圈绕到队伍侧后方再冲
     int openS0_Approach = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateIsNotInRange(600.0),
-        BT_CreateAction(ACT_FlankApproach)
+        BT_CreateAction(ACT_CircleFlank)
     );
     int openS0_Charge = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
@@ -198,9 +221,38 @@ stock int BT_CreateChargerTree() {
     );
 
     // Coordination attack
+    // v4.0: 目标由 SI_GetCoordinatedTarget 决定 ——
+    //   集火模式（0/1/2/3/5）：窗口内优先冲被 pin 者（队友锁住的人必中）
+    //   分散模式（4/6）：冲未受控目标（Tank 模式下冲别的目标减轻 Tank 压力）
     int coordSeq = BT_CreateSequence(3,
         BT_CreateCondition(CND_IsAttackWindow),
         BT_CreateAction(ACT_SnapAimToCoordTarget),
+        BT_CreateAction(ChargerAct_Charge)
+    );
+
+    // ==========================================
+    // v4.0: 钢铁洪流 (mode 0) —— 正面直冲，更远距离开冲。
+    // 洪流的战术 = 近战 SI 一波涌入：Charger 是开路先锋，
+    // 900u 直接冲（比默认 750 更凶），冲散阵型后 Hunter/Jockey 跟进。
+    // ==========================================
+    int mode0Charge = BT_CreateSequence(6,
+        BT_CreateIsMode(0),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(900.0),
+        BT_CreateAction(ChargerAct_AimAtTarget),
+        BT_CreateAction(ChargerAct_Charge)
+    );
+
+    // ==========================================
+    // v4.0: 酸液配合 —— 冲站在 Spitter 酸液里的生还者（任何模式生效）
+    // Charger × Spitter 经典组合：撞进酸里锁住 → 掉血 + 救人趟酸 → 快速减员
+    // ==========================================
+    int acidCharge = BT_CreateSequence(5,
+        BT_CreateAction(ChargerAct_AcquireAcidTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(fChargeProx),
+        BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
 
@@ -265,17 +317,21 @@ stock int BT_CreateChargerTree() {
     BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor)); // 1
     BT_AddChild(root, stepBackCharge);         // 2. v3.7: too close → step back + charge
     BT_AddChild(root, blindCharge);            // 3. v3.7: no LOS + close → 30% blind charge
-    BT_AddChild(root, ledgeChargeSeq);         // 4. v3.2: ledge → charge
-    BT_AddChild(root, narrowChargeSeq);        // 5. v3.2: narrow → charge
-    BT_AddChild(root, narrowHoldSeq);          // 6. v3.2: narrow → hold
-    BT_AddChild(root, openStrategyRoll);        // 7a. v3.5: open → roll token
-    BT_AddChild(root, openS0_Charge);           // 7b. v3.5: open strat0 → flank charge
-    BT_AddChild(root, openS0_Approach);         // 7c. v3.5: open strat0 → flank approach
-    BT_AddChild(root, openS1_Charge);           // 8a. v3.5: open strat1 → erratic charge
-    BT_AddChild(root, openS1_Approach);         // 8b. v3.5: open strat1 → erratic approach
-    // 8c: open strat2 → falls through to defaultChargeSeq
-    BT_AddChild(root, lowHpSeq);                // 9. ← FALLBACK: low HP charge
-    BT_AddChild(root, coordSeq);                // 10. ← FALLBACK: coordination
+    BT_AddChild(root, mode0Charge);            // 3.5. v4.0: mode 0 → 900u 正面直冲
+    // v4.0: coordSeq 从第 10 位前置到第 4 位 ——
+    // 队友 pin 住人时立刻冲（窗口 = pin 广播），不再被地形分支挡住
+    BT_AddChild(root, coordSeq);               // 4. ← v4.0 前置: coordination 冲被 pin 者
+    BT_AddChild(root, acidCharge);             // 4.5. v4.0: 冲酸液里的人（Charger×Spitter 配合）
+    BT_AddChild(root, ledgeChargeSeq);         // 5. v3.2: ledge → charge
+    BT_AddChild(root, narrowChargeSeq);        // 6. v3.2: narrow → charge
+    BT_AddChild(root, narrowHoldSeq);          // 7. v3.2: narrow → hold
+    BT_AddChild(root, openStrategyRoll);        // 8a. v3.5: open → roll token
+    BT_AddChild(root, openS0_Charge);           // 8b. v3.5: open strat0 → flank charge
+    BT_AddChild(root, openS0_Approach);         // 8c. v3.5: open strat0 → flank approach
+    BT_AddChild(root, openS1_Charge);           // 9a. v3.5: open strat1 → erratic charge
+    BT_AddChild(root, openS1_Approach);         // 9b. v3.5: open strat1 → erratic approach
+    // 9c: open strat2 → falls through to defaultChargeSeq
+    BT_AddChild(root, lowHpSeq);                // 10. ← FALLBACK: low HP charge
     BT_AddChild(root, defaultChargeSeq);        // 11. ← FALLBACK: default charge (prox=750)
     BT_AddChild(root, noLosApproach);           // 12. ← FALLBACK: in-range no-LOS approach
     BT_AddChild(root, approachSeq);             // 13. ← FALLBACK: approach from far

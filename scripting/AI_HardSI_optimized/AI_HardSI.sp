@@ -1,9 +1,12 @@
 // ============================================================================
-// AI_HardSI.sp — L4D2 Special Infected AI (Behavior Tree v3.4)
+// AI_HardSI.sp — L4D2 Special Infected AI (Behavior Tree v3.7)
 // ============================================================================
 // Original v2.4 by Breezy — flat if-then-else per-SI logic.
 // v3.0 refactored with composable Behavior Tree framework for hierarchical,
 // reactive, and maintainable AI decision-making.
+// v3.5: Randomized open-terrain strategies per SI type
+// v3.6: Anti-melee for control SI — ability-first, melee as valid fallback
+// v3.7: Audit fixes — RandomChance thrashing, dead code, missing range checks
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -42,10 +45,10 @@
 // ============================================================================
 
 public Plugin:myinfo = {
-    name = "AI: Hard SI (Behavior Tree v3.4)",
+    name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "3.4",
+    version = "3.7",
     url = "github.com/breezyplease"
 };
 
@@ -94,7 +97,7 @@ public OnPluginStart() {
     g_hCvarCoordEnable = CreateConVar("ai_coordination_enable", "1",
         "Enable SI coordination system: 0=OFF, 1=ON",
         FCVAR_NONE, true, 0.0, true, 1.0);
-    g_hCvarCoordWindow = CreateConVar("ai_coordination_window", "4.0",
+    g_hCvarCoordWindow = CreateConVar("ai_coordination_window", "5.5",
         "Duration (seconds) of the coordination attack window",
         FCVAR_NONE, true, 0.5, true, 10.0);
 
@@ -110,6 +113,9 @@ public OnPluginStart() {
 
     // Cache frequently-read cvars (avoid FindConVar per tick)
     g_hCvarTankAggroBhop = FindConVar("ai_tank_aggro_bhop");
+
+    // v4.0: 战术模式 cvar（由 si_composition_manager 写入；未安装时保持 -1，模式分支全部走默认行为）
+    g_hCvarActiveMode = FindConVar("si_comp_active_mode");
 
     // --- Build all Behavior Trees ---
     g_iBTHunterRoot  = BT_CreateHunterTree();

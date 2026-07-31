@@ -33,7 +33,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.3.5"
+#define PLUGIN_VERSION "2.3.6"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -137,6 +137,7 @@ ConVar g_cvModeIntervalMin;
 ConVar g_cvModeIntervalMax;
 ConVar g_cvAnnounce;
 ConVar g_cvWaveAnnounce;
+ConVar g_cvActiveMode;   // v2.4: 战术指令下发 —— AI_HardSI_bt 读取并执行模式配合
 
 // ============================================================================
 // Plugin Info
@@ -166,6 +167,8 @@ public void OnPluginStart()
     g_cvWaveAnnounce    = CreateConVar("si_comp_wave_announce",      "1",
         "Announce each spawn wave in chat with strategy + next wave timer (0=off, 1=on)",
         _, true, 0.0, true, 1.0);
+    g_cvActiveMode      = CreateConVar("si_comp_active_mode",        "-1",
+        "Current tactical mode published to AI_HardSI_bt (0-5 regular, 6 Tank). -1 = inactive. Do NOT set manually.");
 
     AutoExecConfig(true, "si_composition_manager");
 
@@ -306,6 +309,7 @@ public void OnMapStart()
     g_iCurrentMode = GetRandomInt(0, SCM_MODE_COUNT - 1);
     g_bTankOverride = false;
     g_bTankAlive = false;
+    PublishMode();      // v2.4: 战术指令下发（换图后 AI_HardSI 读到新模式）
     ResetTracking();
 
     // Start mode rotation timer
@@ -331,12 +335,16 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
     g_bTankOverride = false;
     g_bTankAlive = false;
+    PublishMode();      // v2.4: 新回合下发当前模式
     ResetTracking();
 }
 
 public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 {
-    delete g_hModeTimer;
+    if (g_hModeTimer != null) {
+        KillTimer(g_hModeTimer);
+        g_hModeTimer = null;
+    }
     g_bTankOverride = false;
     g_bTankAlive = false;
     ResetTracking();
@@ -386,6 +394,10 @@ void ScheduleNextModeRotation()
 
 public Action Timer_RotateMode(Handle timer)
 {
+    // One-shot timer has fired — engine already closed the handle.
+    // Null it so ScheduleNextModeRotation's `delete g_hModeTimer` is a safe no-op.
+    g_hModeTimer = null;
+
     if (!g_cvEnable.BoolValue || g_bTankOverride) {
         // If Tank override is active, postpone rotation
         ScheduleNextModeRotation();
@@ -407,6 +419,7 @@ void RotateMode()
 
     int oldMode = g_iCurrentMode;
     g_iCurrentMode = newMode;
+    PublishMode();      // v2.4: 下发战术指令
 
     if (g_cvAnnounce.BoolValue) {
         PrintToChatAll("\x04[SI组合]\x01 进攻模式切换: \x03%s\x01 → \x05%s",
@@ -414,6 +427,17 @@ void RotateMode()
     }
 
     LogMessage("[SCM] Mode rotated: %s → %s", g_sModeNames[oldMode], g_sModeNames[newMode]);
+}
+
+// ============================================================================
+// v2.4: 战术指令下发 —— 写入 si_comp_active_mode 供 AI_HardSI_bt 读取。
+// 行为树据此切换模式配合分支：0-5 普通模式，6 = Tank 巨兽协同。
+// ============================================================================
+void PublishMode()
+{
+    if (g_cvActiveMode != null) {
+        g_cvActiveMode.SetInt(g_bTankOverride ? 6 : g_iCurrentMode);
+    }
 }
 
 // ============================================================================
@@ -426,6 +450,7 @@ void OnTankSpawned()
         if (!g_bTankOverride) {
             g_iSavedMode = g_iCurrentMode;
             g_bTankOverride = true;
+            PublishMode();      // v2.4: 下发 6 = 巨兽协同
             LogMessage("[SCM] Tank detected — switching to 巨兽协同 (was %s)", g_sModeNames[g_iSavedMode]);
             if (g_cvAnnounce.BoolValue) {
                 PrintToChatAll("\x04[SI组合]\x01 Tank 出现 — 切换至 \x05巨兽协同\x01 模式 (不刷Smoker/Boomer)");
@@ -453,6 +478,7 @@ void OnTankDied()
         if (g_bTankOverride) {
             g_iCurrentMode = g_iSavedMode;
             g_bTankOverride = false;
+            PublishMode();      // v2.4: 恢复普通模式
             LogMessage("[SCM] Tank dead — restoring mode %s", g_sModeNames[g_iCurrentMode]);
             if (g_cvAnnounce.BoolValue) {
                 PrintToChatAll("\x04[SI组合]\x01 Tank 已死 — 恢复 \x05%s\x01 模式", g_sModeNames[g_iCurrentMode]);

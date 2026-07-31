@@ -260,17 +260,30 @@ BT_Status ACT_AcquireClosestTarget(int client) {
 // Parameterized actions
 // ---------------------------------------------------------------------------
 
-// Random lateral strafe. UserParam1 = interval (seconds between direction changes).
+// Random lateral strafe while facing the blackboard target.
+// UserParam1 = interval (seconds between direction changes).
+// v3.7 FIX: Now faces BB target — previously strafed blindly in whatever
+// direction the SI was facing, often away from survivors.
 BT_Status ACT_StrafeRandom(int client) {
+    // Face the blackboard target while strafing
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+
     float now = GetGameTime();
-    // Check if it's time to switch direction
     float nextSwitch = BB_GetFloat(client, "_strafe_next");
     if (nextSwitch <= 0.0 || now >= nextSwitch) {
         bool goLeft = (GetRandomInt(0, 1) == 0);
         BB_SetBool(client, "_strafe_left", goLeft);
         int nodeId = g_iBTCurrentTickNode;
         float interval = g_fBTNodeUserParam1[nodeId];
-        if (interval <= 0.0) interval = 0.5;  // default 0.5s
+        if (interval <= 0.0) interval = 0.5;
         BB_SetFloat(client, "_strafe_next", now + GetRandomFloat(interval * 0.5, interval * 1.5));
     }
     if (BB_GetBool(client, "_strafe_left", false)) {
@@ -766,6 +779,238 @@ BT_Status ACT_HoldChokepoint(int client) {
     // Don't move forward — just face the target and hold position
     // (Tank will punch, Boomer will vomit, etc.)
     return BT_SUCCESS;
+}
+
+// ============================================================================
+// v3.6: ANTI-MELEE INFRASTRUCTURE
+// ============================================================================
+// In L4D2, control abilities (tongue/charge/leap) and melee attacks share the
+// same IN_ATTACK button. When the engine decides the ability isn't ready
+// (cooldown, angle, range), pressing IN_ATTACK triggers a melee scratch instead.
+// This is deadly for control SI — a Smoker scratching at close range is worse
+// than a Smoker repositioning for a tongue grab.
+//
+// Fix: provide "hold and wait" behaviors that keep the BT selector occupied
+// without pressing IN_ATTACK, preventing the engine default melee takeover.
+
+// Hold position: face the blackboard target, don't move or attack.
+// Keeps the selector occupied (returns RUNNING) so the engine default AI
+// never takes over. Control SI use this as last resort instead of Wander.
+BT_Status ACT_HoldPosition(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+    // NO movement buttons — just face target and wait for ability cooldown
+    return BT_RUNNING;
+}
+
+// ============================================================================
+// v3.5: STRATEGY TOKEN SYSTEM
+// ============================================================================
+// Enables random strategy selection within the same terrain type.
+// A "strategy token" is a persistent random integer stored in the blackboard
+// that determines which of N strategies the SI pursues. The token is re-rolled
+// every 10 seconds, creating unpredictable behavior variety.
+//
+// Usage pattern in BT selectors:
+//   Selector:
+//     Sequence(IsOpenArea, RollStrategy(3))       // roll token (consumes 1 tick)
+//     Sequence(IsOpenArea, StrategyIs(0), ...)    // token=0 → strategy A
+//     Sequence(IsOpenArea, StrategyIs(1), ...)    // token=1 → strategy B
+//     Sequence(IsOpenArea, StrategyIs(2), ...)    // token=2 → strategy C
+//     ... fallback ...
+// ============================================================================
+
+#define STRATEGY_TOKEN_TTL 10.0   // seconds before re-roll
+
+// Condition: check if the blackboard strategy token matches the expected index.
+// UserParam1 = expected strategy index (0, 1, 2, ...)
+BT_Status CND_StrategyIs(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    int expectedIdx = RoundToNearest(g_fBTNodeUserParam1[nodeId]);
+    int currentIdx = BB_GetInt(client, "_strategy_idx", -1);
+    return (currentIdx == expectedIdx) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// Action: roll a new strategy token if stale or unset.
+// UserParam1 = number of strategies to choose from.
+// Returns SUCCESS on the tick the roll happens (so the selector is consumed
+// for one tick), then FAIL on subsequent ticks (so selector moves past to
+// the StrategyIs branches).
+BT_Status ACT_RollStrategy(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    int numStrategies = RoundToNearest(g_fBTNodeUserParam1[nodeId]);
+    if (numStrategies < 1) numStrategies = 1;
+
+    float now = GetGameTime();
+    float lastRoll = BB_GetFloat(client, "_strategy_time", 0.0);
+
+    // Token still fresh — skip (return FAIL so selector moves on)
+    if (lastRoll > 0.0 && (now - lastRoll) < STRATEGY_TOKEN_TTL) {
+        return BT_FAILURE;
+    }
+
+    // Roll new strategy
+    int roll = GetRandomInt(0, numStrategies - 1);
+    BB_SetInt(client, "_strategy_idx", roll);
+    BB_SetFloat(client, "_strategy_time", now);
+    return BT_SUCCESS;
+}
+
+// Factory: create a StrategyIs condition node
+stock int BT_CreateStrategyIs(int idx) {
+    int id = BT_Create(BTN_CONDITION);
+    g_hBTFunc[id] = CND_StrategyIs;
+    g_fBTNodeUserParam1[id] = float(idx);
+    return id;
+}
+
+// ============================================================================
+// v4.0: TACTICAL MODE SYSTEM
+// ============================================================================
+// si_composition_manager 每波/每模式切换时写入 si_comp_active_mode。
+// 行为树用 CND_IsMode(N) 感知当前战术模式，走对应配合分支。
+// 模式编号：0-5 = 6 种普通模式, 6 = Tank 巨兽协同, -1 = 未激活 → 分支全 FAIL，落回默认行为。
+
+// Condition: 当前战术模式 == expected (UserParam1)
+BT_Status CND_IsMode(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    int expected = RoundToNearest(g_fBTNodeUserParam1[nodeId]);
+    return (SI_GetActiveMode() == expected) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// Factory: create an IsMode condition node
+stock int BT_CreateIsMode(int mode) {
+    int id = BT_Create(BTN_CONDITION);
+    g_hBTFunc[id] = CND_IsMode;
+    g_fBTNodeUserParam1[id] = float(mode);
+    return id;
+}
+
+// Condition: 当前战术模式 ∈ {UserParam1, UserParam2} 之一（分散型模式共用分支）
+BT_Status CND_IsModeAny(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    int modeA = RoundToNearest(g_fBTNodeUserParam1[nodeId]);
+    int modeB = RoundToNearest(g_fBTNodeUserParam2[nodeId]);
+    int cur = SI_GetActiveMode();
+    return (cur == modeA || cur == modeB) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// Factory: create an IsModeAny condition node
+stock int BT_CreateIsModeAny(int modeA, int modeB) {
+    int id = BT_Create(BTN_CONDITION);
+    g_hBTFunc[id] = CND_IsModeAny;
+    g_fBTNodeUserParam1[id] = float(modeA);
+    g_fBTNodeUserParam2[id] = float(modeB);
+    return id;
+}
+
+// Action: 把当前集火目标（被 pin 者）设为黑板 target
+BT_Status ACT_AcquirePinTarget(int client) {
+    int pin = SI_GetPinTarget();
+    if (pin > 0 && IsSurvivor(pin) && IsPlayerAlive(pin)) {
+        BB_SetInt(client, "target", pin);
+        return BT_SUCCESS;
+    }
+    return BT_FAILURE;
+}
+
+// Action: 把协同分配目标（分散/防 dogpile）设为黑板 target
+BT_Status ACT_AcquireCoordTarget(int client) {
+    int target = SI_GetCoordinatedTarget(client);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        BB_SetInt(client, "target", target);
+        return BT_SUCCESS;
+    }
+    return BT_FAILURE;
+}
+
+// ============================================================================
+// v4.0: ACT_CircleFlank — 大弧线绕后包夹（开阔地）
+// ============================================================================
+// 与 ACT_FlankApproach（±60° 小幅侧移）不同，这是大弧线机动：
+// 以目标为中心走 120° 偏移的大圈，从目标视线外绕到侧后方。
+// 适用于开阔地 Hunter/Charger/Jockey 的包夹进攻 —— 生还者看到时已绕到位。
+// 接近到 350u 内后自动转小偏移（防止绕过头）。
+BT_Status ACT_CircleFlank(int client) {
+    // 切换弧线方向：每 2-3.5s 反转一次绕行方向
+    float now = GetGameTime();
+    float nextSwitch = BB_GetFloat(client, "_circle_next", 0.0);
+    bool circleRight = BB_GetBool(client, "_circle_right", false);
+    if (nextSwitch <= 0.0 || now >= nextSwitch) {
+        circleRight = !circleRight;
+        BB_SetBool(client, "_circle_right", circleRight);
+        BB_SetFloat(client, "_circle_next", now + GetRandomFloat(2.0, 3.5));
+    }
+
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        return BT_RUNNING;
+    }
+
+    float sPos[3], tPos[3], dir[3], ang[3];
+    GetClientAbsOrigin(client, sPos);
+    GetClientAbsOrigin(target, tPos);
+    MakeVectorFromPoints(sPos, tPos, dir);
+    GetVectorAngles(dir, ang);
+
+    // 距离远时大偏移绕后（120°），接近后收敛到 30° 直插
+    float dist = GetVectorDistance(sPos, tPos);
+    float offset = (dist > 600.0) ? 120.0 : 30.0;
+    ang[1] += circleRight ? offset : -offset;
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+
+    // 绕行时侧向移动强化弧线
+    if (circleRight) {
+        BT_AddButton(client, IN_MOVERIGHT);
+        BT_RemoveButton(client, IN_MOVELEFT);
+    } else {
+        BT_AddButton(client, IN_MOVELEFT);
+        BT_RemoveButton(client, IN_MOVERIGHT);
+    }
+    BT_AddButton(client, IN_FORWARD);
+    return BT_RUNNING;
+}
+
+// ============================================================================
+// v4.0: ACT_AmbushHold — 伏击等待（狭窄地/转角）
+// ============================================================================
+// 原地不动、面向目标方向，等待目标进入射程由上层 selector 切换到攻击分支。
+// 返回 RUNNING 保持姿态。Boomer 门后伏击、Smoker 走廊尽头等人都用它。
+BT_Status ACT_AmbushHold(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+    // 不按任何移动键 —— 完全静止，保持伪装
+    return BT_RUNNING;
+}
+
+// Factory: create a RollStrategy action node
+stock int BT_CreateRollStrategy(int numStrategies) {
+    int id = BT_Create(BTN_ACTION);
+    g_hBTFunc[id] = ACT_RollStrategy;
+    g_fBTNodeUserParam1[id] = float(numStrategies);
+    return id;
+}
+
+// Factory: NOT in range — condition that succeeds when distance > minDist.
+// Simpler than nesting Inverter+IsInRange for "not yet close enough" checks.
+stock int BT_CreateIsNotInRange(float minDist) {
+    int id = BT_Create(BTN_INVERTER);
+    BT_AddChild(id, BT_CreateIsInRange(minDist));
+    return id;
 }
 
 // ---------------------------------------------------------------------------

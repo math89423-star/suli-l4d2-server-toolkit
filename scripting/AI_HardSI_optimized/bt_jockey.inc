@@ -21,6 +21,73 @@
 
 
 
+// ============================================================================
+// v4.0: 骑乘 steering —— 骑上人后把人往远离队伍中心的方向带。
+// 引擎默认 Jockey 骑乘后漫无目的乱跑；真人 Jockey 会把人往队伍外/
+// 特感堆方向带，拉散阵型。骑乘时按 W + 朝向 = 被骑者被往那个方向拖。
+// ============================================================================
+
+BT_Status JockeyAct_SteerRide(int client) {
+    int victim = GetEntPropEnt(client, Prop_Send, "m_jockeyVictim");
+    if (victim <= 0) return BT_FAILURE;
+    if (!IsSurvivor(victim) || !IsPlayerAlive(victim)) return BT_FAILURE;
+
+    float vPos[3];
+    GetClientAbsOrigin(victim, vPos);
+
+    // 队伍中心（除 victim 外其他存活生还者平均位置）
+    float center[3];
+    int count = 0;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (IsSurvivor(i) && IsPlayerAlive(i) && i != victim) {
+            float p[3];
+            GetClientAbsOrigin(i, p);
+            center[0] += p[0];
+            center[1] += p[1];
+            center[2] += p[2];
+            count++;
+        }
+    }
+
+    float ang[3];
+    if (count > 0) {
+        center[0] /= float(count);
+        center[1] /= float(count);
+        // 方向 = victim → 队伍中心的**反方向**（远离队伍）
+        float dir[3];
+        MakeVectorFromPoints(center, vPos, dir);
+        dir[2] = 0.0;
+        if (GetVectorLength(dir) < 10.0) {
+            // 被队伍包围：就近找最近特感方向带
+            float nearestInf[3];
+            float bestD = 999999.0;
+            bool found = false;
+            for (int k = 1; k <= MaxClients; k++) {
+                if (!IsBotInfected(k) || !IsPlayerAlive(k) || k == client) continue;
+                float q[3];
+                GetClientAbsOrigin(k, q);
+                float d = GetVectorDistance(vPos, q);
+                if (d < bestD) { bestD = d; nearestInf = q; found = true; }
+            }
+            if (found) {
+                MakeVectorFromPoints(vPos, nearestInf, dir);
+            } else {
+                GetClientEyeAngles(client, ang);
+                BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+                BT_AddButton(client, IN_FORWARD);
+                return BT_RUNNING;
+            }
+        }
+        GetVectorAngles(dir, ang);
+    } else {
+        // 单人局：保持当前朝向
+        GetClientEyeAngles(client, ang);
+    }
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_AddButton(client, IN_FORWARD);
+    return BT_RUNNING;
+}
+
 // Alternating hop: normal jump ↔ leap attack
 BT_Status JockeyAct_AlternatingHop(int client) {
     // Choose between normal jump and leap attack
@@ -47,10 +114,30 @@ BT_Status JockeyAct_AlternatingHop(int client) {
     return BT_SUCCESS;
 }
 stock int BT_CreateJockeyTree() {
-    // Riding — just maintain
+    // Riding — v4.0: 骑乘 steering（把人往队伍外带），不再原地 hold
     int rideSeq = BT_CreateSequence(2,
         BT_CreateCondition(CND_IsPinningSurvivor),
-        BT_CreateAction(ACT_HoldVictim)
+        BT_CreateAction(JockeyAct_SteerRide)
+    );
+
+    // ==========================================
+    // v4.0: 暗影锁链 (mode 1) —— Smoker 拉中 → Jockey 骑同一人（拉散）
+    // 窗口 = Smoker 拉中的 pin 广播；被拉的人无法移动，Jockey 骑 = 必中。
+    // 骑上后再被 steering 往队伍外带 —— 锁链完整：拉→骑→拖走。
+    // ==========================================
+    int mode1ChainApproach = BT_CreateSequence(5,
+        BT_CreateIsMode(1),
+        BT_CreateCondition(CND_IsAttackWindow),
+        BT_CreateAction(ACT_AcquirePinTarget),
+        BT_CreateIsNotInRange(500.0),
+        BT_CreateAction(ACT_StrafeMoveToTarget)
+    );
+    int mode1ChainLeap = BT_CreateSequence(5,
+        BT_CreateIsMode(1),
+        BT_CreateCondition(CND_IsAttackWindow),
+        BT_CreateAction(ACT_AcquirePinTarget),
+        BT_CreateIsInRange(500.0),
+        BT_CreateCooldown(1.0, BT_CreateAction(JockeyAct_AlternatingHop))
     );
 
     // --- v3.2 FIX: Terrain-aware leap strategies ---
@@ -75,7 +162,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_HasLOS),
         BT_CreateIsInRange(400.0),                       // close enough
-        BT_CreateCooldown(2.0, BT_CreateAction(JockeyAct_AlternatingHop))
+        BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))  // v3.7: 2.0→1.2
     );
 
     // Narrow: approach (far) → hug wall
@@ -91,23 +178,42 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_HasLOS),
         BT_CreateIsInRange(350.0),
-        BT_CreateCooldown(2.0, BT_CreateAction(JockeyAct_AlternatingHop))
+        BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))  // v3.7: 2.0→1.2
     );
 
-    // Open: approach (far) → flank
-    int openApproach = BT_CreateSequence(5,
+    // ==========================================
+    // v3.5: Open terrain — 2-way random + reduced cooldown (2.0→1.2)
+    // ==========================================
+    int openStrategyRoll = BT_CreateSequence(2,
         BT_CreateCondition(CND_IsOpenArea),
-        BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateInverter(BT_CreateIsInRange(400.0)),
-        BT_CreateAction(ACT_FlankApproach)
+        BT_CreateRollStrategy(2)
     );
-    int openLeap = BT_CreateSequence(5,
-        BT_CreateCondition(CND_IsOpenArea),
-        BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasLOS),
+    // Strat 0: Flank leap — circle around → leap from side
+    // v4.0: 大弧线绕后（CircleFlank）—— 从视线外绕到队伍侧后方跳骑
+    int openS0_Approach = BT_CreateSequence(6,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
+        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsNotInRange(400.0),
+        BT_CreateAction(ACT_CircleFlank)
+    );
+    int openS0_Leap = BT_CreateSequence(6,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
+        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasLOS),
         BT_CreateIsInRange(400.0),
-        BT_CreateCooldown(2.0, BT_CreateAction(JockeyAct_AlternatingHop))
+        BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))
+    );
+    // Strat 1: Erratic leap — zigzag approach → leap from varied angle
+    int openS1_Approach = BT_CreateSequence(6,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
+        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsNotInRange(350.0),
+        BT_CreateAction(ACT_ErraticApproach)
+    );
+    int openS1_Leap = BT_CreateSequence(6,
+        BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
+        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(350.0),
+        BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))
     );
 
     // --- Standard hop attack ---
@@ -118,7 +224,7 @@ stock int BT_CreateJockeyTree() {
     );
 
     int hopAcquireTarget = BT_CreateAction(JockeyAct_AlternatingHop);
-    int hopWithCooldown = BT_CreateCooldown(2.0, hopAcquireTarget);
+    int hopWithCooldown = BT_CreateCooldown(1.2, hopAcquireTarget);  // v3.6: 2.0→1.2
 
     int hopSeq = BT_CreateSequence(2,
         hopPreCond,
@@ -131,20 +237,39 @@ stock int BT_CreateJockeyTree() {
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
-    // Root selector — terrain branches come in approach/attack pairs.
-    // When disabled (ai_terrain_enable=0): all terrain conditions return FAIL
-    // → falls through to standard hop (8) and approach (9-10).
+    // ==========================================
+    // v3.6: Anti-melee — close range + no LOS → strafe for leap angle.
+    // Don't blindly approach when too close — the engine default melee
+    // (shared IN_ATTACK button) kicks in when leap can't fire.
+    // ==========================================
+    int closeRangeStrafe = BT_CreateSequence(4,
+        BT_CreateIsInRange(300.0),
+        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_StrafeRandom)
+    );
+
+    // Root selector — v3.6: close-range strafe prevents blind melee at no LOS.
+    // When HasLOS: hopSeq fires → IN_ATTACK → engine decides leap vs melee.
+    // When no LOS + close: strafe for angle instead of approaching into melee range.
+    // When nothing works: Wander (melee IS valid as last resort).
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, rideSeq);
-    BT_AddChild(root, ledgeLeap);           // 2. v3.2: ledge → close → leap
-    BT_AddChild(root, ledgeApproach);       // 3. v3.2: ledge → far → flank
-    BT_AddChild(root, narrowLeap);          // 4. v3.2: narrow → close → leap
-    BT_AddChild(root, narrowApproach);      // 5. v3.2: narrow → far → hug wall
-    BT_AddChild(root, openLeap);            // 6. v3.2: open → close → leap
-    BT_AddChild(root, openApproach);        // 7. v3.2: open → far → flank
-    BT_AddChild(root, hopSeq);              // 8. ← FALLBACK: standard hop
-    BT_AddChild(root, strafeApproach);      // 9. ← FALLBACK: approach
-    BT_AddChild(root, BT_CreateAction(ACT_Wander));
+    BT_AddChild(root, mode1ChainApproach);  // 1.5. v4.0: mode 1 → 锁链接近被拉者
+    BT_AddChild(root, mode1ChainLeap);      // 1.5. v4.0: mode 1 → 锁链骑被拉者
+    BT_AddChild(root, ledgeLeap);           // 2. ledge → leap
+    BT_AddChild(root, ledgeApproach);       // 3. ledge → approach
+    BT_AddChild(root, narrowLeap);          // 4. narrow → leap
+    BT_AddChild(root, narrowApproach);      // 5. narrow → approach
+    BT_AddChild(root, openStrategyRoll);    // 6a. open → roll token
+    BT_AddChild(root, openS0_Leap);         // 6b. open strat0 → flank leap
+    BT_AddChild(root, openS0_Approach);     // 6c. open strat0 → flank approach
+    BT_AddChild(root, openS1_Leap);         // 7a. open strat1 → erratic leap
+    BT_AddChild(root, openS1_Approach);     // 7b. open strat1 → erratic approach
+    BT_AddChild(root, hopSeq);              // 8. standard hop (HasLOS → ATTACK)
+    BT_AddChild(root, closeRangeStrafe);    // 9. v3.6: close+noLOS → strafe
+    BT_AddChild(root, strafeApproach);      // 10. approach from far
+    BT_AddChild(root, BT_CreateAction(ACT_Wander)); // 11. last resort
 
     return root;
 }
