@@ -757,10 +757,18 @@ stock float TriArea2D(const float a[3], const float b[3], const float p[3])
 
 // Reconstruct path from cameFrom chain, output portal-centered waypoints.
 // v4.0: portal-based waypoints + funnel string pulling (replaces LOS smoothing)
-stock void AStar_ReconstructPath(ArrayList outCells)
+//
+// v4.6: split into Init/ConvertFrame/ValidateFrame — the ground-snap traces
+// (2 per cell) and the validation cascade (up to ~20 traces per edge) ran
+// synchronously in STAGE_SMOOTH and crashed large maps via SIGALRM.
+// Direct conversion uses nav area centers — SSFA funnel is disabled because
+// geometric portal endpoints (midpoint of centers + perpendicular segment)
+// land on high ledges and outside air walls. Accurate portal geometry
+// requires L4D_NavArea_GetCorner, which does not exist in left4dhooks v1.168.
+stock bool AStar_ReconstructPath_Init(ArrayList outCells)
 {
     outCells.Clear();
-    if (!g_bAStarPathFound) return;
+    if (!g_bAStarPathFound) return false;
 
     // Walk backwards from goal to start
     ArrayList reversePath = new ArrayList(2);
@@ -780,42 +788,50 @@ stock void AStar_ReconstructPath(ArrayList outCells)
     {
         LogMessage("[PTG] A* reconstruct aborted: path too long (cycle detected)");
         delete reversePath;
-        return;
+        return false;
     }
 
     // Build forward-order nodeIndex list (start → goal)
-    ArrayList nodePath = new ArrayList();
+    delete g_hSmoothNodePath;
+    g_hSmoothNodePath = new ArrayList();
     for (int i = reversePath.Length - 2; i >= 0; i -= 2)
-        nodePath.Push(reversePath.Get(i));
+        g_hSmoothNodePath.Push(reversePath.Get(i));
     delete reversePath;
 
-    int pathLen = nodePath.Length;
+    int pathLen = g_hSmoothNodePath.Length;
     if (pathLen < 2)
     {
-        delete nodePath;
-        return;
+        delete g_hSmoothNodePath;
+        g_hSmoothNodePath = null;
+        return false;
     }
 
-    // Direct conversion: each nav area center → guide cell.
-    // SSFA funnel disabled — geometric portal endpoints (midpoint of centers +
-    // perpendicular segment) land on high ledges and outside air walls.
-    // Accurate portal geometry requires L4D_NavArea_GetCorner, which does not
-    // exist in left4dhooks v1.168.
+    // Flow interpolation endpoints
+    int firstIdx = g_hSmoothNodePath.Get(0);
+    int lastIdx = g_hSmoothNodePath.Get(pathLen - 1);
+    Address firstArea = view_as<Address>(g_hAStarNodes.Get(firstIdx));
+    Address lastArea = view_as<Address>(g_hAStarNodes.Get(lastIdx));
+    g_fSmoothStartFlow = L4D2Direct_GetTerrorNavAreaFlow(firstArea);
+    g_fSmoothGoalFlow = L4D2Direct_GetTerrorNavAreaFlow(lastArea);
+    if (g_fSmoothStartFlow <= 0.0) g_fSmoothStartFlow = 0.0;
+    if (g_fSmoothGoalFlow <= 0.0) g_fSmoothGoalFlow = g_fMaxFlow;
 
-    int firstIdx = nodePath.Get(0);
-    int lastIdx = nodePath.Get(pathLen - 1);
-    int firstAI = g_hAStarNodes.Get(firstIdx);
-    int lastAI = g_hAStarNodes.Get(lastIdx);
-    Address firstArea = view_as<Address>(firstAI);
-    Address lastArea = view_as<Address>(lastAI);
-    float startFlow = L4D2Direct_GetTerrorNavAreaFlow(firstArea);
-    float goalFlow = L4D2Direct_GetTerrorNavAreaFlow(lastArea);
-    if (startFlow <= 0.0) startFlow = 0.0;
-    if (goalFlow <= 0.0) goalFlow = g_fMaxFlow;
+    g_iSmoothIdx = 0;
+    return true;
+}
 
-    for (int ni = 0; ni < pathLen; ni++)
+// Convert nav area centers → guide cells (ground snap + flow interpolation).
+// Returns true when all cells are converted.
+stock bool AStar_ReconstructPath_ConvertFrame(ArrayList outCells, int maxCells)
+{
+    int pathLen = g_hSmoothNodePath.Length;
+    int processed = 0;
+    while (g_iSmoothIdx < pathLen && processed < maxCells)
     {
-        int idx = nodePath.Get(ni);
+        if (processed > 0 && frame_budget_exceeded()) return false;
+
+        int ni = g_iSmoothIdx;
+        int idx = g_hSmoothNodePath.Get(ni);
         int areaInt = g_hAStarNodes.Get(idx);
 
         Cell cell;
@@ -854,138 +870,160 @@ stock void AStar_ReconstructPath(ArrayList outCells)
             }
         }
 
-        cell.flow = startFlow + (goalFlow - startFlow) * (float(ni) / float(pathLen - 1));
+        cell.flow = g_fSmoothStartFlow + (g_fSmoothGoalFlow - g_fSmoothStartFlow) * (float(ni) / float(pathLen - 1));
         outCells.PushArray(cell, sizeof(Cell));
+
+        g_iSmoothIdx++;
+        processed++;
     }
+    return g_iSmoothIdx >= pathLen;
+}
 
-    delete nodePath;
-
-    // --- Validation pass: hull trace every edge ---
-    if (outCells.Length >= 2)
+// Hull-trace validation cascade for every edge (strategies A–E, first success
+// wins). Returns true when all edges are processed.
+stock bool AStar_ReconstructPath_ValidateFrame(ArrayList outCells, int maxEdges)
+{
+    int edgeCount = outCells.Length - 1;
+    int processed = 0;
+    while (g_iSmoothIdx <= edgeCount && processed < maxEdges)
     {
-        for (int i = 1; i < outCells.Length; i++)
+        if (processed > 0 && frame_budget_exceeded()) return false;
+
+        int i = g_iSmoothIdx;
+        Cell c1, c2;
+        outCells.GetArray(i - 1, c1, sizeof(Cell));
+        outCells.GetArray(i, c2, sizeof(Cell));
+
+        if (!twopos_traversable(c1.center, c2.center))
         {
-            Cell c1, c2;
-            outCells.GetArray(i - 1, c1, sizeof(Cell));
-            outCells.GetArray(i, c2, sizeof(Cell));
+            bool repaired = false;
 
-            if (!twopos_traversable(c1.center, c2.center))
+            // v4.5: Multi-strategy cell validation cascade.
+            // Each strategy tries independently; first success wins.
+
+            // Strategy A: Lift cell2 Z incrementally (8,16,24,32,48)
+            if (!repaired)
             {
-                bool repaired = false;
-
-                // v4.5: Multi-strategy cell validation cascade.
-                // Each strategy tries independently; first success wins.
-
-                // Strategy A: Lift cell2 Z incrementally (8,16,24,32,48)
-                if (!repaired)
+                float zOffsets[5] = {8.0, 16.0, 24.0, 32.0, 48.0};
+                for (int z = 0; z < 5 && !repaired; z++)
                 {
-                    float zOffsets[5] = {8.0, 16.0, 24.0, 32.0, 48.0};
-                    for (int z = 0; z < 5 && !repaired; z++)
+                    float lifted[3];
+                    lifted[0] = c2.center[0];
+                    lifted[1] = c2.center[1];
+                    lifted[2] = c2.center[2] + zOffsets[z];
+                    if (twopos_traversable(c1.center, lifted))
                     {
-                        float lifted[3];
-                        lifted[0] = c2.center[0];
-                        lifted[1] = c2.center[1];
-                        lifted[2] = c2.center[2] + zOffsets[z];
-                        if (twopos_traversable(c1.center, lifted))
-                        {
-                            c2.center = lifted;
-                            outCells.SetArray(i, c2, sizeof(Cell));
-                            repaired = true;
-                        }
-                    }
-                }
-
-                // Strategy B: Lower cell2 Z (handles waypoints inside ceilings)
-                if (!repaired)
-                {
-                    float zOffsets[4] = {-8.0, -16.0, -24.0, -32.0};
-                    for (int z = 0; z < 4 && !repaired; z++)
-                    {
-                        float lowered[3];
-                        lowered[0] = c2.center[0];
-                        lowered[1] = c2.center[1];
-                        lowered[2] = c2.center[2] + zOffsets[z];
-                        if (twopos_traversable(c1.center, lowered))
-                        {
-                            c2.center = lowered;
-                            outCells.SetArray(i, c2, sizeof(Cell));
-                            repaired = true;
-                        }
-                    }
-                }
-
-                // Strategy C: Lift both ends (+8 each)
-                if (!repaired)
-                {
-                    float l1[3], l2[3];
-                    l1 = c1.center; l1[2] += 8.0;
-                    l2 = c2.center; l2[2] += 8.0;
-                    if (twopos_traversable(l1, l2))
-                    {
-                        c1.center = l1; c2.center = l2;
-                        outCells.SetArray(i - 1, c1, sizeof(Cell));
-                        outCells.SetArray(i, c2, sizeof(Cell));
-                        repaired = true;
-                    }
-                }
-
-                // Strategy D: Horizontal offset perpendicular to beam direction
-                if (!repaired)
-                {
-                    float dir[3];
-                    dir[0] = c2.center[0] - c1.center[0];
-                    dir[1] = c2.center[1] - c1.center[1];
-                    float lenXY = SquareRoot(dir[0]*dir[0] + dir[1]*dir[1]);
-                    if (lenXY > 1.0)
-                    {
-                        float perp[3];
-                        perp[0] = -dir[1] / lenXY;
-                        perp[1] =  dir[0] / lenXY;
-                        perp[2] = 0.0;
-
-                        float offsets[4] = {32.0, -32.0, 64.0, -64.0};
-                        for (int o = 0; o < 4 && !repaired; o++)
-                        {
-                            float s[3], e[3];
-                            s[0] = c1.center[0] + perp[0] * offsets[o];
-                            s[1] = c1.center[1] + perp[1] * offsets[o];
-                            s[2] = c1.center[2] + 28.0;
-                            e[0] = c2.center[0] + perp[0] * offsets[o];
-                            e[1] = c2.center[1] + perp[1] * offsets[o];
-                            e[2] = c2.center[2] + 28.0;
-                            if (twopos_traversable(s, e))
-                            {
-                                s[2] -= 28.0; e[2] -= 28.0;
-                                c1.center = s; c2.center = e;
-                                outCells.SetArray(i - 1, c1, sizeof(Cell));
-                                outCells.SetArray(i, c2, sizeof(Cell));
-                                repaired = true;
-                            }
-                        }
-                    }
-                }
-
-                // Strategy E: Insert midpoint from overlapping nav area geometry.
-                // Uses the center of the two nav areas as an intermediate waypoint
-                // that the player can pass through.
-                if (!repaired && c1.navArea != Address_Null && c2.navArea != Address_Null)
-                {
-                    float mid[3], centerA[3], centerB[3];
-                    L4D_GetNavAreaCenter(c1.navArea, centerA);
-                    L4D_GetNavAreaCenter(c2.navArea, centerB);
-                    mid[0] = (centerA[0] + centerB[0]) / 2.0;
-                    mid[1] = (centerA[1] + centerB[1]) / 2.0;
-                    mid[2] = (centerA[2] > centerB[2] ? centerA[2] : centerB[2]) + 16.0;
-                    if (twopos_traversable(c1.center, mid) && twopos_traversable(mid, c2.center))
-                    {
-                        c2.center = mid;
+                        c2.center = lifted;
                         outCells.SetArray(i, c2, sizeof(Cell));
                         repaired = true;
                     }
                 }
             }
+
+            // Strategy B: Lower cell2 Z (handles waypoints inside ceilings)
+            if (!repaired)
+            {
+                float zOffsets[4] = {-8.0, -16.0, -24.0, -32.0};
+                for (int z = 0; z < 4 && !repaired; z++)
+                {
+                    float lowered[3];
+                    lowered[0] = c2.center[0];
+                    lowered[1] = c2.center[1];
+                    lowered[2] = c2.center[2] + zOffsets[z];
+                    if (twopos_traversable(c1.center, lowered))
+                    {
+                        c2.center = lowered;
+                        outCells.SetArray(i, c2, sizeof(Cell));
+                        repaired = true;
+                    }
+                }
+            }
+
+            // Strategy C: Lift both ends (+8 each)
+            if (!repaired)
+            {
+                float l1[3], l2[3];
+                l1 = c1.center; l1[2] += 8.0;
+                l2 = c2.center; l2[2] += 8.0;
+                if (twopos_traversable(l1, l2))
+                {
+                    c1.center = l1; c2.center = l2;
+                    outCells.SetArray(i - 1, c1, sizeof(Cell));
+                    outCells.SetArray(i, c2, sizeof(Cell));
+                    repaired = true;
+                }
+            }
+
+            // Strategy D: Horizontal offset perpendicular to beam direction
+            if (!repaired)
+            {
+                float dir[3];
+                dir[0] = c2.center[0] - c1.center[0];
+                dir[1] = c2.center[1] - c1.center[1];
+                float lenXY = SquareRoot(dir[0]*dir[0] + dir[1]*dir[1]);
+                if (lenXY > 1.0)
+                {
+                    float perp[3];
+                    perp[0] = -dir[1] / lenXY;
+                    perp[1] =  dir[0] / lenXY;
+                    perp[2] = 0.0;
+
+                    float offsets[4] = {32.0, -32.0, 64.0, -64.0};
+                    for (int o = 0; o < 4 && !repaired; o++)
+                    {
+                        float s[3], e[3];
+                        s[0] = c1.center[0] + perp[0] * offsets[o];
+                        s[1] = c1.center[1] + perp[1] * offsets[o];
+                        s[2] = c1.center[2] + 28.0;
+                        e[0] = c2.center[0] + perp[0] * offsets[o];
+                        e[1] = c2.center[1] + perp[1] * offsets[o];
+                        e[2] = c2.center[2] + 28.0;
+                        if (twopos_traversable(s, e))
+                        {
+                            s[2] -= 28.0; e[2] -= 28.0;
+                            c1.center = s; c2.center = e;
+                            outCells.SetArray(i - 1, c1, sizeof(Cell));
+                            outCells.SetArray(i, c2, sizeof(Cell));
+                            repaired = true;
+                        }
+                    }
+                }
+            }
+
+            // Strategy E: Insert midpoint from overlapping nav area geometry.
+            // Uses the center of the two nav areas as an intermediate waypoint
+            // that the player can pass through.
+            if (!repaired && c1.navArea != Address_Null && c2.navArea != Address_Null)
+            {
+                float mid[3], centerA[3], centerB[3];
+                L4D_GetNavAreaCenter(c1.navArea, centerA);
+                L4D_GetNavAreaCenter(c2.navArea, centerB);
+                mid[0] = (centerA[0] + centerB[0]) / 2.0;
+                mid[1] = (centerA[1] + centerB[1]) / 2.0;
+                mid[2] = (centerA[2] > centerB[2] ? centerA[2] : centerB[2]) + 16.0;
+                if (twopos_traversable(c1.center, mid) && twopos_traversable(mid, c2.center))
+                {
+                    c2.center = mid;
+                    outCells.SetArray(i, c2, sizeof(Cell));
+                    repaired = true;
+                }
+            }
         }
+
+        g_iSmoothIdx++;
+        processed++;
     }
+    return g_iSmoothIdx > edgeCount;
+}
+
+// Synchronous wrapper — identical output to the old single-call version.
+stock void AStar_ReconstructPath(ArrayList outCells)
+{
+    if (!AStar_ReconstructPath_Init(outCells)) return;
+    while (!AStar_ReconstructPath_ConvertFrame(outCells, 1000000)) {}
+    while (!AStar_ReconstructPath_ValidateFrame(outCells, 1000000)) {}
+    delete g_hSmoothNodePath;
+    g_hSmoothNodePath = null;
 }
 
 stock int AStar_IdentifyStart()
@@ -1041,13 +1079,25 @@ stock int AStar_IdentifyStart()
 // an upper-floor nav area, causing A* to path up stairs then jump out a window.
 // Max-flow areas ARE the intended escape direction — we now verify reachability
 // with a BFS instead of blindly trusting Euclidean distance.
-stock int AStar_IdentifyGoal(int startIndex)
+//
+// v4.6: split into Init/Frame/Finish. Strategy 2's BFS can expand 20000 nodes;
+// the old queue.Erase(0) made that O(V²) and the whole function ran in ONE
+// frame → SIGALRM on large maps. The distributed version processes
+// BFS_NODES_PER_FRAME nodes per frame with a head-cursor queue.
+stock void AStar_IdentifyGoal_Init(int startIndex)
 {
-    if (g_hAStarNodes == null || g_hAStarNodes.Length == 0) return -1;
+    g_iIGStage = 0;
+    g_iIGResult = -1;
+    delete g_hIGQueue;
+    g_hIGQueue = null;
+    delete g_hIGReachable;
+    g_hIGReachable = null;
 
-    float startCenter[3];
+    if (g_hAStarNodes == null || g_hAStarNodes.Length == 0) return;
+
+    g_iIGStartIndex = startIndex;
     if (startIndex >= 0)
-        g_hAStarCenters.GetArray(startIndex, startCenter, 3);
+        g_hAStarCenters.GetArray(startIndex, g_fIGStartCenter, 3);
 
     int nodeCount = g_hAStarNodes.Length;
 
@@ -1060,132 +1110,149 @@ stock int AStar_IdentifyGoal(int startIndex)
         if ((spawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) && g_hCvarFinale.IntValue < FINALE_NEVER)
         {
             LogMessage("[PTG] A* goal: RESCUE_VEHICLE at index %d", i);
-            return i;
+            g_iIGStage = 2;
+            g_iIGResult = i;
+            return;
         }
     }
 
-    // Strategy 2: Max-flow area verified reachable from start via BFS.
-    // This is the correct goal on ~95% of maps. Flow distances are monotonic
-    // toward the escape — the max-flow area IS the evacuation destination.
-    // We verify reachability so disconnected components (locked doors,
-    // finale-only areas) don't produce unreachable goals.
-    //
-    // v4.4: Also track the farthest-spatial reachable node. When the reachable
-    // set is very small (< BFS_FRAGMENTED_THRESHOLD nodes — fragmented nav mesh
-    // on custom maze maps), use the farthest-spatial node instead of max-flow.
-    // This ensures A* produces a multi-cell path spanning the full reachable
-    // area instead of collapsing to a single area near the start.
-    if (startIndex >= 0 && g_fMaxFlow > 0.0)
+    // Strategy 2 needs a valid start + flow data; otherwise fall through to
+    // Euclidean strategies 3/4 in _Finish (single-frame O(n) scans).
+    if (startIndex < 0 || g_fMaxFlow <= 0.0)
     {
-        #define BFS_FRAGMENTED_THRESHOLD 100
+        g_iIGStage = 2; // done — _Finish runs strategies 3/4
+        return;
+    }
 
-        StringMap reachable = new StringMap();
-        ArrayList bfsQueue = new ArrayList();
-        bfsQueue.Push(startIndex);
+    // Initialize BFS state
+    g_hIGQueue = new ArrayList();
+    g_hIGQueue.Push(startIndex);
+    g_hIGReachable = new StringMap();
+    char rkey[16];
+    IntToString(startIndex, rkey, sizeof(rkey));
+    g_hIGReachable.SetValue(rkey, 1);
+    g_iIGQueueHead = 0;
+    g_iIGBfsLimit = 20000; // v4.5: raised from 5000 for ultra-large custom maps
 
-        char rkey[16];
-        IntToString(startIndex, rkey, sizeof(rkey));
-        reachable.SetValue(rkey, 1);
+    g_iIGBestFlowIdx = startIndex;
+    g_fIGBestFlow = L4D2Direct_GetTerrorNavAreaFlow(
+        view_as<Address>(g_hAStarNodes.Get(startIndex)));
+    g_iIGBestDistIdx = startIndex;
+    g_fIGBestDistSq = 0.0;
 
-        int bestFlowIdx = startIndex;
-        float bestFlow = L4D2Direct_GetTerrorNavAreaFlow(
-            view_as<Address>(g_hAStarNodes.Get(startIndex)));
-        int bestDistIdx = startIndex;
-        float bestDistSq = 0.0;
+    g_iIGStage = 1;
+}
 
-        float startC[3];
-        g_hAStarCenters.GetArray(startIndex, startC, 3);
+// Process up to maxNodes BFS nodes. Returns true when the BFS is complete
+// (queue drained or bfsLimit hit).
+stock bool AStar_IdentifyGoal_Frame(int maxNodes)
+{
+    if (g_hIGQueue == null || g_iIGStage != 1) return true;
+    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
 
-        int bfsLimit = 20000; // v4.5: raised from 5000 for ultra-large custom maps
+    int processed = 0;
+    while (g_iIGQueueHead < g_hIGQueue.Length && g_hIGReachable.Size < g_iIGBfsLimit && processed < maxNodes)
+    {
+        if (processed > 0 && frame_budget_exceeded()) return false;
 
-        if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+        int current = g_hIGQueue.Get(g_iIGQueueHead);
+        g_iIGQueueHead++; // head cursor — replaces Erase(0) which was O(V²)
 
-        while (bfsQueue.Length > 0 && reachable.Size < bfsLimit)
+        int areaInt = g_hAStarNodes.Get(current);
+
+        // Track max-flow reachable node
+        float flow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(areaInt));
+        if (flow > g_fIGBestFlow)
         {
-            int current = bfsQueue.Get(0);
-            bfsQueue.Erase(0);
-
-            int areaInt = g_hAStarNodes.Get(current);
-
-            // Track max-flow reachable node
-            float flow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(areaInt));
-            if (flow > bestFlow)
-            {
-                bestFlow = flow;
-                bestFlowIdx = current;
-            }
-
-            // Track farthest-spatial reachable node
-            float center[3];
-            g_hAStarCenters.GetArray(current, center, 3);
-            float distSq = GetVectorDistance(startC, center, true);
-            if (distSq > bestDistSq)
-            {
-                bestDistSq = distSq;
-                bestDistIdx = current;
-            }
-
-            Address area = view_as<Address>(areaInt);
-            GetNavConnections(area, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
-
-            for (int n = 0; n < ConAdj.Length && reachable.Size < bfsLimit; n++)
-            {
-                NavConnection nc;
-                ConAdj.GetArray(n, nc, sizeof(NavConnection));
-                if (nc.navArea == Address_Null) continue;
-
-                int otherInt = view_as<int>(nc.navArea);
-                char keyB[16];
-                IntToString(otherInt, keyB, sizeof(keyB));
-                int otherIdx = -1;
-                if (!g_hAStarAreaToIndex.GetValue(keyB, otherIdx)) continue;
-
-                IntToString(otherIdx, rkey, sizeof(rkey));
-                if (reachable.ContainsKey(rkey)) continue;
-
-                reachable.SetValue(rkey, 1);
-                bfsQueue.Push(otherIdx);
-            }
+            g_fIGBestFlow = flow;
+            g_iIGBestFlowIdx = current;
         }
 
-        int bfsNodeCount = reachable.Size;
-        delete bfsQueue;
-        delete reachable;
-
-        // Pick goal: farthest-spatial for fragmented meshes, max-flow for normal maps
-        int chosenIdx;
-        if (bfsNodeCount > 0 && bfsNodeCount < BFS_FRAGMENTED_THRESHOLD && bestDistIdx != bestFlowIdx)
+        // Track farthest-spatial reachable node
+        float center[3];
+        g_hAStarCenters.GetArray(current, center, 3);
+        float distSq = GetVectorDistance(g_fIGStartCenter, center, true);
+        if (distSq > g_fIGBestDistSq)
         {
-            chosenIdx = bestDistIdx;
+            g_fIGBestDistSq = distSq;
+            g_iIGBestDistIdx = current;
+        }
+
+        Address area = view_as<Address>(areaInt);
+        GetNavConnections(area, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
+
+        char rkey[16];
+        for (int n = 0; n < ConAdj.Length && g_hIGReachable.Size < g_iIGBfsLimit; n++)
+        {
+            NavConnection nc;
+            ConAdj.GetArray(n, nc, sizeof(NavConnection));
+            if (nc.navArea == Address_Null) continue;
+
+            int otherInt = view_as<int>(nc.navArea);
+            char keyB[16];
+            IntToString(otherInt, keyB, sizeof(keyB));
+            int otherIdx = -1;
+            if (!g_hAStarAreaToIndex.GetValue(keyB, otherIdx)) continue;
+
+            IntToString(otherIdx, rkey, sizeof(rkey));
+            if (g_hIGReachable.ContainsKey(rkey)) continue;
+
+            g_hIGReachable.SetValue(rkey, 1);
+            g_hIGQueue.Push(otherIdx);
+        }
+        processed++;
+    }
+
+    return (g_iIGQueueHead >= g_hIGQueue.Length || g_hIGReachable.Size >= g_iIGBfsLimit);
+}
+
+// Pick the goal from BFS results (or run Euclidean strategies 3/4 when BFS
+// wasn't possible), then release all BFS state. Returns goal nodeIndex or -1.
+stock int AStar_IdentifyGoal_Finish()
+{
+    int result = g_iIGResult;
+
+    if (g_iIGStage == 1) // BFS completed — pick goal from accumulators
+    {
+        int bfsNodeCount = g_hIGReachable.Size;
+        int chosenIdx;
+        if (bfsNodeCount > 0 && bfsNodeCount < BFS_FRAGMENTED_THRESHOLD && g_iIGBestDistIdx != g_iIGBestFlowIdx)
+        {
+            chosenIdx = g_iIGBestDistIdx;
             float gc[3];
             g_hAStarCenters.GetArray(chosenIdx, gc, 3);
             LogMessage("[PTG] A* goal: farthest reachable (fragmented nav, %d nodes) index %d (dist=%.0f, z=%.0f)",
-                bfsNodeCount, chosenIdx, SquareRoot(bestDistSq), gc[2]);
+                bfsNodeCount, chosenIdx, SquareRoot(g_fIGBestDistSq), gc[2]);
         }
-        else if (bestFlowIdx >= 0)
+        else if (g_iIGBestFlowIdx >= 0)
         {
-            chosenIdx = bestFlowIdx;
+            chosenIdx = g_iIGBestFlowIdx;
             float gc[3];
             g_hAStarCenters.GetArray(chosenIdx, gc, 3);
             LogMessage("[PTG] A* goal: max-flow reachable index %d (flow=%.1f, z=%.0f, bfs_nodes=%d)",
-                chosenIdx, bestFlow, gc[2], bfsNodeCount);
+                chosenIdx, g_fIGBestFlow, gc[2], bfsNodeCount);
         }
         else
         {
             chosenIdx = -1;
         }
-
-        if (chosenIdx >= 0)
-            return chosenIdx;
+        result = chosenIdx;
     }
+
+    delete g_hIGQueue;
+    g_hIGQueue = null;
+    delete g_hIGReachable;
+    g_hIGReachable = null;
+    g_iIGStage = 0;
 
     // Strategy 3: Farthest Euclidean among areas at similar Z-level (±200u).
     // On multi-story maps, filtering by Z ensures the goal stays on the same
     // floor as the start. 200u ≈ one building floor.
-    // This is a safety net for maps where flow data is missing or corrupted.
-    if (startIndex >= 0)
+    // Safety net for maps where flow data is missing or corrupted.
+    if (result < 0 && g_iIGStartIndex >= 0 && g_hAStarNodes != null)
     {
-        float startZ = startCenter[2];
+        int nodeCount = g_hAStarNodes.Length;
+        float startZ = g_fIGStartCenter[2];
         float zTolerance = 200.0;
 
         int farIdx = -1;
@@ -1198,7 +1265,7 @@ stock int AStar_IdentifyGoal(int startIndex)
             // Filter by Z-level — skip areas on different floors
             if (FloatAbs(center[2] - startZ) > zTolerance) continue;
 
-            float dist = GetVectorDistance(startCenter, center, true); // sq dist
+            float dist = GetVectorDistance(g_fIGStartCenter, center, true); // sq dist
             if (dist > maxDist)
             {
                 maxDist = dist;
@@ -1211,20 +1278,21 @@ stock int AStar_IdentifyGoal(int startIndex)
             g_hAStarCenters.GetArray(farIdx, fc, 3);
             LogMessage("[PTG] A* goal: farthest Euclidean (Z-filtered ±%.0f) index %d (dist=%.0f, z=%.0f)",
                 zTolerance, farIdx, SquareRoot(maxDist), fc[2]);
-            return farIdx;
+            result = farIdx;
         }
     }
 
     // Strategy 4: Farthest Euclidean overall (last resort for disconnected nav meshes)
-    if (startIndex >= 0)
+    if (result < 0 && g_iIGStartIndex >= 0 && g_hAStarNodes != null)
     {
+        int nodeCount = g_hAStarNodes.Length;
         int farIdx = -1;
         float maxDist = -1.0;
         for (int i = 0; i < nodeCount; i++)
         {
             float center[3];
             g_hAStarCenters.GetArray(i, center, 3);
-            float dist = GetVectorDistance(startCenter, center, true); // sq dist
+            float dist = GetVectorDistance(g_fIGStartCenter, center, true); // sq dist
             if (dist > maxDist)
             {
                 maxDist = dist;
@@ -1235,11 +1303,22 @@ stock int AStar_IdentifyGoal(int startIndex)
         {
             LogMessage("[PTG] A* goal: farthest Euclidean (no filter) index %d (dist=%.0f) [last resort]",
                 farIdx, SquareRoot(maxDist));
-            return farIdx;
+            result = farIdx;
         }
     }
 
-    return -1;
+    return result;
+}
+
+// Synchronous wrapper (used by Guide_Prep_Fallback) — same result, one shot.
+stock int AStar_IdentifyGoal(int startIndex)
+{
+    AStar_IdentifyGoal_Init(startIndex);
+    if (g_iIGStage == 1)
+    {
+        while (!AStar_IdentifyGoal_Frame(20000)) {}
+    }
+    return AStar_IdentifyGoal_Finish();
 }
 
 // ============================================================================
@@ -1917,22 +1996,42 @@ stock void DetectNavMeshBridges()
 
 
 // ── Funnel3D_InsertZTransitions ──
-stock void Funnel3D_InsertZTransitions(ArrayList cells)
+// v4.6: split into Init/Frame — each inserted waypoint costs a ground trace
+// and a large Z gap can insert up to 8 waypoints per edge. On 3000+ cell
+// paths this ran synchronously and blew the frame budget (SIGALRM). The
+// frame version processes FUNNEL_CELLS_PER_FRAME cells per frame with a
+// frame_budget_exceeded check between cells.
+stock void Funnel3D_InsertZTransitions_Init(ArrayList cells)
 {
+    delete g_hFunnelResult;
+    g_hFunnelResult = null;
+
     if (cells == null || cells.Length < 2) return;
     if (g_hCvarFunnel3D == null || !g_hCvarFunnel3D.BoolValue) return;
 
-    float zStep = g_hCvarFunnelZStep != null ? g_hCvarFunnelZStep.FloatValue : 80.0;
-
-    // Build new cell list with Z transitions inserted
-    ArrayList result = new ArrayList(sizeof(Cell));
+    g_hFunnelResult = new ArrayList(sizeof(Cell));
     Cell prev; cells.GetArray(0, prev, sizeof(Cell));
-    result.PushArray(prev, sizeof(Cell));
+    g_hFunnelResult.PushArray(prev, sizeof(Cell));
+    g_iFunnelIdx = 1;
+}
 
-    for (int i = 1; i < cells.Length; i++)
+// Returns true when complete (result written back into cells).
+stock bool Funnel3D_InsertZTransitions_Frame(ArrayList cells)
+{
+    if (g_hFunnelResult == null) return true;
+
+    float zStep = g_hCvarFunnelZStep != null ? g_hCvarFunnelZStep.FloatValue : 80.0;
+    int processed = 0;
+
+    while (g_iFunnelIdx < cells.Length && processed < FUNNEL_CELLS_PER_FRAME)
     {
+        if (processed > 0 && frame_budget_exceeded()) return false;
+
+        Cell prev;
+        g_hFunnelResult.GetArray(g_hFunnelResult.Length - 1, prev, sizeof(Cell));
+
         Cell curr;
-        cells.GetArray(i, curr, sizeof(Cell));
+        cells.GetArray(g_iFunnelIdx, curr, sizeof(Cell));
 
         float dz = curr.center[2] - prev.center[2];
         float dzAbs = FloatAbs(dz);
@@ -1965,23 +2064,38 @@ stock void Funnel3D_InsertZTransitions(ArrayList cells)
                     mid.center[2] = groundPos[2] + 16.0;
                 }
 
-                result.PushArray(mid, sizeof(Cell));
+                g_hFunnelResult.PushArray(mid, sizeof(Cell));
             }
         }
 
-        result.PushArray(curr, sizeof(Cell));
-        prev = curr;
+        g_hFunnelResult.PushArray(curr, sizeof(Cell));
+        g_iFunnelIdx++;
+        processed++;
     }
 
-    // Replace original cells with enhanced version
-    cells.Clear();
-    for (int i = 0; i < result.Length; i++)
+    if (g_iFunnelIdx >= cells.Length)
     {
-        Cell c;
-        result.GetArray(i, c, sizeof(Cell));
-        cells.PushArray(c, sizeof(Cell));
+        // Replace original cells with enhanced version
+        cells.Clear();
+        for (int i = 0; i < g_hFunnelResult.Length; i++)
+        {
+            Cell c;
+            g_hFunnelResult.GetArray(i, c, sizeof(Cell));
+            cells.PushArray(c, sizeof(Cell));
+        }
+        delete g_hFunnelResult;
+        g_hFunnelResult = null;
+        return true;
     }
-    delete result;
+    return false;
+}
+
+// Synchronous wrapper — identical output to the old single-call version.
+stock void Funnel3D_InsertZTransitions(ArrayList cells)
+{
+    Funnel3D_InsertZTransitions_Init(cells);
+    if (g_hFunnelResult == null) return;
+    while (!Funnel3D_InsertZTransitions_Frame(cells)) {}
 }
 
 ///////////// SDK

@@ -224,6 +224,38 @@ int g_iMapGeneration = 0; // incremented on each map start; async frame callback
 float g_fLastPrepProgressTime = 0.0;
 #define PREP_STALL_SECONDS 10.0
 
+// ── v4.6 post-build init sub-state machine (IdentifyGoal BFS distributed) ──
+int g_iPostStep;              // 0=rescue scan+IdentifyStart, 1=IG init, 2=IG BFS, 3=IG finish, 4=AStar init
+int g_iPostStartIdx;          // IdentifyStart result, consumed by IG init
+int g_iIGStage;               // 0=idle, 1=BFS running, 2=done
+int g_iIGResult;              // goal nodeIndex from strategy 1 (rescue vehicle), else -1
+int g_iIGStartIndex;          // start nodeIndex for Euclidean fallback strategies
+float g_fIGStartCenter[3];    // start center for farthest-distance tracking
+ArrayList g_hIGQueue;         // BFS queue (nodeIndex); head cursor replaces Erase(0) → O(V²) killer
+int g_iIGQueueHead;
+StringMap g_hIGReachable;     // "nodeIdx" → 1
+int g_iIGBfsLimit;            // = 20000
+int g_iIGBestFlowIdx;         // max-flow reachable accumulator
+float g_fIGBestFlow;
+int g_iIGBestDistIdx;         // farthest-spatial reachable accumulator
+float g_fIGBestDistSq;
+#define BFS_NODES_PER_FRAME 2000
+#define BFS_FRAGMENTED_THRESHOLD 100
+
+// ── v4.6 STAGE_SMOOTH sub-state machine ──
+int g_iSmoothStep;            // 0=init, 1=convert, 2=validate, 3=funnel, 4=finish
+int g_iSmoothIdx;             // cursor into g_hSmoothNodePath / edge list
+ArrayList g_hSmoothNodePath;  // forward nodeIndex list (start → goal)
+float g_fSmoothStartFlow, g_fSmoothGoalFlow; // flow interpolation endpoints
+ArrayList g_hFunnelResult;    // funnel intermediate result (null = funnel inactive)
+int g_iFunnelIdx;
+#define CELLS_PER_FRAME 150
+#define EDGES_PER_FRAME 60
+#define FUNNEL_CELLS_PER_FRAME 20
+
+// ── v4.6 HPA large-map degradation ──
+#define HPA_SKIP_THRESHOLD 5000 // above this nav area count, skip HPA clustering entirely
+
 // Forward-declare optional newer left4dhooks natives (may not be in server's include)
 enum NavCornerType {
     NAV_CORNER_NORTH_WEST = 0,

@@ -73,6 +73,19 @@ void Guide_Cleanup()
     g_fPrepStartTime = 0.0;
     g_fLastPrepProgressTime = 0.0;
 
+    // v4.6: release distributed sub-state machine resources (IdentifyGoal BFS
+    // + SMOOTH chunks). Must happen on every cleanup — the mapgen guard now
+    // actually fires, so stale async frames from the previous map abort here.
+    g_iIGStage = 0;
+    delete g_hIGQueue;
+    g_hIGQueue = null;
+    delete g_hIGReachable;
+    g_hIGReachable = null;
+    delete g_hSmoothNodePath;
+    g_hSmoothNodePath = null;
+    delete g_hFunnelResult;
+    g_hFunnelResult = null;
+
     if (guide_ready)
     {
         #if DEBUG>1
@@ -130,6 +143,12 @@ void OnFramePrep(bool new_frame = true)
         guide_prep = false;
         g_iPrepStage = STAGE_NONE;
         timer_nav = null;
+        // v4.6: release distributed sub-state machine resources
+        g_iIGStage = 0;
+        delete g_hIGQueue; g_hIGQueue = null;
+        delete g_hIGReachable; g_hIGReachable = null;
+        delete g_hSmoothNodePath; g_hSmoothNodePath = null;
+        delete g_hFunnelResult; g_hFunnelResult = null;
         return;
     }
     if (!enable || guide_ready || !gamemode_guidable || !map_started || !nav_started || g_iPrepStage<=STAGE_NONE || g_iPrepStage>=STAGE_END)
@@ -137,6 +156,12 @@ void OnFramePrep(bool new_frame = true)
         guide_prep = false;
         g_iPrepStage = STAGE_NONE;
         timer_nav = null;
+        // v4.6: release distributed sub-state machine resources
+        g_iIGStage = 0;
+        delete g_hIGQueue; g_hIGQueue = null;
+        delete g_hIGReachable; g_hIGReachable = null;
+        delete g_hSmoothNodePath; g_hSmoothNodePath = null;
+        delete g_hFunnelResult; g_hFunnelResult = null;
         return;
     }
     static float pos[3];
@@ -237,7 +262,22 @@ void OnFramePrep(bool new_frame = true)
             if (!budget_spent && g_iBuildPhase == 2)
             {
                 if (g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue)
-                    HPA_BuildClusters();
+                {
+                    // v4.6: skip HPA on very large maps. Pass 2 is ~30-60ms of
+                    // single-frame work (2× Format + 2× StringMap ops per edge)
+                    // and reliably triggers SIGALRM at 5K+ areas. HPA is only a
+                    // 5% heuristic boost — skipping changes nothing about
+                    // correctness, only A* convergence speed.
+                    if (g_hAStarNodes != null && g_hAStarNodes.Length > HPA_SKIP_THRESHOLD)
+                    {
+                        g_iHPAClusterCount = 0;
+                        LogMessage("[PTG] HPA skipped: %d nav areas > threshold %d", g_hAStarNodes.Length, HPA_SKIP_THRESHOLD);
+                    }
+                    else
+                    {
+                        HPA_BuildClusters();
+                    }
+                }
                 g_iBuildPhase = 3;
                 budget_spent = true;
             }
@@ -248,6 +288,7 @@ void OnFramePrep(bool new_frame = true)
                 if (g_hCvarNonMesh != null && g_hCvarNonMesh.BoolValue)
                     DetectNavMeshBridges();
                 g_iBuildPhase = -1; // skip directly to post-build sentinel
+                g_iPostStep = 0;    // v4.6: reset post-build sub-state machine
                 budget_spent = true; // defer post-build to NEXT frame
                 // DetectNavMeshBridges does a BFS flood-fill + bridge scan across
                 // nav areas. Running it AND post-build init (rescue vehicle scan
@@ -259,105 +300,142 @@ void OnFramePrep(bool new_frame = true)
             // --- Post-build initialization (original STAGE_PREP logic) ---
             // Only run when all batch phases are done (budget_spent is false
             // and g_iBuildPhase is the sentinel -1).
+            // v4.6: sub-state machine (g_iPostStep 0-4). IdentifyGoal's BFS was
+            // the single-frame killer here (20K nodes, O(V²) queue) — now
+            // distributed via AStar_IdentifyGoal_Frame. AStar_Init (4×n pushes)
+            // also gets its own step.
             if (!budget_spent && g_iBuildPhase == -1)
             {
-
-            // Initialize guide cells
-            delete g_GuideCells;
-            g_GuideCells = new ArrayList(sizeof(Cell));
-
-            delete RescueVehicleCells;
-            RescueVehicleCells = new ArrayList(sizeof(Cell));
-
-            // Track rescue vehicle
-            g_fFlowRescueVehicle = -1.0;
-            g_bFoundRescueVehicle = false;
-            g_aNavRescueVehicle = Address_Null;
-
-            for (int i = 0; i < g_hAStarNodes.Length; i++)
+            switch (g_iPostStep)
             {
-                int areaInt = g_hAStarNodes.Get(i);
-                Address area = view_as<Address>(areaInt);
-                float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
-                int spawnAttrs = L4D_GetNavArea_SpawnAttributes(area);
-
-                if ((spawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) && g_hCvarFinale.IntValue < FINALE_NEVER)
+                case 0: // rescue vehicle scan + IdentifyStart (O(n) — safe single frame)
                 {
-                    if (flow > g_fFlowRescueVehicle)
+                    // Initialize guide cells
+                    delete g_GuideCells;
+                    g_GuideCells = new ArrayList(sizeof(Cell));
+
+                    delete RescueVehicleCells;
+                    RescueVehicleCells = new ArrayList(sizeof(Cell));
+
+                    // Track rescue vehicle
+                    g_fFlowRescueVehicle = -1.0;
+                    g_bFoundRescueVehicle = false;
+                    g_aNavRescueVehicle = Address_Null;
+
+                    for (int i = 0; i < g_hAStarNodes.Length; i++)
                     {
-                        g_bFoundRescueVehicle = true;
-                        g_fFlowRescueVehicle = flow;
-                        g_aNavRescueVehicle = area;
+                        int areaInt = g_hAStarNodes.Get(i);
+                        Address area = view_as<Address>(areaInt);
+                        float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
+                        int spawnAttrs = L4D_GetNavArea_SpawnAttributes(area);
+
+                        if ((spawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) && g_hCvarFinale.IntValue < FINALE_NEVER)
+                        {
+                            if (flow > g_fFlowRescueVehicle)
+                            {
+                                g_bFoundRescueVehicle = true;
+                                g_fFlowRescueVehicle = flow;
+                                g_aNavRescueVehicle = area;
+                            }
+                        }
                     }
+
+                    // Populate RescueVehicleCells for STAGE_JOIN
+                    if (g_bFoundRescueVehicle)
+                    {
+                        Cell rvc;
+                        rvc.navArea = g_aNavRescueVehicle;
+                        rvc.flow = g_fFlowRescueVehicle;
+                        float rpos[3];
+                        L4D_GetNavAreaCenter(g_aNavRescueVehicle, rpos);
+                        rpos[2] += 16.0;
+                        if (pos_underwater(rpos)) rpos[2] += 16.0;
+                        rvc.center = rpos;
+                        RescueVehicleCells.PushArray(rvc);
+                    }
+
+                    finale_stitched = false;
+                    finale_backwards = false;
+
+                    g_iPostStartIdx = AStar_IdentifyStart();
+                    g_iPostStep = 1;
+                    budget_spent = true;
                 }
-            }
+                case 1: // IdentifyGoal init (strategy 1 O(n); BFS state setup)
+                {
+                    AStar_IdentifyGoal_Init(g_iPostStartIdx);
+                    if (g_iIGStage == 1)
+                        g_iPostStep = 2; // BFS running — process in frames
+                    else
+                        g_iPostStep = 3; // done (rescue vehicle hit or no BFS)
+                    budget_spent = true;
+                }
+                case 2: // IdentifyGoal BFS frames
+                {
+                    if (AStar_IdentifyGoal_Frame(BFS_NODES_PER_FRAME))
+                        g_iPostStep = 3; // BFS complete
+                    else
+                        budget_spent = true; // continue next frame
+                }
+                case 3: // IdentifyGoal finish + validate start/goal
+                {
+                    int startIdx = g_iPostStartIdx;
+                    int goalIdx = AStar_IdentifyGoal_Finish();
 
-            // Populate RescueVehicleCells for STAGE_JOIN
-            if (g_bFoundRescueVehicle)
-            {
-                Cell rvc;
-                rvc.navArea = g_aNavRescueVehicle;
-                rvc.flow = g_fFlowRescueVehicle;
-                float rpos[3];
-                L4D_GetNavAreaCenter(g_aNavRescueVehicle, rpos);
-                rpos[2] += 16.0;
-                if (pos_underwater(rpos)) rpos[2] += 16.0;
-                rvc.center = rpos;
-                RescueVehicleCells.PushArray(rvc);
-            }
+                    if (startIdx < 0 || goalIdx < 0)
+                    {
+                        LogMessage("[PTG] A* cannot identify start (%d) or goal (%d) — falling back", startIdx, goalIdx);
+                        guide_prep = false;
+                        g_iPrepStage = STAGE_NONE;
+                        return;
+                    }
 
-            finale_stitched = false;
-            finale_backwards = false;
+                    g_aAStarStart = g_hAStarNodes.Get(startIdx);
+                    g_aAStarGoal = g_hAStarNodes.Get(goalIdx);
+                    g_iAStarGoalIndex = goalIdx;
 
-            // Identify start and goal
-            int startIdx = AStar_IdentifyStart();
-            int goalIdx = AStar_IdentifyGoal(startIdx);
+                    #if DEBUG
+                    float startC[3], goalC[3];
+                    g_hAStarCenters.GetArray(startIdx, startC, 3);
+                    g_hAStarCenters.GetArray(goalIdx, goalC, 3);
+                    LogMessage("[PTG] A* start=%d (%.0f,%.0f,%.0f) goal=%d (%.0f,%.0f,%.0f) navAreas=%d",
+                        startIdx, startC[0], startC[1], startC[2],
+                        goalIdx, goalC[0], goalC[1], goalC[2],
+                        g_hAStarNodes.Length);
+                    #endif
 
-            if (startIdx < 0 || goalIdx < 0)
-            {
-                LogMessage("[PTG] A* cannot identify start (%d) or goal (%d) — falling back", startIdx, goalIdx);
-                guide_prep = false;
-                g_iPrepStage = STAGE_NONE;
-                return;
-            }
+                    g_iPostStep = 4;
+                    budget_spent = true;
+                }
+                case 4: // A* state init + non-mesh detection start
+                {
+                    int startIdx = g_iPostStartIdx;
 
-            g_aAStarStart = g_hAStarNodes.Get(startIdx);
-            g_aAStarGoal = g_hAStarNodes.Get(goalIdx);
-            g_iAStarGoalIndex = goalIdx;
+                    // Initialize A* search state
+                    AStar_Init();
+                    AStar_SetStart(startIdx);
 
-            #if DEBUG
-            float startC[3], goalC[3];
-            g_hAStarCenters.GetArray(startIdx, startC, 3);
-            g_hAStarCenters.GetArray(goalIdx, goalC, 3);
-            LogMessage("[PTG] A* start=%d (%.0f,%.0f,%.0f) goal=%d (%.0f,%.0f,%.0f) navAreas=%d",
-                startIdx, startC[0], startC[1], startC[2],
-                goalIdx, goalC[0], goalC[1], goalC[2],
-                g_hAStarNodes.Length);
-            #endif
+                    // Start non-mesh connection detection (continues across frames, only if cvar enabled)
+                    if (g_hCvarNonMesh.BoolValue)
+                        DetectNonMeshConnections_Init();
 
-            // Initialize A* search state
-            AStar_Init();
-            AStar_SetStart(startIdx);
-
-            // Start non-mesh connection detection (continues across frames, only if cvar enabled)
-            if (g_hCvarNonMesh.BoolValue)
-                DetectNonMeshConnections_Init();
-
-            #if DEBUG
-            g_fPrepTotalTime = 0.0;
-            g_iErased = 0;
-            g_iNavBlocked = 0;
-            g_iTotalCollected = g_hAStarNodes.Length;
-            g_iTighten = 0;
-            #endif
-            g_iLoop = 0;
-            budget_spent = true; // v4.0 fix: defer A* search to next frame.
-            // Post-build init (IdentifyStart/Goal + AStar_Init + non-mesh init)
-            // is already expensive on large maps. Running STAGE_ASTAR in the
-            // same frame triggers SIGALRM on 11K+ nav area maps.
-            g_iBuildPhase = -2; // mark post-build as done: prevents re-entry
-            // (g_iBuildPhase==-1 would re-enter post-build every frame;
-            //  -2 ensures no phase matches, so g_iPrepStage advances to STAGE_ASTAR)
+                    #if DEBUG
+                    g_fPrepTotalTime = 0.0;
+                    g_iErased = 0;
+                    g_iNavBlocked = 0;
+                    g_iTotalCollected = g_hAStarNodes.Length;
+                    g_iTighten = 0;
+                    #endif
+                    g_iLoop = 0;
+                    g_iBuildPhase = -2; // mark post-build as done: prevents re-entry
+                    // (g_iBuildPhase==-1 would re-enter post-build every frame;
+                    //  -2 ensures no phase matches, so g_iPrepStage advances to STAGE_ASTAR)
+                    budget_spent = true; // defer A* search to next frame.
+                    // Post-build init (IdentifyStart/Goal + AStar_Init + non-mesh init)
+                    // is already expensive on large maps. Running STAGE_ASTAR in the
+                    // same frame triggers SIGALRM on 11K+ nav area maps.
+                }
+            } // switch (g_iPostStep)
             } // if (!budget_spent)
         }
         case STAGE_ASTAR:
@@ -395,51 +473,100 @@ void OnFramePrep(bool new_frame = true)
         }
         case STAGE_SMOOTH:
         {
-            if (!budget_spent)
+            // v4.6: sub-state machine (g_iSmoothStep 0-4). The old single-frame
+            // block (portal compute + full ReconstructPath + funnel) crashed
+            // large maps via SIGALRM. Portal computation is skipped entirely:
+            // g_hPortalCache has no consumers (AStar_ReconstructPath uses nav
+            // area centers — accurate portals need L4D_NavArea_GetCorner which
+            // left4dhooks lacks), so the fallback path's synchronous
+            // AStar_ComputePortals() was pure dead work + crash risk.
+            switch (g_iSmoothStep)
             {
-            // Reconstruct and smooth the A* path
-            delete g_GuideCells;
-            g_GuideCells = new ArrayList(sizeof(Cell));
+                case 0: // rebuild cell list + reconstruct init
+                {
+                    delete g_GuideCells;
+                    g_GuideCells = new ArrayList(sizeof(Cell));
 
-            // Lazy portal computation: if portal cache is empty (build phases skipped
-            // or left4dhocks lacks GetCorner), compute portals synchronously from centers.
-            if (g_hPortalCache == null && g_hAStarNodes != null)
-            {
-                AStar_ComputePortals();
-            }
+                    if (!AStar_ReconstructPath_Init(g_GuideCells))
+                    {
+                        LogMessage("[PTG] A* produced <2 guide cells — falling back");
+                        delete g_GuideCells;
+                        guide_prep = false;
+                        g_iPrepStage = STAGE_NONE;
+                        return;
+                    }
+                    g_iSmoothStep = 1;
+                    budget_spent = true;
+                }
+                case 1: // convert nav areas → guide cells (frame-budgeted)
+                {
+                    if (AStar_ReconstructPath_ConvertFrame(g_GuideCells, CELLS_PER_FRAME))
+                    {
+                        g_iSmoothIdx = 1; // validation starts at edge 1
+                        g_iSmoothStep = 2;
+                    }
+                    budget_spent = true;
+                }
+                case 2: // validation cascade (frame-budgeted)
+                {
+                    if (AStar_ReconstructPath_ValidateFrame(g_GuideCells, EDGES_PER_FRAME))
+                        g_iSmoothStep = 3;
+                    budget_spent = true;
+                }
+                case 3: // 3D funnel Z-transitions (frame-budgeted)
+                {
+                    if (g_hFunnelResult != null)
+                    {
+                        // funnel in progress — keep pushing
+                        if (Funnel3D_InsertZTransitions_Frame(g_GuideCells))
+                            g_iSmoothStep = 4;
+                        else
+                            budget_spent = true;
+                    }
+                    else
+                    {
+                        // funnel not started — init it (no-op when cvar off / too short)
+                        Funnel3D_InsertZTransitions_Init(g_GuideCells);
+                        if (g_hFunnelResult == null)
+                            g_iSmoothStep = 4; // nothing to do
+                        else
+                            budget_spent = true; // work started — continue next frame
+                    }
+                }
+                case 4: // finish
+                {
+                    if (g_GuideCells.Length < 2)
+                    {
+                        LogMessage("[PTG] A* produced <2 guide cells — falling back");
+                        delete g_GuideCells;
+                        guide_prep = false;
+                        g_iPrepStage = STAGE_NONE;
+                        return;
+                    }
 
-            AStar_ReconstructPath(g_GuideCells);
+                    // Clean up A* state to free memory
+                    delete g_hAStarOpen;
+                    delete g_hAStarGScore;
+                    delete g_hAStarCameFrom;
+                    delete g_hAStarEdgeType;
+                    delete g_hAStarClosed;
+                    delete g_hSmoothNodePath;
+                    g_hSmoothNodePath = null;
 
-            // v4.0: Insert 3D Z-transition waypoints for multi-floor maps
-            Funnel3D_InsertZTransitions(g_GuideCells);
+                    // Track rescue vehicle relative to guide path
+                    if (g_bFoundRescueVehicle)
+                    {
+                        float maxGuideFlow = g_GuideCells.Get(g_GuideCells.Length - 1, 0);
+                        finale_backwards = g_fFlowRescueVehicle < maxGuideFlow;
+                        if (explored_finale == null) explored_finale = new ArrayList();
+                        explored_finale.Clear();
+                    }
 
-            if (g_GuideCells.Length < 2)
-            {
-                LogMessage("[PTG] A* produced <2 guide cells — falling back");
-                delete g_GuideCells;
-                guide_prep = false;
-                g_iPrepStage = STAGE_NONE;
-                return;
-            }
-
-            // Clean up A* state to free memory
-            delete g_hAStarOpen;
-            delete g_hAStarGScore;
-            delete g_hAStarCameFrom;
-            delete g_hAStarEdgeType;
-            delete g_hAStarClosed;
-
-            // Track rescue vehicle relative to guide path
-            if (g_bFoundRescueVehicle)
-            {
-                float maxGuideFlow = g_GuideCells.Get(g_GuideCells.Length - 1, 0);
-                finale_backwards = g_fFlowRescueVehicle < maxGuideFlow;
-                if (explored_finale == null) explored_finale = new ArrayList();
-                explored_finale.Clear();
-            }
-
-            g_iLoop = 1;
-            } // if (!budget_spent)
+                    g_iLoop = 1;
+                    g_iSmoothStep = 0; // reset for next build
+                    budget_spent = true;
+                }
+            } // switch (g_iSmoothStep)
         }
         case STAGE_JOIN:
         {

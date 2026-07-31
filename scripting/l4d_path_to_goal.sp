@@ -743,7 +743,8 @@ Action Timer_AutoCheck(Handle timer)
     if (guide_prep && g_fLastPrepProgressTime > 0.0
         && (GetEngineTime() - g_fLastPrepProgressTime) > PREP_STALL_SECONDS)
     {
-        LogMessage("[PTG] Watchdog: pipeline stalled (no frame progress for %.0fs) — resetting", PREP_STALL_SECONDS);
+        LogMessage("[PTG] Watchdog: pipeline stalled (no frame progress for %.0fs, prep started %.1fs ago) — resetting",
+            PREP_STALL_SECONDS, g_fPrepStartTime > 0.0 ? GetEngineTime() - g_fPrepStartTime : 0.0);
         guide_prep = false;
         g_iPrepStage = STAGE_NONE;
         g_fLastPrepProgressTime = 0.0;
