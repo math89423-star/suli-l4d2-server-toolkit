@@ -808,6 +808,14 @@ void OnFramePrep(bool new_frame = true)
         g_iPrepStage = STAGE_NONE;
         timer_nav = null;
         if (finale_stitched && finale_rescue && g_hCvarFinaleAuto.BoolValue) Guide_All_Clients();
+        else if (g_bDetourQueued && !g_bDetourActive)
+        {
+            // v4.6: a nav_blocked detour was deferred while the pipeline ran
+            Address queued = g_aDetourQueuedArea;
+            g_bDetourQueued = false;
+            g_aDetourQueuedArea = Address_Null;
+            Guide_TryLocalDetour(queued);
+        }
         else Timer_CheckRequests(null); // Draw beams immediately for pending clients
     }
 

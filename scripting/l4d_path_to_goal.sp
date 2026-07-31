@@ -164,6 +164,13 @@ public void OnPluginStart()
     g_hCvarLazyLargeMaps = CreateConVar("l4d_path_to_goal_lazy_large_maps", "1",
     "Skip background prebuild on maps with more nav areas than the lazy threshold (see source, default 8000). Path builds on first player request instead — keeps CPU idle on huge third-party maps. 0=always prebuild.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
+    // v4.6: finale radio (prop_finale_machine) goal override. Third-party maps
+    // often tuck the radio off the main flow — while it's active, guide players
+    // TO the operation point (with a beacon) instead of past it. We only point
+    // at the machine; its logic is handled by the game.
+    g_hCvarRadioGoal = CreateConVar("l4d_path_to_goal_radio_goal", "1",
+    "During finale radio phase, retarget the path goal to the radio operation point (prop_finale_machine) and mark it with a beacon. 0=keep normal rescue goal.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
     g_hCvarHpaCellSize = CreateConVar("l4d_path_to_goal_hpa_cell_size", "1024.0",
     "HPA* cluster cell size (units). Smaller = finer hierarchy, more clusters.",FCVAR_NOTIFY, true, 256.0, true, 4096.0);
 
@@ -242,6 +249,17 @@ void evtFinaleVehicle(Event event, const char[] name, bool dontBroadcast)
     LogMessage("evtFinaleVehicle");
     #endif
     if (finale) finale_rescue = true;
+    // v4.6: radio phase over (vehicle incoming/ready) — restore the normal
+    // rescue-vehicle goal. The existing stitch_finale logic below takes over.
+    if (g_bRadioGoalActive)
+    {
+        g_bRadioGoalActive = false;
+        g_aRadioNavArea = Address_Null;
+        delete g_hRadioBeacon;
+        g_hRadioBeacon = null;
+        LogMessage("[PTG] Finale radio goal cleared — restoring rescue vehicle goal");
+        NavChanged(true);
+    }
     if (!enable) return;
     if (finale_rescue && g_hCvarFinale.IntValue < FINALE_NEVER)
     {
@@ -256,6 +274,34 @@ void evtFinaleStart(Event event, const char[] name, bool dontBroadcast)
     LogMessage("evtFinaleStart");
     #endif
     finale = true;
+    // v4.6: finale radio phase (finale_radio_start) — retarget goal to the
+    // radio operation point. No machine logic is simulated; we only guide to
+    // it and beacon it. Cleared by evtFinaleVehicle.
+    if (g_hCvarRadioGoal != null && g_hCvarRadioGoal.BoolValue && strcmp(name, "finale_radio_start") == 0)
+    {
+        int ent = FindEntityByClassname(-1, "prop_finale_machine");
+        if (ent <= 0) ent = FindEntityByClassname(-1, "point_finale_radio");
+        if (ent > 0)
+        {
+            float origin[3];
+            GetEntPropVector(ent, Prop_Send, "m_vecOrigin", origin);
+            g_aRadioNavArea = L4D_GetNearestNavArea(origin, 500.0, true, true, false, TEAM_SURVIVOR);
+            if (g_aRadioNavArea != Address_Null)
+            {
+                if (!g_bRadioGoalActive)
+                {
+                    g_bRadioGoalActive = true;
+                    LogMessage("[PTG] Finale radio goal active — guiding to radio operation point (area %d)", g_aRadioNavArea);
+                    NavChanged(true); // background rebuild applies the new goal
+                }
+                if (g_hRadioBeacon == null) g_hRadioBeacon = new ArrayList(3);
+                else g_hRadioBeacon.Clear();
+                float center[3];
+                L4D_GetNavAreaCenter(g_aRadioNavArea, center);
+                g_hRadioBeacon.PushArray(center, 3);
+            }
+        }
+    }
     if (guide_ready && !finale_stitched && should_stitch_finale()) stitch_finale();
 }
 
@@ -302,11 +348,11 @@ void evtNavBlocked(Event event, const char[] name, bool dontBroadcast)
     bool blocked = event.GetBool("blocked");
     LogMessage("nav_blocked area %d blocked %d on_path %d", navArea, blocked, IsAreaOnPath(navArea));
     #endif
-    // Re-plan if the blocked area is on our current path.
-    // Removed the !g_bFlowRecomputeHooked||finale gate — it caused
-    // nav_blocked events to be silently ignored 90% of the time.
+    // v4.6: local detour instead of full rebuild when the blocked area is on
+    // our current path — windowed A* around the break, fallback to
+    // NavChanged(true) inside Guide_TryLocalDetour when detour is impossible.
     if (IsAreaOnPath(navArea))
-        NavChanged(true);
+        Guide_TryLocalDetour(navArea);
 }
 
 void evtNavGenerate(Event event, const char[] name, bool dontBroadcast)
@@ -715,6 +761,12 @@ public void OnMapEnd()
     if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); g_hToggleTimer = null; }
     for (int i = 1; i <= MaxClients; i++) g_bGuideToggled[i] = false;
     g_hReconnectToggle.Clear(); // purge stale reconnect toggle entries
+
+    // v4.6: finale radio state dies with the map
+    g_bRadioGoalActive = false;
+    g_aRadioNavArea = Address_Null;
+    delete g_hRadioBeacon;
+    g_hRadioBeacon = null;
 }
 
 public void OnClientDisconnect(int client)

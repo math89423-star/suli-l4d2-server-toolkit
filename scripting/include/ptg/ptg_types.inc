@@ -269,6 +269,50 @@ int g_iNavAreaCount = -1;     // -1 = unknown; counted via L4D_GetAllNavAreas on
 bool g_bLazyBuildRequested = false; // true once any real build request consumed the gate
 #define LAZY_MAP_THRESHOLD 8000
 
+// ── v4.6 local detour (ptg_detour.inc) ──
+// forward so ptg_utils.inc (PathIntegrityCheck) and l4d_path_to_goal.sp
+// (evtNavBlocked) can call the entry point before its include is inlined.
+// Globals live here (not in ptg_detour.inc) because ptg_validate.inc's REPAIR
+// completion branch reads them and validate is inlined BEFORE detour.
+forward void Guide_TryLocalDetour(Address blockedArea);
+
+#define DETOUR_WINDOW 12            // half-width of the window around the blocked cell
+#define DETOUR_NODES_PER_FRAME 300  // local A* nodes expanded per frame
+#define DETOUR_COLLECT_PER_FRAME 2000 // window BFS nodes per frame
+#define DETOUR_NODE_LIMIT 4000      // hard cap on local node table
+#define DETOUR_BOX_PADDING 400.0    // AABB expansion beyond window cell centers
+#define DETOUR_CONVERT_PER_FRAME 150
+
+bool g_bDetourActive = false;     // a detour frame chain is running
+bool g_bDetourQueued = false;     // trigger arrived while busy — run after current chain
+Address g_aDetourQueuedArea = Address_Null;
+bool g_bDetourQueuedDirty = false;// NavChanged(true) arrived while detouring — rebuild after
+int g_iDetourStage = 0;           // 0=idle, 1=collect, 2=local A*, 3=convert, 4=splice
+int g_iDetourD = DETOUR_WINDOW;   // window half-width (grows on retry)
+int g_iDetourBlockedIdx = -1;     // cell index of the blocked area on the path
+int g_iDetourWinStart, g_iDetourWinEnd; // window cell range (anchors)
+int g_iDetourStartIdx = -1, g_iDetourGoalIdx = -1; // anchor node indices
+float g_fDetourMin[3], g_fDetourMax[3]; // AABB constraint for node collection
+
+// local node table (window BFS result)
+ArrayList g_hDetourNodes = null;  // nodeIndex list
+StringMap g_hDetourNodeMap = null;// "nodeIdx" → local index
+ArrayList g_hDetourG = null;      // float per local node
+ArrayList g_hDetourCameFrom = null; // int per local node
+ArrayList g_hDetourEdge = null;   // int per local node (ConnectionType)
+ArrayList g_hDetourClosed = null; // int per local node
+ArrayList g_hDetourOpen = null;   // HeapEntry priority queue
+int g_iDetourCollectHead = 0;     // window BFS head cursor
+ArrayList g_hDetourPath = null;   // forward nodeIndex list (local path result)
+ArrayList g_hDetourCells = null;  // converted detour waypoints (Cell)
+int g_iDetourConvIdx = 0;         // convert cursor
+
+// ── v4.6 finale radio goal ──
+bool g_bRadioGoalActive = false;   // finale radio (prop_finale_machine) needs operating
+Address g_aRadioNavArea = Address_Null;
+ArrayList g_hRadioBeacon = null;   // 1 entry: radio operation point (float[3])
+ConVar g_hCvarRadioGoal;           // l4d_path_to_goal_radio_goal
+
 // Forward-declare optional newer left4dhooks natives (may not be in server's include)
 enum NavCornerType {
     NAV_CORNER_NORTH_WEST = 0,

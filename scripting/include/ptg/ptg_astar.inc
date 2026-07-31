@@ -825,6 +825,43 @@ stock bool AStar_ReconstructPath_Init(ArrayList outCells)
     return true;
 }
 
+// v4.6: shared conversion — nav area node → ground-snapped guide cell.
+// Used by AStar_ReconstructPath_ConvertFrame and the local detour (ptg_detour).
+// Ground snap: nav area center Z is the area's average height, not the actual
+// walkable floor. Trace down to find the real surface (+2 fudge to stay above
+// floor undulations), with upward fallback for inverted surfaces.
+stock void AStar_CellFromNode(int idx, Cell out)
+{
+    int areaInt = g_hAStarNodes.Get(idx);
+    out.navArea = view_as<Address>(areaInt);
+    g_hAStarCenters.GetArray(idx, out.center, 3);
+
+    float traceStart[3], traceEnd[3], traceHit[3];
+    traceStart[0] = out.center[0];
+    traceStart[1] = out.center[1];
+    traceStart[2] = out.center[2] + 200.0;  // v4.5: 100→200 up (tall buildings)
+    traceEnd[0] = out.center[0];
+    traceEnd[1] = out.center[1];
+    traceEnd[2] = out.center[2] - 800.0;   // v4.5: 300→800 down (steep slopes)
+    TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
+    if (TR_DidHit())
+    {
+        TR_GetEndPosition(traceHit);
+        out.center[2] = traceHit[2] + 2.0; // +2 above floor surface
+    }
+    else
+    {
+        traceStart[2] = out.center[2] - 16.0;
+        traceEnd[2]   = out.center[2] + 128.0;
+        TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
+        if (TR_DidHit())
+        {
+            TR_GetEndPosition(traceHit);
+            out.center[2] = traceHit[2] + 2.0;
+        }
+    }
+}
+
 // Convert nav area centers → guide cells (ground snap + flow interpolation).
 // Returns true when all cells are converted.
 stock bool AStar_ReconstructPath_ConvertFrame(ArrayList outCells, int maxCells)
@@ -837,43 +874,9 @@ stock bool AStar_ReconstructPath_ConvertFrame(ArrayList outCells, int maxCells)
 
         int ni = g_iSmoothIdx;
         int idx = g_hSmoothNodePath.Get(ni);
-        int areaInt = g_hAStarNodes.Get(idx);
 
         Cell cell;
-        cell.navArea = view_as<Address>(areaInt);
-        g_hAStarCenters.GetArray(idx, cell.center, 3);
-
-        // Ground snap: nav area center Z is the area's average height, not
-        // the actual walkable floor. Trace down to find the real surface.
-        // v4.4: widened trace range (100 up / 300 down) for steep slopes
-        // and multi-story buildings. Add +2 fudge after hit to stay above
-        // the surface so beams don't embed in slight floor undulations.
-        float traceStart[3], traceEnd[3], traceHit[3];
-        traceStart[0] = cell.center[0];
-        traceStart[1] = cell.center[1];
-        traceStart[2] = cell.center[2] + 200.0;  // v4.5: 100→200 up (tall buildings)
-        traceEnd[0] = cell.center[0];
-        traceEnd[1] = cell.center[1];
-        traceEnd[2] = cell.center[2] - 800.0;   // v4.5: 300→800 down (steep slopes)
-        TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
-        if (TR_DidHit())
-        {
-            TR_GetEndPosition(traceHit);
-            cell.center[2] = traceHit[2] + 2.0; // +2 above floor surface
-        }
-        // v4.5: upward fallback — if downward trace found nothing, try tracing up
-        // (cell center may be below the actual walkable floor on inverted surfaces)
-        else
-        {
-            traceStart[2] = cell.center[2] - 16.0;
-            traceEnd[2]   = cell.center[2] + 128.0;
-            TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
-            if (TR_DidHit())
-            {
-                TR_GetEndPosition(traceHit);
-                cell.center[2] = traceHit[2] + 2.0;
-            }
-        }
+        AStar_CellFromNode(idx, cell);
 
         cell.flow = g_fSmoothStartFlow + (g_fSmoothGoalFlow - g_fSmoothStartFlow) * (float(ni) / float(pathLen - 1));
         outCells.PushArray(cell, sizeof(Cell));
@@ -1105,6 +1108,25 @@ stock void AStar_IdentifyGoal_Init(int startIndex)
         g_hAStarCenters.GetArray(startIndex, g_fIGStartCenter, 3);
 
     int nodeCount = g_hAStarNodes.Length;
+
+    // Strategy 0 (v4.6): finale radio goal — while the finale radio is active,
+    // guide players TO the radio activation point (prop_finale_machine) instead
+    // of walking past it toward the rescue vehicle. Third-party maps often hide
+    // the machine off the main flow; the beacon marks the operation point.
+    // We do NOT simulate the machine's logic — the game handles that.
+    if (g_bRadioGoalActive && g_aRadioNavArea != Address_Null)
+    {
+        char key[16];
+        IntToString(view_as<int>(g_aRadioNavArea), key, sizeof(key));
+        int idx = -1;
+        if (g_hAStarAreaToIndex.GetValue(key, idx))
+        {
+            LogMessage("[PTG] A* goal: finale radio area index %d", idx);
+            g_iIGStage = 2;
+            g_iIGResult = idx;
+            return;
+        }
+    }
 
     // Strategy 1: RESCUE_VEHICLE area (unambiguous, always correct if present)
     for (int i = 0; i < nodeCount; i++)

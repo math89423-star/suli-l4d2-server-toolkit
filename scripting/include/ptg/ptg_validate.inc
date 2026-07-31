@@ -258,10 +258,21 @@ void Guide_RepairBlocked_Frame(any unused)
             LogMessage("[PTG] STAGE_REPAIR: fixed=%d beaconed=%d / %d total beams",
                 g_rFixed, g_rBeaconed, (g_GuideCells != null && g_GuideCells.Length > 1) ? g_GuideCells.Length - 1 : 0);
         }
-        // v4.6: REPAIR done — release the busy gate and flush any one-shot
-        // requests that were deferred while g_GuideCells was being rewritten.
+        // v4.6: REPAIR done — release the busy gate. A detour requested while
+        // REPAIR was rewriting cells runs now (re-enters with busy=false);
+        // otherwise flush any one-shot requests deferred during REPAIR.
         g_bGuideCellsBusy = false;
-        Timer_CheckRequests(null);
+        if (g_bDetourQueued && !g_bDetourActive)
+        {
+            Address queued = g_aDetourQueuedArea;
+            g_bDetourQueued = false;
+            g_aDetourQueuedArea = Address_Null;
+            Guide_TryLocalDetour(queued);
+        }
+        else
+        {
+            Timer_CheckRequests(null);
+        }
         return;
     }
 
@@ -547,6 +558,15 @@ void Guide_DrawBeacons(int client = -1)
     {
         float pos[3];
         g_hPartialBeacon.GetArray(0, pos, 3);
+        Guide_DrawBeaconPillar(pos, client, duration, 4.0);
+        drawn++;
+    }
+
+    // v4.6: finale radio operation point beacon (see evtFinaleStart)
+    if (g_hRadioBeacon != null && g_hRadioBeacon.Length > 0)
+    {
+        float pos[3];
+        g_hRadioBeacon.GetArray(0, pos, 3);
         Guide_DrawBeaconPillar(pos, client, duration, 4.0);
         drawn++;
     }

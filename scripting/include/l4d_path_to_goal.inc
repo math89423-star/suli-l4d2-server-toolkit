@@ -75,6 +75,11 @@ public void __pl_l4d_path_to_goal_SetNTVOptional()
 //    RequestGuide, detour_join, DrawBeam, client request timers.
 #include "ptg/ptg_guide.inc"
 
+// 5b. Local detour — windowed A* splice around blocked nav areas (v4.6)
+//     Needs Timer_CheckRequests (guide.inc) and the pipeline — must come
+//     before ptg_pipeline.inc.
+#include "ptg/ptg_detour.inc"
+
 // 6. Finale — finale/rescue vehicle stitching (~760 lines)
 //    try_ladder, stitch_finale, explore_stitch, guide_add_cell, cell_rescue.
 #include "ptg/ptg_finale.inc"

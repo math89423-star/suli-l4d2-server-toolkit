@@ -652,8 +652,10 @@ stock bool PathIntegrityCheck()
 
     if (blocked > 0)
     {
-        LogMessage("[PTG] Path integrity check: %d/%d sampled cells blocked — re-planning", blocked, checked);
-        NavChanged(true);
+        LogMessage("[PTG] Path integrity check: %d/%d sampled cells blocked — local detour", blocked, checked);
+        // v4.6: windowed detour around the first blocked cell found (falls
+        // back to full NavChanged(true) rebuild inside when impossible)
+        Guide_TryLocalDetour(cell.navArea);
         return false;
     }
 
