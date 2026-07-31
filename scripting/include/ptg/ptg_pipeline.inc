@@ -67,6 +67,7 @@ void Guide_Cleanup()
     g_iPrepStage = STAGE_NONE; // tell guide prep to cancel
     guide_prep = false;
     g_bPathDirty = false;
+    g_bGuideCellsBusy = false; // v4.6: REPAIR chain died with the pipeline — unblock draws/requests
     g_iBuildPhase = 0;
     g_iPortalBatchIdx = 0;
     g_iHPAClusterCount = 0;

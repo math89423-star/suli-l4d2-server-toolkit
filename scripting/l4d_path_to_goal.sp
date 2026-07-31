@@ -27,6 +27,13 @@ Handle g_hToggleTimer = null;
 int g_iBeamsMissed = 0; // v4.5: beam health tracking
 float g_fLastPtgTime[MAXPLAYERS+1];
 
+// v4.6: death position tracking — a dead player who isn't observing anyone
+// draws the path anchored near where they died (previously startIndex=0 drew
+// at the map start, invisible). Valid for 120s; cleared on respawn.
+float g_fDeathPos[MAXPLAYERS+1][3];
+bool g_bHasDeathPos[MAXPLAYERS+1];
+float g_fDeathTime[MAXPLAYERS+1];
+
 public Plugin myinfo =
 {
 	name = "[L4D1/L4D2] Path To Goal",
@@ -189,6 +196,7 @@ public void OnPluginStart()
     HookEvent("finale_vehicle_ready", 	  evtFinaleVehicle,  EventHookMode_PostNoCopy);
     HookEvent("player_first_spawn",       evtFirstSpawn,     EventHookMode_PostNoCopy);
     HookEvent("player_spawn",             evtPlayerSpawn,    EventHookMode_Post);
+    HookEvent("player_death",             evtPlayerDeath,    EventHookMode_Post);
     if (g_bL4D2)
     {
     HookEvent("gauntlet_finale_start", 	  evtGauntletStart,  EventHookMode_PostNoCopy);
@@ -987,7 +995,23 @@ void Guide_Prep_Fallback()
 
 void AutoGuideDrawPath(int client = -1)
 {
-    if (g_GuideCells == null || g_GuideCells.Length < 2) return;
+    // v4.6: snapshot while REPAIR is rewriting g_GuideCells — Clone() is O(n)
+    // on the 0.3s redraw cadence, trivially cheap; prevents reading arrays
+    // between REPAIR's in-place ShiftUp/SetArray mutations.
+    ArrayList cells = g_GuideCells;
+    ArrayList beams = g_bBeamWalkable;
+    bool snapped = false;
+    if (g_bGuideCellsBusy)
+    {
+        cells = (g_GuideCells != null) ? g_GuideCells.Clone() : null;
+        beams = (g_bBeamWalkable != null) ? g_bBeamWalkable.Clone() : null;
+        snapped = true;
+    }
+    if (cells == null || cells.Length < 2)
+    {
+        if (snapped) { delete cells; delete beams; }
+        return;
+    }
 
     // Trail: thin, semi-transparent amber — subtle guide that doesn't block the view
     int color_trail[4]   = {255, 200, 75, 150};
@@ -997,21 +1021,30 @@ void AutoGuideDrawPath(int client = -1)
     float duration = g_hCvarAutoDuration.FloatValue;
     int laser = g_iLaserWhite;
     if (laser == 0) laser = g_iLaser;
-    if (laser == 0) return;
+    if (laser == 0)
+    {
+        if (snapped) { delete cells; delete beams; }
+        return;
+    }
 
-    int count = g_GuideCells.Length;
+    int count = cells.Length;
 
     // v2.2/v4.2: For per-client requests, start drawing from the nearest cell to the player.
     // This auto-updates as the player moves because the redraw timer fires every 0.6s.
     // v4.2: Handle dead/spectating/idle players — use observer target position instead
     // of falling back to index 0 (which draws beams at the map start, invisible to the
     // dead player's camera following another survivor).
+    // v4.6: dead player NOT observing anyone — anchor to their death position
+    // (within 120s) so the path is visible from where they died. Without a
+    // usable position we deliberately keep startIndex=0 (invisible but harmless)
+    // rather than skipping the draw — skipping would trip the beam health check.
     int startIndex = 0;
     if (client > 0 && IsValidClient(client) && !IsFakeClient(client))
     {
         float clientPos[3];
         bool alive = IsPlayerAlive(client);
         int target = client;
+        bool useDeathPos = false;
 
         if (!alive)
         {
@@ -1023,17 +1056,24 @@ void AutoGuideDrawPath(int client = -1)
                 if (target < 1 || target > MaxClients || !IsClientInGame(target))
                     target = client;
             }
+            else if (g_bHasDeathPos[client] && (GetGameTime() - g_fDeathTime[client]) < 120.0)
+            {
+                useDeathPos = true;
+            }
         }
 
-        if (alive || target != client)
+        if (alive || target != client || useDeathPos)
         {
-            GetEntPropVector(target, Prop_Send, "m_vecOrigin", clientPos);
+            if (useDeathPos)
+                clientPos = g_fDeathPos[client]; // v4.6: death position anchor
+            else
+                GetEntPropVector(target, Prop_Send, "m_vecOrigin", clientPos);
             float bestDist = -1.0;
             int bestIdx = 0;
             for (int j = 0; j < count; j++)
             {
                 Cell cell;
-                g_GuideCells.GetArray(j, cell, sizeof(Cell));
+                cells.GetArray(j, cell, sizeof(Cell));
                 float d = GetVectorDistance(clientPos, cell.center, true); // sq dist
                 if (bestDist < 0.0 || d < bestDist)
                 {
@@ -1047,46 +1087,56 @@ void AutoGuideDrawPath(int client = -1)
         }
     }
 
-    // On very dense nav meshes (complex 3rd-party maps), subsample to avoid
-    // overwhelming the client's temp-entity buffer and to keep beams readable.
+    // v4.6: adaptive beam density. Old uniform step=count/32 subsampled long
+    // paths so aggressively on large maps that nothing was visible. Now the
+    // near zone (600u, 1/4 of the beam budget) draws EVERY cell — the player
+    // sees their immediate next steps — and the far zone shares the remaining
+    // budget over the remaining path (step recomputed per draw).
     int maxBeams = g_hCvarMax.IntValue;
+    float NEAR_RADIUS = 600.0;
+    int nearBudget = (maxBeams > 8) ? maxBeams / 4 : 1;
+    bool inNearZone = true;
+    float distFromStart = 0.0;
     int step = 1;
-    if (count > maxBeams && maxBeams > 0)
-    {
-        step = count / maxBeams;
-        if (step < 1) step = 1;
-    }
 
     // Trail: thin, close to ground, subtle amber shimmer
     int trailDrawn = 0;
-    for (int i = startIndex; i < count - 1 && trailDrawn < maxBeams; i += step)
+    for (int i = startIndex; i < count - 1 && trailDrawn < maxBeams; )
     {
         Cell cell1, cell2;
-        g_GuideCells.GetArray(i, cell1, sizeof(Cell));
-        g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
+        cells.GetArray(i, cell1, sizeof(Cell));
+        cells.GetArray(i + 1, cell2, sizeof(Cell));
+
+        if (i > startIndex)
+            distFromStart += GetVectorDistance(cell1.center, cell2.center, false);
+        if (inNearZone && (distFromStart > NEAR_RADIUS || trailDrawn >= nearBudget))
+            inNearZone = false;
+
+        step = 1;
+        if (!inNearZone)
+        {
+            int remaining = (count - 1) - i;
+            int remainingBudget = maxBeams - trailDrawn;
+            if (remainingBudget > 1)
+                step = remaining / remainingBudget;
+            if (step < 1) step = 1;
+        }
 
         // v2.2: Skip beams blocked by world geometry (hull trace validation).
         // Doors, breakables, and trigger barriers are entity-based and pass through.
-        // Draw a small beacon dot at the break point so players know the path continues.
-        if (g_bBeamWalkable != null && i < g_bBeamWalkable.Length && g_bBeamWalkable.Get(i) == 0)
+        // v4.6: draw a proper beacon pillar at the break point (old 28u dot was
+        // invisible in 3D space) so players know the path continues.
+        if (beams != null && i < beams.Length && beams.Get(i) == 0)
         {
-            // Beacon: bright small dot at the blocked cell position — "path continues here"
-            float beaconPos[3], beaconEnd[3];
-            beaconPos = cell1.center;
-            beaconEnd = cell1.center;
-            beaconEnd[2] += 28.0; // above floor so beam is visible
-            int color_beacon[4] = {255, 100, 50, 255}; // bright red-orange
-            TE_SetupBeamPoints(beaconPos, beaconEnd, laser, 0, 0, 0,
-                duration * 0.5, 2.0, 4.0, 0, 0.0, color_beacon, 0);
-            if (client > 0) TE_SendToClient(client);
-            else TE_SendToAll();
+            Guide_DrawBeaconPillar(cell1.center, client, duration * 0.5, 2.0);
             trailDrawn++;
+            i += step;
             continue;
         }
 
         float distSq = GetVectorDistance(cell1.center, cell2.center, true);
         float minDist = g_hCvarBeamMinDist.FloatValue;
-        if (minDist > 0.0 && distSq < minDist * minDist) continue;
+        if (minDist > 0.0 && distSq < minDist * minDist) { i += step; continue; }
 
         // Skip or bridge beams between cells at drastically different heights.
         // On multi-floor buildings this prevents confusing diagonal beams through walls.
@@ -1125,6 +1175,7 @@ void AutoGuideDrawPath(int client = -1)
                 else TE_SendToAll();
                 trailDrawn += 2;
             }
+            i += step;
             continue;
         }
 
@@ -1137,16 +1188,18 @@ void AutoGuideDrawPath(int client = -1)
         if (client > 0) TE_SendToClient(client);
         else TE_SendToAll();
         trailDrawn++;
+        i += step;
     }
 
     // Arrows — clear directional indicators, subsampled for dense meshes
+    // v4.6: interval follows the adaptive density (step = last far-zone step)
     int chevronInterval = 5 * step;
     if (chevronInterval < 5) chevronInterval = 5;
     for (int i = startIndex; i < count - 1; i += chevronInterval)
     {
         Cell cell1, cell2;
-        g_GuideCells.GetArray(i, cell1, sizeof(Cell));
-        g_GuideCells.GetArray(i + 1, cell2, sizeof(Cell));
+        cells.GetArray(i, cell1, sizeof(Cell));
+        cells.GetArray(i + 1, cell2, sizeof(Cell));
 
         float dir[3];
         SubtractVectors(cell2.center, cell1.center, dir);
@@ -1190,12 +1243,17 @@ void AutoGuideDrawPath(int client = -1)
         else TE_SendToAll();
     }
 
+    // v4.6: draw REPAIR beacons (unreachable break points) on every redraw
+    Guide_DrawBeacons(client);
+
     // Warn if beam cap was hit (indicates subsampling may be hiding cells)
     if (trailDrawn >= maxBeams && count > maxBeams)
     {
         LogMessage("[PTG] Beam cap reached: %d trails drawn out of %d cells (max %d, step %d). Increase l4d_path_to_goal_max or adjust filter cvars.",
             trailDrawn, count, maxBeams, step);
     }
+
+    if (snapped) { delete cells; delete beams; }
 }
 
 Action Timer_AutoGuidePulse(Handle timer)
@@ -1253,6 +1311,21 @@ void evtFirstSpawn(Event event, const char[] name, bool dontBroadcast)
     CreateTimer(5.0, Timer_FirstSpawnBind, userid, TIMER_FLAG_NO_MAPCHANGE);
 }
 
+void evtPlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+    if (event == null) return;
+    int userid = event.GetInt("userid");
+    int client = GetClientOfUserId(userid);
+    if (client < 1 || client > MaxClients) return;
+    if (!IsClientInGame(client) || IsFakeClient(client)) return;
+
+    // v4.6: capture death position — the corpse still exists at event time.
+    // Used by AutoGuideDrawPath for dead non-observing players.
+    GetEntPropVector(client, Prop_Send, "m_vecOrigin", g_fDeathPos[client]);
+    g_fDeathTime[client] = GetGameTime();
+    g_bHasDeathPos[client] = true;
+}
+
 // v4.2: Redraw beams immediately when a player respawns after death or takes over a bot.
 // The redraw timer fires every 0.6s and would eventually pick up the new position,
 // but immediate redraw eliminates the visible gap after respawn.
@@ -1263,6 +1336,7 @@ void evtPlayerSpawn(Event event, const char[] name, bool dontBroadcast)
     int client = GetClientOfUserId(userid);
     if (client < 1 || client > MaxClients) return;
     if (!IsClientInGame(client) || IsFakeClient(client)) return;
+    g_bHasDeathPos[client] = false; // v4.6: death position no longer valid after respawn
     if (!g_bGuideToggled[client]) return;
 
     if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)

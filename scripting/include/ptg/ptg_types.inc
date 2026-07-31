@@ -279,6 +279,7 @@ Handle g_hRecomputeFlow;
 bool g_bFlowRecomputeHooked;
 
 bool g_bPathDirty; // path needs rebuild (blocked cells detected) but old path is still active for toggled clients
+bool g_bGuideCellsBusy; // v4.6: REPAIR frame chain is mutating g_GuideCells/g_bBeamWalkable — draws snapshot, requests defer
 bool finale_stitched; // finale guide was drawn
 bool finale_backwards; // rescue vehicle is not at max flow -> flow cannot be used for guiding
 

@@ -239,6 +239,10 @@ void Guide_RepairBlocked()
     g_rBeaconed = 0;
     g_rAttempts = 0;
     g_iRepairMapGen = g_iMapGeneration;
+    // v4.6: REPAIR mutates g_GuideCells in place (ShiftUp/SetArray between
+    // frames). Drawers snapshot, one-shot requests defer, and the completion
+    // branch below flushes them. Cleared in Guide_Cleanup for map-change safety.
+    g_bGuideCellsBusy = true;
 
     RequestFrame(Guide_RepairBlocked_Frame, 0);
 }
@@ -246,7 +250,7 @@ void Guide_RepairBlocked()
 void Guide_RepairBlocked_Frame(any unused)
 {
     // Abort if map changed since repair started
-    if (g_iRepairMapGen != g_iMapGeneration) return;
+    if (g_iRepairMapGen != g_iMapGeneration) return; // busy flag cleared by Guide_Cleanup on map end
     if (g_GuideCells == null || g_bBeamWalkable == null || g_ri >= g_bBeamWalkable.Length)
     {
         if (g_rFixed > 0 || g_rBeaconed > 0)
@@ -254,6 +258,10 @@ void Guide_RepairBlocked_Frame(any unused)
             LogMessage("[PTG] STAGE_REPAIR: fixed=%d beaconed=%d / %d total beams",
                 g_rFixed, g_rBeaconed, (g_GuideCells != null && g_GuideCells.Length > 1) ? g_GuideCells.Length - 1 : 0);
         }
+        // v4.6: REPAIR done — release the busy gate and flush any one-shot
+        // requests that were deferred while g_GuideCells was being rewritten.
+        g_bGuideCellsBusy = false;
+        Timer_CheckRequests(null);
         return;
     }
 
@@ -472,57 +480,76 @@ void Guide_RepairBlocked_Frame(any unused)
     RequestFrame(Guide_RepairBlocked_Frame, 0);
 }
 
+// Draw a single beacon pillar (vertical beam + top ring) at pos.
+// v4.6: split out of Guide_DrawBeacons so AutoGuideDrawPath can reuse it for
+// blocked segments (replaces the tiny 28u dots that were invisible in 3D).
+void Guide_DrawBeaconPillar(float pos[3], int client, float duration, float width)
+{
+    int laser = g_iLaserWhite;
+    if (laser == 0) laser = g_iLaser;
+    if (laser == 0) return;
+    if (duration < 1.0) duration = 5.0;
+
+    // Bright red-orange beacon: "path continues here"
+    int color_beacon[4] = {255, 100, 50, 255};
+
+    float end[3];
+    end = pos;
+    end[2] += 32.0; // tall vertical marker
+
+    // Vertical pillar beam — visible from a distance
+    TE_SetupBeamPoints(pos, end, laser, 0, 0, 0,
+        duration, width, width, 0, 0.0, color_beacon, 0);
+    if (client > 0) TE_SendToClient(client);
+    else TE_SendToAll();
+
+    // Ring at top — makes it recognizable as a beacon
+    float ringCenter[3];
+    ringCenter = end;
+    int color_ring[4] = {255, 200, 100, 200};
+    float ringRad = 20.0;
+    float ringSteps[6][3];
+    for (int s = 0; s < 6; s++)
+    {
+        float angle = float(s) * 3.14159 * 2.0 / 6.0;
+        ringSteps[s][0] = ringCenter[0] + Cosine(angle) * ringRad;
+        ringSteps[s][1] = ringCenter[1] + Sine(angle) * ringRad;
+        ringSteps[s][2] = ringCenter[2];
+    }
+    for (int s = 0; s < 6; s++)
+    {
+        int sn = (s + 1) % 6;
+        TE_SetupBeamPoints(ringSteps[s], ringSteps[sn], laser, 0, 0, 0,
+            duration * 0.5, 1.5, 1.0, 0, 0.0, color_ring, 0);
+        if (client > 0) TE_SendToClient(client);
+        else TE_SendToAll();
+    }
+}
+
 // Draw beacon markers at positions stored in g_hBeaconCells
 void Guide_DrawBeacons(int client = -1)
 {
     if (g_hBeaconCells == null || g_hBeaconCells.Length == 0) return;
     if (!g_hCvarBeaconEnable.BoolValue) return;
 
-    int laser = g_iLaserWhite;
-    if (laser == 0) laser = g_iLaser;
-    if (laser == 0) return;
-
     float duration = g_hCvarAutoDuration.FloatValue;
     if (duration < 1.0) duration = 5.0;
 
-    // Bright red-orange beacon: "path continues here"
-    int color_beacon[4] = {255, 100, 50, 255};
+    // v4.6: snapshot before drawing — REPAIR may delete/rebuild
+    // g_hBeaconCells between redraw ticks (see Guide_RepairBlocked).
+    ArrayList snapshot = g_hBeaconCells.Clone();
+    // v4.6: cap per-draw beacons — each beacon costs 7 temp entities
+    int budget = (g_hCvarMax.IntValue > 8) ? g_hCvarMax.IntValue / 4 : 4;
+    int drawn = 0;
 
-    for (int i = 0; i < g_hBeaconCells.Length; i++)
+    for (int i = 0; i < snapshot.Length && drawn < budget; i++)
     {
-        float pos[3], end[3];
-        g_hBeaconCells.GetArray(i, pos, 3);
-        end = pos;
-        end[2] += 32.0; // tall vertical marker
-
-        // Vertical pillar beam — visible from a distance
-        TE_SetupBeamPoints(pos, end, laser, 0, 0, 0,
-            duration, 4.0, 4.0, 0, 0.0, color_beacon, 0);
-        if (client > 0) TE_SendToClient(client);
-        else TE_SendToAll();
-
-        // Ring at top — makes it recognizable as a beacon
-        float ringCenter[3];
-        ringCenter = end;
-        int color_ring[4] = {255, 200, 100, 200};
-        float ringRad = 20.0;
-        float ringSteps[6][3];
-        for (int s = 0; s < 6; s++)
-        {
-            float angle = float(s) * 3.14159 * 2.0 / 6.0;
-            ringSteps[s][0] = ringCenter[0] + Cosine(angle) * ringRad;
-            ringSteps[s][1] = ringCenter[1] + Sine(angle) * ringRad;
-            ringSteps[s][2] = ringCenter[2];
-        }
-        for (int s = 0; s < 6; s++)
-        {
-            int sn = (s + 1) % 6;
-            TE_SetupBeamPoints(ringSteps[s], ringSteps[sn], laser, 0, 0, 0,
-                duration * 0.5, 1.5, 1.0, 0, 0.0, color_ring, 0);
-            if (client > 0) TE_SendToClient(client);
-            else TE_SendToAll();
-        }
+        float pos[3];
+        snapshot.GetArray(i, pos, 3);
+        Guide_DrawBeaconPillar(pos, client, duration, 4.0);
+        drawn++;
     }
+    delete snapshot;
 }
 
 

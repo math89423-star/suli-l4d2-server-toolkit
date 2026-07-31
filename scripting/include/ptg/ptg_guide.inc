@@ -162,6 +162,11 @@ bool RequestGuide(int client, float duration = 5.0, bool backward = false, bool 
     g_CellRequests[client].backward = backward;
     g_BeamDelay[client] = 0.0;
 
+    // v4.6: REPAIR is rewriting g_GuideCells in place — the request is already
+    // queued above and will be flushed by Timer_CheckRequests(null) when the
+    // REPAIR chain completes. Drawing now would read mid-mutation arrays.
+    if (g_bGuideCellsBusy) return false;
+
     if (!guide_ready)
     {
         Guide_Prep();
