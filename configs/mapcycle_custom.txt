@@ -2,3 +2,7 @@ nanningcity_bridge_m6
 zc1_m1
 l4d_sh01_oldsh
 c3m1_jungle
+quethics_1
+de01_sewers
+deathttoiletmaze10_5
+resort_map0

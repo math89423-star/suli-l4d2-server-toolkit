@@ -26,7 +26,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-#define BT_MAX_NODES   512    // max total nodes across all trees
+#define BT_MAX_NODES   768    // max total nodes across all trees (v3.7: 512→768)
 #define BT_MAX_CLIENTS MAXPLAYERS + 1
 
 enum BT_Status {
@@ -145,7 +145,8 @@ stock int BT_CreateAction(BT_TickFunc func) {
 }
 
 stock int BT_CreateSelector(int numChildren, int child1, int child2 = -1,
-    int child3 = -1, int child4 = -1, int child5 = -1, int child6 = -1) {
+    int child3 = -1, int child4 = -1, int child5 = -1, int child6 = -1,
+    int child7 = -1, int child8 = -1) {
     int id = BT_Create(BTN_SELECTOR);
     BT_AddChild(id, child1);
     if (child2 >= 0) BT_AddChild(id, child2);
@@ -153,11 +154,14 @@ stock int BT_CreateSelector(int numChildren, int child1, int child2 = -1,
     if (child4 >= 0) BT_AddChild(id, child4);
     if (child5 >= 0) BT_AddChild(id, child5);
     if (child6 >= 0) BT_AddChild(id, child6);
+    if (child7 >= 0) BT_AddChild(id, child7);
+    if (child8 >= 0) BT_AddChild(id, child8);
     return id;
 }
 
 stock int BT_CreateSequence(int numChildren, int child1, int child2 = -1,
-    int child3 = -1, int child4 = -1, int child5 = -1, int child6 = -1) {
+    int child3 = -1, int child4 = -1, int child5 = -1, int child6 = -1,
+    int child7 = -1, int child8 = -1) {
     int id = BT_Create(BTN_SEQUENCE);
     BT_AddChild(id, child1);
     if (child2 >= 0) BT_AddChild(id, child2);
@@ -165,6 +169,8 @@ stock int BT_CreateSequence(int numChildren, int child1, int child2 = -1,
     if (child4 >= 0) BT_AddChild(id, child4);
     if (child5 >= 0) BT_AddChild(id, child5);
     if (child6 >= 0) BT_AddChild(id, child6);
+    if (child7 >= 0) BT_AddChild(id, child7);
+    if (child8 >= 0) BT_AddChild(id, child8);
     return id;
 }
 

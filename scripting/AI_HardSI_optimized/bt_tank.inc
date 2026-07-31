@@ -178,8 +178,9 @@ BT_Status TankCond_RockEligible(int client) {
     float tPos[3], sPos[3];
     GetClientAbsOrigin(client, tPos); GetClientAbsOrigin(target, sPos);
     float dist = GetVectorDistance(tPos, sPos);
-    float hDiff = sPos[2] - tPos[2];
-    return (dist > 500.0 && hDiff > 100.0) ? BT_SUCCESS : BT_FAILURE;
+    // v3.5 FIX: removed hDiff > 100 requirement — on flat terrain (hDiff≈0)
+    // the Tank would NEVER throw rocks. Distance alone is sufficient.
+    return (dist > 500.0) ? BT_SUCCESS : BT_FAILURE;
 }
 
 // ============================================================================
@@ -289,13 +290,31 @@ stock int BT_CreateTankTree() {
         BT_CreateAction(ACT_HoldChokepoint)
     );
 
-    // Open area: rock throw when far, bhop chase when medium range
-    int openRockSeq = BT_CreateSequence(4,
+    // ==========================================
+    // v3.5: Open terrain — 3-way random strategies
+    // ==========================================
+    // Strategy roll — fires once every STRATEGY_TOKEN_TTL seconds
+    int openStrategyRoll = BT_CreateSequence(2,
         BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateRollStrategy(3)
+    );
+    // Strategy 0: Rock throw at long range (suppress from distance)
+    int openStrat0_Rock = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateStrategyIs(0),
         BT_CreateCondition(TankCond_RockEligible),
         BT_CreateCondition(CND_HasLOS),
         BT_CreateAction(ACT_Attack2)           // throw rock
     );
+    // Strategy 1: Direct charge — rush up and punch (instakill threat)
+    int openStrat1_Charge = BT_CreateSequence(5,
+        BT_CreateCondition(CND_IsOpenArea),
+        BT_CreateStrategyIs(1),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(700.0),
+        BT_CreateAction(ACT_Attack)            // melee punch
+    );
+    // Strategy 2: Bhop chase — falls through to standard bhop below
 
     // Ledge: punch survivors off — charge at them near the edge
     int ledgePunchSeq = BT_CreateSequence(4,
@@ -326,14 +345,17 @@ stock int BT_CreateTankTree() {
     // Attack selector — terrain strategies (1-3) fail when disabled/unknown
     // → falls through to standard attack types (4-7) from v2.2.
     int attackSelector = BT_Create(BTN_SELECTOR);
-    BT_AddChild(attackSelector, ledgePunchSeq);     // 1. v3.2: ledge → punch off cliff
-    BT_AddChild(attackSelector, narrowHoldSeq);     // 2. v3.2: narrow → hold chokepoint
-    BT_AddChild(attackSelector, openRockSeq);       // 3. v3.2: open → rock throw
+    BT_AddChild(attackSelector, ledgePunchSeq);        // 1. v3.2: ledge → punch off cliff
+    BT_AddChild(attackSelector, narrowHoldSeq);        // 2. v3.2: narrow → hold chokepoint
+    BT_AddChild(attackSelector, openStrategyRoll);     // 3a. v3.5: open → roll token
+    BT_AddChild(attackSelector, openStrat0_Rock);      // 3b. v3.5: open strat0 → rock throw
+    BT_AddChild(attackSelector, openStrat1_Charge);    // 3c. v3.5: open strat1 → charge punch
+    // 3d: open strat2 → falls through to bhop below
     // ↓ FALLBACK: standard strategies (battle-tested since v2.2)
-    BT_AddChild(attackSelector, punchJumpSeq);      // 4. ← punch-jump combo
-    BT_AddChild(attackSelector, executeSeq);        // 5. ← execute incapped
-    BT_AddChild(attackSelector, rockSeq);           // 6. ← standard rock throw
-    BT_AddChild(attackSelector, bhopSeq);           // 7. ← bhop chase
+    BT_AddChild(attackSelector, punchJumpSeq);         // 4. ← punch-jump combo
+    BT_AddChild(attackSelector, executeSeq);           // 5. ← execute incapped
+    BT_AddChild(attackSelector, rockSeq);              // 6. ← standard rock throw
+    BT_AddChild(attackSelector, bhopSeq);              // 7. ← bhop chase
 
     // ==========================================
     // Root

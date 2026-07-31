@@ -1,6 +1,6 @@
 # L4D2 服务器插件清单
 
-> 服务器: 81.71.101.135:27015 | 78 active / 9 disabled | 更新时间: 2026-07-27
+> 服务器: 81.71.101.135:27015 | 73 active / 0 disabled | 更新时间: 2026-07-29
 
 ## 🛠 核心依赖
 
@@ -45,8 +45,7 @@
 | `spawn_infected_nolimit.smx` | 移除引擎层特感生成数量限制 |
 | `si_composition_manager.smx` | 特感刷新组合管理 — 6种战术模式轮换 + Tank协同，deficit-first 分配类型，动态 spawn_size 缩放 |
 | `AI_HardSI_bt.smx` | 特感 AI 强化 — 行为树 v3.0，精准扑击/冲锋/连跳/协同攻击 |
-| `l4d2_tank_core.smx` | **Tank/Witch 统一核心** — HP 缩放（存活人数 × 3000）+ 播报，替代旧版 tank_announce + tank_hp_scaler |
-| `l4d2_maptankfix.smx` | 地图 Tank 相关 bug 修复 |
+| `l4d2_tank_unified.smx` | **Tank/Witch 统一核心** — HP 缩放（存活人数 × 3000）+ 播报 |
 | `l4d2_max_common.smx` | 普通感染者上限控制 |
 | `l4d_path_to_goal.smx` | PTG — SI 导航路径计算（A* 寻路） |
 
@@ -54,22 +53,15 @@
 
 | 插件 | 说明 |
 |------|------|
-| `L4D_All_Infected_HUD_HP.smx` | 所有特感血量 HUD 实时显示 |
+| `l4d2_si_hud.smx` | 所有特感血量 HUD 实时显示 |
 | `advertisements.smx` | 定时轮播服务器公告（120s 间隔） |
 | `auto_motd.smx` | 自动显示 MOTD 欢迎信息 |
 | `l4d2_broadcast.smx` | 广播玩家死亡/受伤/受击事件 |
 | `l4d2_player_status.smx` | 显示玩家状态变化（倒地/挂边/被控等） |
 | `l4d2_skill_detect.smx` | 技能检测 — skeet/charger punch/instaclear 等操作提示 |
-| `l4d2_tank_ranking.smx` | Tank 伤害排名显示 |
 | `l4d2_witch_ranking.smx` | Witch 伤害排名显示 |
 | `kill_cmd.smx` | 玩家 /kill 自杀命令 |
 | `kills.smx` | 击杀统计显示 |
-
-## 🔊 音效/反馈
-
-| 插件 | 说明 |
-|------|------|
-| `l4d2_bf_killfeedback.smx` | 击杀特感播放战地1音效 + ☠ 骷髅头 HUD |
 
 ## 🔫 武器/弹药调整
 
@@ -93,7 +85,6 @@
 | `l4dmultislots.smx` | 多人生存者 — 最多 10 人，最少 4 人，免大厅等待 |
 | `l4d2_chainsaw_fuel.smx` | 电锯燃料量控制 |
 | `l4d2_loot_drop.smx` | 击杀掉落战利品 — Tank/Witch/特感/小僵尸概率掉落 |
-| `l4d2_si_kill_heal.smx` | 击杀特感治疗队友 + 救援奖励 HP |
 | `l4d2_common_kill_reward.smx` | 击杀小僵尸奖励 |
 | `survivor_chat_select.smx` | 聊天指令选择幸存者角色/皮肤 |
 | `survivor_legs.smx` | 第一人称可见幸存者双腿（沉浸感增强） |
@@ -118,7 +109,6 @@
 | 插件 | 说明 |
 |------|------|
 | `cge_l4d2_deathcheck.smx` | 死亡检测修复（deathcheck "1"） |
-| `l4d2_maptankfix.smx` | 地图 Tank 相关 bug 修复 |
 | `block_bot_kick.smx` | 阻止玩家投票踢出 BOT |
 | `fix_botkick.smx` | 修复 BOT 被游戏引擎意外移除的问题（非投票场景） |
 | `l4d2_GetWitchNumber.smx` | 正确获取 Witch 数量的函数修复 |
@@ -135,24 +125,13 @@
 | `l4d2_tickrate_enabler.smx` | 60-tick 网络 cvar 自动配置 |
 | `command_buffer.smx` | Cbuf_AddText 缓冲区溢出修复（支持大型 exec 文件） |
 
-## 🚫 已禁用 (disabled/)
-
-| 插件 | 说明 |
-|------|------|
-| `l4d_explosion_announcer.smx` | 爆炸物通告 — 暂不需要 |
-| `l4d_throwable_announcer.smx` | 投掷物通告 — 暂不需要 |
-| `sounds.smx` | 声音表情 — 暂不需要 |
-| `l4d2_loot_sound.smx` | 战利品音效 — 暂不需要 |
-| `l4d2_headshot_sound.smx` | 爆头音效 — 暂不需要 |
-| `l4d2_melee_spawner.smx` | 近战武器刷新 — 暂不需要 |
-| `l4d2_minigun_360.smx` | 固定机枪 360° — 暂不需要 |
-| `l4d_infected_movement.smx` | 感染者移速修改 — 暂不需要 |
-| `l4d2_max_common.smx` | 普通感染者上限（active 目录已有副本） |
-
 ## ⚠️ 注意事项
 
 - **副本服务器差异**：参考服务器不使用 `l4d2_tickrate_enabler.smx`（改用 `-tickrate 60` 启动参数），这是两项 60-tick 方案之间的唯一差异。
 - **已删除的插件**：`mapchooser.smx`、`nominations.smx`、`rockthevote.smx`、`randomcycle.smx` 已永久删除（mapchooser 无法创建有效地图列表）。
+- **已移除的插件**（2026-07-29）：`l4d2_maptankfix`、`l4d2_tank_ranking`、`l4d2_si_kill_heal`、`l4d2_bf_killfeedback`（音效后续归击杀 HUD 统一管理）。
+- **重命名**：`l4d2_tank_core` → `l4d2_tank_unified`，`L4D_All_Infected_HUD_HP` → `l4d2_si_hud`。
 - **关键配置**：武器属性、团灭换图阈值（4 次）、弹药量等在 `cfg/sourcemod/sourcemod.cfg` 中统一定义。
-- **Tank HP**：`l4d2_tank_core.smx` → 存活人数（含 BOT）× 3000，最低 12,000 HP。统一管理 HP 缩放 + 播报，不再有多个 Tank 插件打架。
+- **Tank HP**：`l4d2_tank_unified.smx` → 存活人数（含 BOT）× 3000，最低 12,000 HP。
 - **SI 刷新链**：`specialspawner`（节奏/上限）→ `si_composition_manager`（类型分配）→ `AI_HardSI_bt`（行为决策），三层各司其职，无冲突。
+- **历史备份目录**：`all_plugins_disabled/`（10 个旧插件）、`disabled_crash/`（1 个）、`scripting/`（源码编译产物），这些目录中的 .smx 不会被 SourceMod 加载。
