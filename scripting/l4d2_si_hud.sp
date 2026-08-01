@@ -11,6 +11,22 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.33:
+ *   - 瓦斯罐/煤气罐去掉每图限购（user）→ 无限购（limit 0）。
+ *
+ * Changelog v1.7.32d (bug fix):
+ *   - FIX reload 后复活失效: plugin reload 不触发 OnClientPutInServer，在线玩家
+ *     g_iRevivesLeft=0 → 死亡无自动复活，只看到引擎原生的 30s 僵尸重生倒计时
+ *     （玩家实测"HUD 显示 30 秒"）。OnPluginStart 末尾补全在线玩家初始化
+ *     （复活次数 base + 复活币 start + 钱包/积分清零）。
+ *   - bot 排除: 复活判定跳过 IsFakeClient（引擎 bot 有自己的重生逻辑）。
+ *
+ * Changelog v1.7.32c (bug fix, user tested):
+ *   - FIX !buy 菜单不显示: L4D2 引擎菜单 (VguiMenu) 标题不支持 \n 换行 —
+ *     多行标题整个菜单不渲染（服务器端 Display 返回 OK，客户端无任何显示；
+ *     对照 !csm 用 Panel 单行标题正常）。标题改单行即修复。
+ *     排障链路: 命令触发日志 → Display 返回值日志 → 对照 Panel → 标题单行。
+ *
  * Changelog v1.7.32:
  *   - 排行榜播报（45s + 地图结束结算）末尾追加商店入口提醒：
  *     "输入 !shop 或 !buy 打开商店，用可用积分兑换补给/武器"（user）。
@@ -459,7 +475,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.32"
+#define PLUGIN_VERSION "1.7.33"
 
 // ============================================================================
 // ConVar handles
@@ -609,8 +625,9 @@ enum struct ShopItem
 
 // 商品表（价格用户定稿 2026-08-01 修订：电击器/医疗包 4000, 复活币 12000 无限购）
 ShopItem g_ShopTable[SHOP_SLOTS] = {
-    { "瓦斯罐",      "weapon_propanetank",             800,  2 },
-    { "煤气罐",      "weapon_oxygentank",              800,  2 },
+    // v1.7.33: 瓦斯罐/煤气罐去掉限购（用户）——limit 0 = 无限购
+    { "瓦斯罐",      "weapon_propanetank",             800,  0 },
+    { "煤气罐",      "weapon_oxygentank",              800,  0 },
     { "汽油桶",      "weapon_gascan",                 2000,  2 },
     { "止痛药",      "weapon_pain_pills",             2000,  2 },
     { "肾上腺素",    "weapon_adrenaline",             2000,  2 },
@@ -880,6 +897,25 @@ public void OnPluginStart()
     // v1.7.6: periodic per-player broadcast (45s default; 0=off via cvar
     // check inside the callback; interval change needs plugin reload)
     CreateTimer(45.0, Timer_ScoreboardBroadcast, INVALID_HANDLE, TIMER_REPEAT);
+
+    // v1.7.32d FIX: plugin reload 不触发 OnClientPutInServer —— 已在线的玩家
+    // 复活次数/复活币/钱包全是 0（reload 清零副作用）。补全默认初始化，
+    // 否则 reload 后死亡无自动复活（玩家只会看到引擎原生的 30s 僵尸重生倒计时）。
+    // 注：钱包/复活币暂无持久化，reload = 战役资产归零（待持久化解决）。
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && !IsFakeClient(i))
+        {
+            g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
+            g_iReviveCoins[i] = g_cvRespawnCoinStart.IntValue;
+            g_iWallet[i] = 0;
+            g_iTotalScore[i] = 0;
+            g_iSIKills[i] = 0;
+            g_iDeaths[i] = 0;
+            g_iFFDamage[i] = 0;
+            g_iBlacked[i] = 0;
+        }
+    }
 }
 
 // Debug (v1.7.1): play the streak award sound directly, bypassing the whole
@@ -1489,7 +1525,8 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
         }
 
         // v1.7.28: 复活次数判定——次数用完且无复活币 → 躺尸等电击器/过关
-        if (g_cvRespawnEnable.BoolValue)
+        // v1.7.32d: 跳过 bot（引擎有自己的 bot 重生逻辑，复活 bot 会干扰）
+        if (g_cvRespawnEnable.BoolValue && !IsFakeClient(victim))
         {
             if (g_iRevivesLeft[victim] > 0)
             {
@@ -2628,7 +2665,9 @@ void ShopBuy(int client, int slot)
 void OpenShopMenu(int client)
 {
     Menu menu = new Menu(ShopMenuHandler);
-    menu.SetTitle("[商店] 可用积分 %d\n[本关] %d 分  复活币 %d 枚\n ",
+    // v1.7.32c FIX: title 必须单行 — L4D2 VguiMenu 标题不支持 \n，
+    // 多行标题 → 整个菜单不渲染（用户实测 !buy 无反应，!csm 的 Panel 单行正常）
+    menu.SetTitle("商店: 可用 %d / 本关 %d / 复活币 %d 枚",
         g_iWallet[client], g_iTotalScore[client], g_iReviveCoins[client]);
 
     char info[4];
