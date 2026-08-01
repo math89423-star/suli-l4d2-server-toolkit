@@ -11,6 +11,18 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.28:
+ *   - RESPAWN LIMIT (user): 每图初始 si_hud_respawn_base (2) 次自动复活
+ *     (=3 条命), 复活延迟 si_hud_respawn_delay 15s (was 35 via l4d2_auto_
+ *     respawn — 该插件已卸载，功能并入本插件: 倒计时提示 + 复活传送队友)。
+ *     次数用完 → 消耗复活币 (死亡时自动)；都没有 → 躺尸等电击器/过关，
+ *     电击器回归价值。
+ *   - 商店新商品 复活币 12000 (无限购, classname 空 = 不 spawn, 余额+1)。
+ *   - 积分语义修正 (user): 排行榜积分每关从 0 算 (OnMapEnd 清零)；可用积分
+ *     (钱包) 战役内跨图保留，新战役 (地图前缀变化) 才清零；复活币同战役级。
+ *   - 播报 (排行榜/结算) 追加: 可用积分 + 复活币余额 + 本图剩余复活次数。
+ *   - 电击器/医疗包价格 3000 → 4000 (user)。
+ *
  * Changelog v1.7.27:
  *   - SCORE SHOP (!shop / !buy): spend the CURRENT score (g_iWallet) —
  *     瓦斯罐 800, 煤气罐 800, 汽油桶 2000, 止痛药 2000, 肾上腺素 2000,
@@ -417,8 +429,9 @@
 #include <sourcemod>
 #include <sdktools>
 #include <sdkhooks>
+#include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.27"
+#define PLUGIN_VERSION "1.7.28"
 
 // ============================================================================
 // ConVar handles
@@ -474,6 +487,9 @@ ConVar g_cvScoreboardEnable;
 ConVar g_cvScoreboardTop;
 ConVar g_cvScoreboardInterval;
 ConVar g_cvShopEnable;         // v1.7.27
+ConVar g_cvRespawnEnable;      // v1.7.28
+ConVar g_cvRespawnBase;        // v1.7.28
+ConVar g_cvRespawnDelay;       // v1.7.28
 ConVar g_cvSoundSI;
 ConVar g_cvSoundHeadshot;
 ConVar g_cvSoundTank;
@@ -505,8 +521,14 @@ int       g_iKillStreak[MAXPLAYERS + 1];              // BF banner: kills in cur
 int       g_iStreakScore[MAXPLAYERS + 1];             // BF banner: rolling score in current streak (v1.6.7)
 float     g_fLastStreakKillTime[MAXPLAYERS + 1];      // BF banner: last streak-kill time
 int       g_iCommonStreak[MAXPLAYERS + 1];            // v1.7.4: common streak count (separate icons from SI skulls, shared window)
-int       g_iTotalScore[MAXPLAYERS + 1];              // v1.7.6: 历史积分 (scoreboard; 跨图累计不清零, 断线清零)
-int       g_iWallet[MAXPLAYERS + 1];                  // v1.7.27: 当前积分 (商店钱包; 跨图不清零攒大件)
+int       g_iTotalScore[MAXPLAYERS + 1];              // v1.7.6: 本关积分 (scoreboard; 每关从 0 算, OnMapEnd 清零)
+int       g_iWallet[MAXPLAYERS + 1];                  // v1.7.27: 可用积分 (商店钱包; 战役内跨图保留, 新战役清零)
+// v1.7.28: 复活次数系统（用户：每图初始 2 次=3 条命，复活 15s；复活币 12000 无限购；
+// 次数用完不自动复活 → 电击器回归价值）
+int       g_iRevivesLeft[MAXPLAYERS + 1];             // 本图剩余自动复活次数（OnMapStart 重置 base）
+int       g_iReviveCoins[MAXPLAYERS + 1];             // 复活币余额（战役内保留，新战役清零，断线清零）
+Handle    g_hRespawnTimer[MAXPLAYERS + 1];            // 复活计时器
+char      g_sPrevCampaign[16];                        // 上一张图的战役前缀（前缀变化 = 新战役 → 清钱包/复活币）
 int       g_iSIKills[MAXPLAYERS + 1];                 // v1.7.7: session SI/Witch/Tank kills
 int       g_iDeaths[MAXPLAYERS + 1];                  // v1.7.7: survivor deaths
 int       g_iFFDamage[MAXPLAYERS + 1];                // v1.7.7: friendly-fire damage dealt
@@ -538,29 +560,29 @@ int       g_iLastCommonEnt[MAXPLAYERS + 1];
 // 价格/限购写死在此表（改价格需重编译）；掉落（loot_drop v1.7.0）出小件。
 // ============================================================================
 
-#define SHOP_SLOTS      10
+#define SHOP_SLOTS      11
 
 enum struct ShopItem
 {
     char name[32];      // 显示名
-    char classname[64]; // 实体 classname
+    char classname[64]; // 实体 classname（空 = 特殊商品：复活币）
     int  price;         // 价格（当前积分）
-    int  limit;         // 每图限购次数
+    int  limit;         // 每图限购次数（0 = 无限）
 }
 
-// 商品表（价格用户定稿 2026-08-01：瓦斯罐/煤气罐 800, 汽油桶 2000,
-// 药丸/肾上腺素 2000, 电击器/医疗包 3000, 激光 3500, M60 5000, 榴弹 8000）
+// 商品表（价格用户定稿 2026-08-01 修订：电击器/医疗包 4000, 复活币 12000 无限购）
 ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "瓦斯罐",      "weapon_propanetank",             800,  2 },
     { "煤气罐",      "weapon_oxygentank",              800,  2 },
     { "汽油桶",      "weapon_gascan",                 2000,  2 },
     { "止痛药",      "weapon_pain_pills",             2000,  2 },
     { "肾上腺素",    "weapon_adrenaline",             2000,  2 },
-    { "电击器",      "weapon_defibrillator",          3000,  2 },
-    { "医疗包",      "weapon_first_aid_kit",          3000,  2 },
+    { "电击器",      "weapon_defibrillator",          4000,  2 },
+    { "医疗包",      "weapon_first_aid_kit",          4000,  2 },
     { "激光瞄准",    "weapon_upgradepack_laser_sight", 3500,  1 },
     { "M60 轻机枪",  "weapon_rifle_m60",              5000,  1 },
-    { "榴弹发射器",  "weapon_grenade_launcher",       8000,  1 }
+    { "榴弹发射器",  "weapon_grenade_launcher",       8000,  1 },
+    { "复活币",      "",                              12000,  0 }
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -728,6 +750,15 @@ public void OnPluginStart()
     // v1.7.27: score shop — !shop / !buy (prices are compile-time in g_ShopTable)
     g_cvShopEnable = CreateConVar("si_hud_shop_enable", "1",
         "Enable the score shop (!shop / !buy).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    // v1.7.28: respawn limit — 每图初始复活次数 + 复活秒数 + 总开关
+    //（替代 l4d2_auto_respawn；复活币商店 12000 无限购）
+    g_cvRespawnEnable = CreateConVar("si_hud_respawn_enable", "1",
+        "Enable the limited auto-respawn system (replaces l4d2_auto_respawn).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvRespawnBase = CreateConVar("si_hud_respawn_base", "2",
+        "Auto-respawn count per player per map (3 lives total with the initial one).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
+    g_cvRespawnDelay = CreateConVar("si_hud_respawn_delay", "15.0",
+        "Seconds before auto respawn (was 35 in l4d2_auto_respawn).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
 
     // ── Kill sounds (all empty = off by default) ────────
 
@@ -951,6 +982,10 @@ void ShowScoreboardTo(int client)
             g_iFFDamage[client], g_iBlacked[client], myRank + 1);
     else
         PrintToChat(client, "\x04[得分榜]\x01 你的战绩：0 分");
+
+    // v1.7.28 (user): 播报计入可用积分 + 复活币（战役内资源，新战役清零）
+    PrintToChat(client, "\x04[得分榜]\x01 可用积分 \x03%d\x01  复活币 \x03%d\x01 枚  复活 \x03%d\x01 次",
+        g_iWallet[client], g_iReviveCoins[client], g_iRevivesLeft[client]);
 }
 
 // ============================================================================
@@ -984,6 +1019,42 @@ public void OnMapStart()
 
     // HP display is now on-hit only (player_hurt → RefreshHPForClient → 0.5s hide).
     // Persistent timer is no longer started — SI HP only shows when you damage them.
+
+    // v1.7.28: 战役判定——地图前缀变化 = 切换新战役 → 清可用积分 + 复活币
+    // （用户：可用积分不随 map 切换清理，只重新开始战役/切换新战役才清理）
+    char map[64];
+    GetCurrentMap(map, sizeof(map));
+    char prefix[16];
+    GetMapPrefix(map, prefix, sizeof(prefix));
+    if (strlen(g_sPrevCampaign) > 0 && !StrEqual(prefix, g_sPrevCampaign))
+    {
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            g_iWallet[i] = 0;
+            g_iReviveCoins[i] = 0;
+        }
+        PrintToChatAll("\x04[商店]\x01 新战役开始：可用积分与复活币已结算清零");
+    }
+    strcopy(g_sPrevCampaign, sizeof(g_sPrevCampaign), prefix);
+
+    // v1.7.28: 每图重置复活次数（初始 base 次 = base+1 条命）
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
+        KillRespawnTimer(i);
+    }
+}
+
+void GetMapPrefix(const char[] map, char[] out, int maxlen)
+{
+    int idx = FindCharInString(map, '_');
+    if (idx <= 0 || idx >= maxlen)
+        strcopy(out, maxlen, map);
+    else
+    {
+        strcopy(out, maxlen, map);
+        out[idx] = '\0';
+    }
 }
 
 public void OnMapEnd()
@@ -1006,8 +1077,10 @@ public void OnMapEnd()
         g_iKillStreak[i] = 0;
         g_iCommonStreak[i] = 0;            // v1.7.4
         g_iStreakScore[i] = 0;
-        // v1.7.27: 历史积分(g_iTotalScore) 和 当前积分(g_iWallet) 均跨图保留
-        //（用户：每一个 map 结束积分不清零；排行榜=历史积分，商店=钱包）
+        // v1.7.28: 排行榜积分每关从 0 算（用户）；可用积分/复活币战役内保留
+        g_iTotalScore[i] = 0;              // v1.7.6: 本关积分每关清零
+        g_iRevivesLeft[i] = 0;             // v1.7.28: 本图次数（OnMapStart 重置）
+        KillRespawnTimer(i);               // v1.7.28
         g_iSIKills[i] = 0;                 // v1.7.7
         g_iDeaths[i] = 0;
         g_iFFDamage[i] = 0;
@@ -1076,8 +1149,11 @@ public void OnClientDisconnect(int client)
     g_iKillStreak[client] = 0;
     g_iCommonStreak[client] = 0;           // v1.7.4
     g_iStreakScore[client] = 0;
-    g_iTotalScore[client] = 0;             // v1.7.6 (历史积分断线清零，防槽位泄漏)
-    g_iWallet[client] = 0;                 // v1.7.27 (钱包断线清零)
+    g_iTotalScore[client] = 0;             // v1.7.6 (本关积分断线清零，防槽位泄漏)
+    g_iWallet[client] = 0;                 // v1.7.27 (可用积分断线清零)
+    g_iRevivesLeft[client] = 0;            // v1.7.28
+    g_iReviveCoins[client] = 0;            // v1.7.28
+    KillRespawnTimer(client);              // v1.7.28
     g_iSIKills[client] = 0;                // v1.7.7
     g_iDeaths[client] = 0;
     g_iFFDamage[client] = 0;
@@ -1295,6 +1371,28 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
             && GetClientTeam(attacker) == 2)
         {
             g_iBlacked[victim]++;          // 被队友击杀（被黑）
+        }
+
+        // v1.7.28: 复活次数判定——次数用完且无复活币 → 躺尸等电击器/过关
+        if (g_cvRespawnEnable.BoolValue)
+        {
+            if (g_iRevivesLeft[victim] > 0)
+            {
+                g_iRevivesLeft[victim]--;
+                ScheduleRespawn(victim, true);
+            }
+            else if (g_iReviveCoins[victim] > 0)
+            {
+                g_iReviveCoins[victim]--;
+                ScheduleRespawn(victim, false);
+                PrintToChat(victim, "\x04[复活]\x01 复活次数已用完，消耗 \x05复活币\x01 x1（剩余 \x03%d\x01 枚）",
+                    g_iReviveCoins[victim]);
+            }
+            else
+            {
+                PrintToChat(victim, "\x04[复活]\x01 本图复活次数已用完（初始 \x03%d\x01 次 + 复活币 \x03%d\x01 枚）——等待电击器或队友",
+                    g_cvRespawnBase.IntValue, g_iReviveCoins[victim]);
+            }
         }
     }
     return Plugin_Continue;
@@ -2356,7 +2454,8 @@ void ShopBuy(int client, int slot)
             g_ShopTable[slot].name, price, g_iWallet[client]);
         return;
     }
-    if (g_iShopBought[client][slot] >= g_ShopTable[slot].limit)
+    if (g_ShopTable[slot].limit > 0
+        && g_iShopBought[client][slot] >= g_ShopTable[slot].limit)
     {
         PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 本图已购满（%d/%d）",
             g_ShopTable[slot].name, g_iShopBought[client][slot], g_ShopTable[slot].limit);
@@ -2365,6 +2464,15 @@ void ShopBuy(int client, int slot)
 
     g_iWallet[client] -= price;
     g_iShopBought[client][slot]++;
+
+    // 复活币（classname 空）：不 spawn 物品，余额 +1 枚（战役内保留）
+    if (g_ShopTable[slot].classname[0] == '\0')
+    {
+        g_iReviveCoins[client]++;
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05复活币\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），复活币余额 \x03%d\x01 枚",
+            price, g_iWallet[client], g_iReviveCoins[client]);
+        return;
+    }
 
     // 落点：玩家面前 70 单位（购买时刻的方向）
     float pos[3], ang[3], fwd[3];
@@ -2377,27 +2485,39 @@ void ShopBuy(int client, int slot)
 
     ShopSpawn(g_ShopTable[slot].classname, pos);
 
-    PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 当前积分，剩余 \x03%d\x01），物品已放在你面前",
+    PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），物品已放在你面前",
         g_ShopTable[slot].name, price, g_iWallet[client]);
 }
 
 void OpenShopMenu(int client)
 {
     Menu menu = new Menu(ShopMenuHandler);
-    menu.SetTitle("[商店] 当前积分 %d\n[排行榜] 历史积分 %d\n ", g_iWallet[client], g_iTotalScore[client]);
+    menu.SetTitle("[商店] 可用积分 %d\n[本关] %d 分  复活币 %d 枚\n ",
+        g_iWallet[client], g_iTotalScore[client], g_iReviveCoins[client]);
 
     char info[4];
     char line[96];
     for (int i = 0; i < SHOP_SLOTS; i++)
     {
         int price = g_ShopTable[i].price;
-        int left = g_ShopTable[i].limit - g_iShopBought[client][i];
-        if (left <= 0)
-            Format(line, sizeof(line), "%s (%d分) [已购满]", g_ShopTable[i].name, price);
-        else if (g_iWallet[client] < price)
-            Format(line, sizeof(line), "%s (%d分) [积分不足]", g_ShopTable[i].name, price);
+        int limit = g_ShopTable[i].limit;
+        if (limit <= 0)
+        {
+            if (g_iWallet[client] < price)
+                Format(line, sizeof(line), "%s (%d分) [积分不足]", g_ShopTable[i].name, price);
+            else
+                Format(line, sizeof(line), "%s (%d分) [无限购]", g_ShopTable[i].name, price);
+        }
         else
-            Format(line, sizeof(line), "%s (%d分) [可购 x%d]", g_ShopTable[i].name, price, left);
+        {
+            int left = limit - g_iShopBought[client][i];
+            if (left <= 0)
+                Format(line, sizeof(line), "%s (%d分) [已购满]", g_ShopTable[i].name, price);
+            else if (g_iWallet[client] < price)
+                Format(line, sizeof(line), "%s (%d分) [积分不足]", g_ShopTable[i].name, price);
+            else
+                Format(line, sizeof(line), "%s (%d分) [可购 x%d]", g_ShopTable[i].name, price, left);
+        }
 
         IntToString(i, info, sizeof(info));
         menu.AddItem(info, line);
@@ -2439,4 +2559,110 @@ public Action Cmd_Shop(int client, int args)
     }
     OpenShopMenu(client);
     return Plugin_Handled;
+}
+
+// ============================================================================
+// v1.7.28: 复活系统（移植 l4d2_auto_respawn，限次数 + 复活币）
+// 每图初始 g_cvRespawnBase 次（=base+1 条命）；次数用完消耗复活币；
+// 都没有 → 躺尸（电击器回归价值）。复活延迟 g_cvRespawnDelay（15s）。
+// ============================================================================
+
+void ScheduleRespawn(int client, bool hasCount)
+{
+    KillRespawnTimer(client);
+    int userid = GetClientUserId(client);
+    float delay = g_cvRespawnDelay.FloatValue;
+    g_hRespawnTimer[client] = CreateTimer(delay, Timer_Respawn, userid);
+
+    if (hasCount)
+        PrintToChat(client, "\x04[复活]\x01 你已死亡（本图剩余复活 \x03%d\x01 次），将在 \x03%.0f 秒\x01 后自动复活",
+            g_iRevivesLeft[client], delay);
+    else
+        PrintToChat(client, "\x04[复活]\x01 你已死亡（复活币复活），将在 \x03%.0f 秒\x01 后自动复活", delay);
+
+    int thresholds[] = {10, 5, 3, 2, 1};
+    for (int i = 0; i < sizeof(thresholds); i++)
+    {
+        if (delay > float(thresholds[i]))
+        {
+            DataPack dp = new DataPack();
+            dp.WriteCell(userid);
+            dp.WriteCell(thresholds[i]);
+            CreateTimer(delay - float(thresholds[i]), Timer_RespawnCountdown, dp);
+        }
+    }
+}
+
+Action Timer_RespawnCountdown(Handle timer, DataPack dp)
+{
+    dp.Reset();
+    int userid = dp.ReadCell();
+    int seconds = dp.ReadCell();
+    delete dp;
+
+    int client = GetClientOfUserId(userid);
+    if (client < 1 || !IsClientInGame(client) || IsPlayerAlive(client))
+        return Plugin_Continue;
+
+    PrintHintText(client, "复活倒计时: %d 秒", seconds);
+    if (seconds <= 10)
+        PrintToChat(client, "\x04[复活]\x01 你将在 \x03%d 秒\x01 后复活", seconds);
+
+    return Plugin_Continue;
+}
+
+Action Timer_Respawn(Handle timer, int userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client >= 1 && client <= MaxClients)
+        g_hRespawnTimer[client] = null;
+    if (client < 1 || !IsClientInGame(client) || GetClientTeam(client) != 2 || IsPlayerAlive(client))
+        return Plugin_Continue;
+
+    L4D_RespawnPlayer(client);
+    CreateTimer(0.5, Timer_RespawnTeleport, userid);
+
+    return Plugin_Continue;
+}
+
+Action Timer_RespawnTeleport(Handle timer, int userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client < 1 || !IsClientInGame(client) || !IsPlayerAlive(client))
+        return Plugin_Continue;
+
+    // 传送到最近存活队友
+    float origin[3];
+    bool found = false;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (i != client && IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i))
+        {
+            GetClientAbsOrigin(i, origin);
+            found = true;
+            break;
+        }
+    }
+
+    if (found)
+    {
+        TeleportEntity(client, origin, NULL_VECTOR, NULL_VECTOR);
+        PrintToChat(client, "\x04[复活]\x01 你已复活在队友身边!");
+    }
+    else
+    {
+        PrintToChat(client, "\x04[复活]\x01 你已复活!");
+    }
+
+    PrintHintText(client, "你已复活!");
+    return Plugin_Continue;
+}
+
+void KillRespawnTimer(int client)
+{
+    if (client >= 1 && client <= MaxClients && g_hRespawnTimer[client] != null)
+    {
+        KillTimer(g_hRespawnTimer[client]);
+        g_hRespawnTimer[client] = null;
+    }
 }
