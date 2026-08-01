@@ -258,6 +258,16 @@ bool frame_budget_exceeded()
     return exceeded;
 }
 
+// v4.6.1: detour-chain budget — independent of the pipeline 0.5ms budget.
+// The detour is a small windowed search that must complete in seconds, not
+// 40-100s. Always bounded (never "infinite"): an unbounded detour frame
+// would blow the engine CPU budget and trip SIGALRM like HPA clustering did.
+bool detour_frame_budget_exceeded()
+{
+    float dt_ms = (GetEngineTime()-g_tFrameStart)*1000.0;
+    return dt_ms >= DETOUR_BUDGET_MS;
+}
+
 // ======================================================================
 // v4.0 STAGE_REPAIR — Auto-repair blocked beams after hull validation
 //

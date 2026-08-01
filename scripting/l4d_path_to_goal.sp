@@ -17,7 +17,7 @@
 #include <dhooks>
 #include <l4d_path_to_goal>
 
-#define PLUGIN_VERSION 			"4.6 2026-07-31"
+#define PLUGIN_VERSION 			"4.6.1 2026-08-01"
 
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
 // Per-client: each player toggles their own guide independently
@@ -345,6 +345,13 @@ void evtPostNav(Event event, const char[] name, bool dontBroadcast)
 void evtNavBlocked(Event event, const char[] name, bool dontBroadcast)
 {
     if (!enable || !nav_started || !map_started) return;
+    // v4.6.1: debounce — movers (rollercoaster car, elevators) fire bursts
+    // of nav_blocked events while passing; each one used to queue another
+    // detour attempt (c2m3 fired 3 in the same second at 22:21:30: cells
+    // 91/92/93). The 6s PathIntegrityCheck poll covers real stale paths.
+    static float fLastNavBlocked;
+    if (GetEngineTime() - fLastNavBlocked < 3.0) return;
+    fLastNavBlocked = GetEngineTime();
     Address navArea = L4D_GetNavAreaByID(event.GetInt("area"));
     if (navArea == Address_Null) return;
     #if DEBUG>1

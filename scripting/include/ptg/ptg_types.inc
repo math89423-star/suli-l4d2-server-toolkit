@@ -295,9 +295,16 @@ forward void Guide_TryLocalDetour(Address blockedArea);
 #define DETOUR_NODE_LIMIT 4000      // hard cap on local node table
 #define DETOUR_BOX_PADDING 400.0    // AABB expansion beyond window cell centers
 #define DETOUR_CONVERT_PER_FRAME 150
+// v4.6.1: detour chain frame budget (ms). The shared pipeline budget (0.5ms,
+// l4d_path_to_goal_budget) made a windowed detour — BFS collect + local A*
+// + convert + splice — take 40-100s per attempt (c2m3, 2026-08-01: splice
+// failed at 22:22:14 and 22:23:54, ~44s and ~100s after chain start).
+// 2ms/frame keeps a detour at 2-5s while holding server fps during it.
+#define DETOUR_BUDGET_MS 2.0
 
 bool g_bDetourActive = false;     // a detour frame chain is running
 bool g_bDetourQueued = false;     // trigger arrived while busy — run after current chain
+float g_fLastBuildDoneTime;       // v4.6.1: last full pipeline build finish time — detour/rebuild backoff gate
 Address g_aDetourQueuedArea = Address_Null;
 bool g_bDetourQueuedDirty = false;// NavChanged(true) arrived while detouring — rebuild after
 int g_iDetourStage = 0;           // 0=idle, 1=collect, 2=local A*, 3=convert, 4=splice

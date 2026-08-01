@@ -48,6 +48,24 @@ void Guide_Prep()
     // g_fPrepStartTime kept as a diagnostic field.
 
     if (!enable || !gamemode_guidable || !map_started || !nav_started || guide_prep || is_prep_cooldown()) return;
+    // v4.6.1: cancel an in-flight local detour before starting a build.
+    // The detour's window indices reference the CURRENT g_GuideCells; once
+    // this build replaces the array, the stale window splices into wrong
+    // offsets, fails boundary LOS checks, and retries ±24/±48 over 40-100s
+    // before triggering a SECOND full rebuild. Seen on c2m3 2026-08-01:
+    // detour chain at 22:21:30 raced the dirty rebuild at 22:21:31, splice
+    // failed 22:21:35 / 22:22:14 / 22:23:54, full rebuild ran again at 22:23:55.
+    if (g_bDetourActive)
+    {
+        Detour_ClearLocalState();
+        g_bDetourActive = false;
+        g_bGuideCellsBusy = false;
+        g_iDetourStage = 0;
+        g_bDetourQueued = false;
+        g_bDetourQueuedDirty = false;
+        g_aDetourQueuedArea = Address_Null;
+        LogMessage("[PTG] Build start canceled in-flight detour (stale window)");
+    }
     // v4.6: any real build request (player command, dirty rebuild, fallback
     // recovery) consumes the large-map lazy-build gate — only the background
     // prebuild in Timer_AutoCheck is gated.
@@ -827,6 +845,7 @@ void OnFramePrep(bool new_frame = true)
         guide_prep = false;
         guide_ready = true;
         g_bPathDirty = false; // v4.6: fresh path supersedes any pending dirty rebuild
+        g_fLastBuildDoneTime = GetEngineTime(); // v4.6.1: backoff gate for detour/rebuild loops
         LogMessage("[PTG] Pipeline done: %d guide cells ready%s", g_GuideCells != null ? g_GuideCells.Length : -1,
             g_bAStarPartialPath ? " — PARTIAL path (disconnected nav mesh, dead-end beacon placed)" : "");
         Guide_ValidateWalkable(); // v2.2: hull-trace validate all beams against world geometry

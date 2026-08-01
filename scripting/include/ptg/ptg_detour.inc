@@ -24,6 +24,14 @@ public void Guide_TryLocalDetour(Address blockedArea)
 {
     if (blockedArea == Address_Null) return;
 
+    // v4.6.1: backoff right after a full build — the fresh path normally
+    // routes around the blocker, so a persistent one (mover / coaster car)
+    // must not re-trigger a detour→rebuild chain on every 6s poll.
+    // c2m3 on 2026-08-01 fired 3 rebuild cycles in 84s (22:21:30 → 22:22:14
+    // → 22:23:54) before the rebuilt path finally avoided the tracks.
+    if (g_fLastBuildDoneTime > 0.0 && GetEngineTime() - g_fLastBuildDoneTime < 60.0)
+        return;
+
     // Gate: only when the path is live and nothing else is mutating it.
     // Triggers while busy are deferred; the completion branches of the
     // pipeline / REPAIR / detour chains run them.
@@ -210,7 +218,7 @@ bool Detour_CollectFrame()
 
     while (g_iDetourCollectHead < g_hDetourNodes.Length && g_hDetourNodes.Length < limit)
     {
-        if (processed > 0 && frame_budget_exceeded()) return false;
+        if (processed > 0 && detour_frame_budget_exceeded()) return false;
 
         int localIdx = g_iDetourCollectHead;
         g_iDetourCollectHead++;
@@ -320,7 +328,7 @@ int Detour_AStar_Frame(int maxNodes)
 
     while (processed < maxNodes && g_hDetourOpen.Length > 0)
     {
-        if (processed > 0 && frame_budget_exceeded()) return 0;
+        if (processed > 0 && detour_frame_budget_exceeded()) return 0;
 
         if (!Heap_Pop(g_hDetourOpen, entry))
             return -1;
@@ -427,7 +435,7 @@ bool Detour_ConvertFrame(int maxCells)
     int processed = 0;
     while (g_iDetourConvIdx < pathLen && processed < maxCells)
     {
-        if (processed > 0 && frame_budget_exceeded()) return false;
+        if (processed > 0 && detour_frame_budget_exceeded()) return false;
 
         int localIdx = g_hDetourPath.Get(g_iDetourConvIdx);
         int nodeIdx = g_hDetourNodes.Get(localIdx);
@@ -545,24 +553,16 @@ bool Detour_Splice()
 void Detour_Fail()
 {
     Detour_ClearLocalState();
-    g_iDetourD *= 2;
-    if (g_iDetourD > DETOUR_WINDOW * 4)
-    {
-        LogMessage("[PTG] Detour failed after widening — full rebuild");
-        g_bDetourActive = false;
-        g_bGuideCellsBusy = false;
-        NavChanged(true);
-        return;
-    }
-    if (Detour_InitWindow())
-    {
-        g_iDetourStage = 1;
-        LogMessage("[PTG] Detour: widening window to ±%d (cell %d)", g_iDetourD, g_iDetourBlockedIdx);
-        RequestFrame(Detour_Frame, 0);
-        return;
-    }
+    // v4.6.1: no more widening retries — go straight to the full rebuild.
+    // On c2m3 (rollercoaster, 2026-08-01) a blocked region spanning many
+    // cells made ±12/±24/±48 all fail; each retry burned ~40-100s of
+    // budgeted frames before reaching the full rebuild it needed anyway.
+    // One attempt with the initial window, then rebuild.
+    LogMessage("[PTG] Detour failed (window ±%d at cell %d) — full rebuild",
+        g_iDetourD, g_iDetourBlockedIdx);
     g_bDetourActive = false;
     g_bGuideCellsBusy = false;
+    g_iDetourStage = 0;
     NavChanged(true);
 }
 
