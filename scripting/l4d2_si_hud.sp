@@ -11,6 +11,11 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.35:
+ *   - FIX 团灭重开可用积分未重置 (user 实测): 存档/回滚补上钱包——
+ *     团灭重开时可用积分回到本图开局值（本图内赚的作废，上图攒的保留；
+ *     过关换图仍不清，新战役仍清零）。60s/断线保存自动同步回滚后的值。
+ *
  * Changelog v1.7.34:
  *   - 持久化 (user 确认): 钱包 + 复活币按 SteamID 存 KeyValues
  *     (data/si_hud_scores.txt)。保存时机: 断线 / OnPluginEnd(reload) /
@@ -481,7 +486,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.34"
+#define PLUGIN_VERSION "1.7.35"
 
 // ============================================================================
 // ConVar handles
@@ -582,12 +587,14 @@ int       g_iReviveCoins[MAXPLAYERS + 1];             // 复活币余额（战�
 Handle    g_hRespawnTimer[MAXPLAYERS + 1];            // 复活计时器
 char      g_sPrevCampaign[16];                        // 上一张图的战役前缀（前缀变化 = 新战役 → 清钱包/复活币）
 // v1.7.30: 每图开始积分存档（团灭重开回滚到开局状态）
+// v1.7.35: 可用积分（钱包）一并存档回滚（用户实测团灭后 wallet 未重置）
 bool      g_bFreshMapStart;                           // OnMapStart 置 true，round_start 消费
 int       g_iSaveTotalScore[MAXPLAYERS + 1];
 int       g_iSaveSIKills[MAXPLAYERS + 1];
 int       g_iSaveDeaths[MAXPLAYERS + 1];
 int       g_iSaveFFDamage[MAXPLAYERS + 1];
 int       g_iSaveBlacked[MAXPLAYERS + 1];
+int       g_iSaveWallet[MAXPLAYERS + 1];
 int       g_iSIKills[MAXPLAYERS + 1];                 // v1.7.7: session SI/Witch/Tank kills
 int       g_iDeaths[MAXPLAYERS + 1];                  // v1.7.7: survivor deaths
 int       g_iFFDamage[MAXPLAYERS + 1];                // v1.7.7: friendly-fire damage dealt
@@ -1241,6 +1248,7 @@ void SaveScoreState()
         g_iSaveDeaths[i] = g_iDeaths[i];
         g_iSaveFFDamage[i] = g_iFFDamage[i];
         g_iSaveBlacked[i] = g_iBlacked[i];
+        g_iSaveWallet[i] = g_iWallet[i];        // v1.7.35
     }
 }
 
@@ -1253,6 +1261,7 @@ void RestoreScoreState()
         g_iDeaths[i] = g_iSaveDeaths[i];
         g_iFFDamage[i] = g_iSaveFFDamage[i];
         g_iBlacked[i] = g_iSaveBlacked[i];
+        g_iWallet[i] = g_iSaveWallet[i];        // v1.7.35: 可用积分回滚到本图开局值
         // 复活次数一并回到开局初始（防旧回合计时器复活已死玩家）
         g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
         KillRespawnTimer(i);
