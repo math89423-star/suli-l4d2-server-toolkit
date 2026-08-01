@@ -3,9 +3,14 @@
 
 #include <sourcemod>
 #include <left4dhooks>
-#include <sdkhooks>    // v1.1: 打包/递药检测改用 SDKHooks OnUse（player_use 事件在 L4D2 不触发）
 
-#define PLUGIN_VERSION "1.2"
+// v1.3: 两处修复
+//  1) 拉倒地/挂边拉起/电击复活 只奖励救人者（被救者不加血）
+//  2) 打包者奖励失效修复：SDKHooks OnUse 对打包/递药从不触发（实测 2.2 万条 OnUse 无一条
+//     first_aid_kit/pills，OnUse 只在持枪/近战按 E 时触发）→ 改用 left4dhooks 引擎级 detour
+//     L4D2_OnStartUseAction（打包必然触发：action=Healing，client=打包者，target=被打包者）
+
+#define PLUGIN_VERSION "1.3"
 
 ConVar g_hCvarEnable;
 ConVar g_hCvarIncap;
@@ -22,9 +27,10 @@ ConVar g_hCvarAnnounce;
 bool g_bHanging[MAXPLAYERS+1];  // m_isHangingFromLedge — 挂边中
 bool g_bDead[MAXPLAYERS+1];     // !IsPlayerAlive — 已死亡（电击复活前必为 true）
 
-// 打包/递药执行者记录（player_use 事件记录，heal_success/pills_used 完成时查表）
+// 打包/递药执行者记录（L4D2_OnStartUseAction 记录，heal_success/pills_used 完成时查表）
 // 本版本事件无执行者字段：heal_success 全字段为 0，pills_used 的 user 也为 0
 int g_iMedkitHealer[MAXPLAYERS+1];  // [被打包者] = 打包者 client
+int g_iMedkitHealerTime[MAXPLAYERS+1]; // 打包记录时间戳（15s 有效期，防 use 后未完成的残留）
 int g_iPillGiver[MAXPLAYERS+1];     // [吃药者] = 递药者 client
 int g_iPillGiverTime[MAXPLAYERS+1]; // 递药记录时间戳（5s 有效期，防 use 后没给药的残留）
 
@@ -72,20 +78,6 @@ public void OnPluginStart()
     HookEvent("round_start",      Event_RoundStart);
 
     CreateTimer(0.2, Timer_StateCheck, _, TIMER_REPEAT);
-
-    // v1.1 FIX: L4D2 的 player_use 事件从不触发（打包/递药无 PlayerUse 日志，
-    // 实测 0 条）→ 改用 SDKHooks OnUse（队友实体被 E 对准时引擎级回调）。
-    // 补 hook 已在线的玩家（reload 不触发 OnClientPutInServer）。
-    for (int i = 1; i <= MaxClients; i++)
-    {
-        if (IsClientInGame(i))
-            SDKHook(i, SDKHook_Use, OnUseHook);
-    }
-}
-
-public void OnClientPutInServer(int client)
-{
-    SDKHook(client, SDKHook_Use, OnUseHook);
 }
 
 public void OnClientDisconnect(int client)
@@ -128,6 +120,7 @@ public Action Timer_StateCheck(Handle timer)
 
 // revive_success 是 L4D2 唯一的复活事件，覆盖三种来源，按事件前状态区分：
 // 挂边中 → 挂边拉起；已死亡 → 电击复活；否则 → 救助倒地
+// v1.3: 只奖励救人者 —— 被救的人不加血（用户指定）
 void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
 {
     // 实测（2026-07-31）：本版本 revive_success 的救人者字段是 "userid"，"rescuer" 恒为 0
@@ -156,41 +149,38 @@ void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
     bool defib = g_bDead[subject];
     g_bHanging[subject] = false;
     g_bDead[subject] = false;
-    // v1.1: 救人（按 E 交互）也会触发 OnUse 但手里是空手/电击器不记录；
-    // 保险起见救人完成时清掉打包/递药残留，防误配
+    // 救人（按 E 交互）完成时清掉打包/递药残留，防误配
     g_iMedkitHealer[subject] = 0;
     g_iPillGiver[subject] = 0;
 
     if (ledge)
     {
         Reward(rescuer, g_hCvarLedge, "把挂边队友拉起来");
-        Reward(subject, g_hCvarLedge, "拉起来", true);
     }
     else if (defib)
     {
         Reward(rescuer, g_hCvarDefib, "电击复活队友");
-        Reward(subject, g_hCvarDefib, "电击复活", true);
     }
     else
     {
         Reward(rescuer, g_hCvarIncap, "救助倒地队友");
-        Reward(subject, g_hCvarIncap, "救助", true);
     }
 }
 
 void Event_HealSuccess(Event event, const char[] name, bool dontBroadcast)
 {
-    // 本版本 heal_success 无打包者字段，打包者由 player_use 记录
+    // 本版本 heal_success 无打包者字段，打包者由 L4D2_OnStartUseAction 记录
     int subject = GetClientOfUserId(event.GetInt("subject"));
     if (subject < 1 || subject > MaxClients) return;
 
-    int rescuer = g_iMedkitHealer[subject];
+    int healer = g_iMedkitHealer[subject];
     g_iMedkitHealer[subject] = 0;
-    if (rescuer < 1 || rescuer > MaxClients) return;
-    if (rescuer == subject) return;  // 自己打包不算
+    if (healer < 1 || healer > MaxClients) return;
+    if (GetTime() - g_iMedkitHealerTime[subject] > 15) return;  // 记录过期（开始打包但没完成）
+    if (healer == subject) return;  // 自己打包不算
 
-    Reward(rescuer, g_hCvarMedkit, "给队友打包");
-    Reward(subject, g_hCvarMedkit, "打包", true);
+    Reward(healer, g_hCvarMedkit, "给队友打包");
+    Reward(subject, g_hCvarMedkit, "打包", true);  // v1.2: 被打包队友也加血（用户指定）
 }
 
 void Event_HealInterrupted(Event event, const char[] name, bool dontBroadcast)
@@ -202,7 +192,7 @@ void Event_HealInterrupted(Event event, const char[] name, bool dontBroadcast)
 
 void Event_PillsUsed(Event event, const char[] name, bool dontBroadcast)
 {
-    // 本版本 pills_used 无递药者字段，递药者由 player_use 记录（5s 内有效）
+    // 本版本 pills_used 无递药者字段，递药者由 L4D2_OnStartUseAction 记录（5s 内有效）
     int subject = GetClientOfUserId(event.GetInt("subject"));  // 吃药的人
     if (subject < 1 || subject > MaxClients) return;
 
@@ -216,36 +206,56 @@ void Event_PillsUsed(Event event, const char[] name, bool dontBroadcast)
     Reward(subject, g_hCvarPills, "递药", true);
 }
 
-// v1.1 FIX: SDKHooks OnUse —— 队友实体被 E 对准（打包/递药）时引擎回调，
-// 按 activator（使用方）手里武器记录执行者。player_use 事件在 L4D2 从不触发。
-public Action OnUseHook(int entity, int activator, int caller, UseType type, float value)
+// v1.3 FIX: 打包/递药检测改用 left4dhooks 引擎级 detour L4D2_OnStartUseAction。
+// 原因：SDKHooks OnUse 在打包/递药时从不触发 —— 实测 2.2 万条 OnUse 日志全部是
+// 持枪/近战按 E（weapon_melee/weapon_rifle 等），0 条 weapon_first_aid_kit/pills。
+// CTerrorPlayer::StartUseAction 是打包的必经路径：action=1(Healing)，client=打包者。
+public void L4D2_OnStartUseAction_Post(any action, int client, int target)
 {
-    if (entity < 1 || entity > MaxClients || !IsClientInGame(entity) || GetClientTeam(entity) != 2)
-        return Plugin_Continue;
-    if (activator < 1 || activator > MaxClients || !IsClientInGame(activator) || IsFakeClient(activator))
-        return Plugin_Continue;
-    if (activator == entity || GetClientTeam(activator) != 2)
-        return Plugin_Continue;
+    if (client < 1 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client))
+        return;
 
-    char weapon[32];
-    GetClientWeapon(activator, weapon, sizeof(weapon));
-    LogMessage("[RescueHeal] OnUse: %d(%N) use %d(%N) weapon %s type %d", activator, activator, entity, entity, weapon, type);
+    // action=1 L4D2UseAction_Healing：开始打包/自我包扎（含对队友使用医疗包）
+    if (action == view_as<int>(L4D2UseAction_Healing))
+    {
+        int patient = target;
+        // target 参数对打包应是患者；兜底用 L4D_FindUseEntity 再试一次
+        if (patient < 1 || patient > MaxClients || !IsClientInGame(patient) || GetClientTeam(patient) != 2)
+            patient = L4D_FindUseEntity(client);
+        if (patient < 1 || patient > MaxClients || !IsClientInGame(patient) || GetClientTeam(patient) != 2)
+            return;
+        if (patient == client)
+            return;  // 自己包扎不算
 
-    if (StrEqual(weapon, "weapon_first_aid_kit", false))
-    {
-        g_iMedkitHealer[entity] = activator;
-        LogMessage("[RescueHeal] OnUse: 记录打包者 %d -> %d", activator, entity);
+        g_iMedkitHealer[patient] = client;
+        g_iMedkitHealerTime[patient] = GetTime();
+        LogMessage("[RescueHeal] OnStartUseAction(Healing): 记录打包者 %d(%N) -> %d(%N)",
+            client, client, patient, patient);
     }
-    else if (StrEqual(weapon, "weapon_pain_pills", false) || StrEqual(weapon, "weapon_adrenaline", false))
+    else
     {
-        g_iPillGiver[entity] = activator;
-        g_iPillGiverTime[entity] = GetTime();
-        LogMessage("[RescueHeal] OnUse: 记录递药者 %d -> %d", activator, entity);
+        // 递药兜底：pills/adrenaline 若也走 StartUseAction（枚举未列全），按手持武器记录递药者
+        char weapon[32];
+        GetClientWeapon(client, weapon, sizeof(weapon));
+        if (StrEqual(weapon, "weapon_pain_pills", false) || StrEqual(weapon, "weapon_adrenaline", false))
+        {
+            int patient = target;
+            if (patient < 1 || patient > MaxClients || !IsClientInGame(patient) || GetClientTeam(patient) != 2)
+                patient = L4D_FindUseEntity(client);
+            if (patient < 1 || patient > MaxClients || !IsClientInGame(patient) || GetClientTeam(patient) != 2)
+                return;
+            if (patient == client)
+                return;
+
+            g_iPillGiver[patient] = client;
+            g_iPillGiverTime[patient] = GetTime();
+            LogMessage("[RescueHeal] OnStartUseAction: 记录递药者 %d(%N) -> %d(%N) action=%d",
+                client, client, patient, patient, action);
+        }
     }
-    return Plugin_Continue;
 }
 
-// v1.2: toSubject=true 时给"被帮助的队友"加血（用户："给队友打包点击队友也要加血"）
+// v1.2: toSubject=true 时给"被帮助的队友"加血（仅打包/递药保留；救人动作 v1.3 起不再给被救者加血）
 void Reward(int client, ConVar cvar, const char[] what, bool toSubject = false)
 {
     char cvarName[64];
