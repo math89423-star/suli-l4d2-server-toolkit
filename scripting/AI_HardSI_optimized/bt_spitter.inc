@@ -81,7 +81,7 @@ BT_Status SpitterAct_FindBoomedTarget(int client) {
 
     for (int i = 1; i <= MaxClients; i++) {
         if (!IsSurvivor(i) || !IsPlayerAlive(i)) continue;
-        if (GetEntProp(i, Prop_Data, "m_hasBeenBoomed") <= 0) continue;
+        if (GetEntProp(i, Prop_Send, "m_hasBeenBoomed") <= 0) continue;
         float survPos[3];
         GetClientAbsOrigin(i, survPos);
         float dist = GetVectorDistance(spitterPos, survPos);

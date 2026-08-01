@@ -139,11 +139,17 @@ bool TraceFilterWalkable(int entity, int contentsMask)
 
         // prop_door_rotating: only block when closed or closing.
         // m_eDoorState: 0=closed, 1=opening, 2=open, 3=closing
-        if (strncmp(class, "prop_door", 9) == 0)
+        // v4.6.1: match the EXACT classname — m_eDoorState is prop_door_rotating-
+        // only; reading it on any other prop_door* variant threw an exception
+        // inside the engine trace callback (aborting the prep pipeline).
+        // Unknown prop_door* variants are treated as solid (conservative).
+        if (strcmp(class, "prop_door_rotating") == 0)
         {
             int doorState = GetEntProp(entity, Prop_Send, "m_eDoorState");
             return (doorState == 0 || doorState == 3); // closed or closing
         }
+        if (strncmp(class, "prop_door", 9) == 0)
+            return true; // unknown door variant — assume closed
 
         // v4.6 FIX: prop_physics / prop_physics_multiplayer no longer block.
         // Players can push/shove these (boxes, chairs, furniture) — treating
@@ -164,12 +170,21 @@ bool TraceFilterWalkable(int entity, int contentsMask)
     {
         if (strncmp(class, "func_brush", 10) == 0) return true;
 
-        // func_door / func_door_rotating — only block when closed
+        // func_door / func_door_rotating — only block when closed.
+        // v4.6.1 FIX: m_eDoorState is prop_door_rotating-ONLY (Prop_Send).
+        // func_door has no such networked prop — GetEntProp threw
+        // "Property not found" inside the engine trace callback, which aborted
+        // DetectNonMeshConnections_Frame and stalled the prep pipeline forever
+        // on maps with func_doors (e.g. l4d_yama_1: watchdog reset every 12s,
+        // guide_ready never set, double-tap always answered "Please wait...").
+        // func_door exposes datamap m_toggle_state (CBaseDoor base class —
+        // always present on func_door/func_door_rotating):
+        //   0 = TS_AT_TOP (open), 1 = TS_AT_BOTTOM (closed),
+        //   2 = TS_GOING_UP (opening), 3 = TS_GOING_DOWN (closing)
         if (strncmp(class, "func_door", 9) == 0)
         {
-            // m_eDoorState for func_door: same enum as prop_door
-            int doorState = GetEntProp(entity, Prop_Send, "m_eDoorState");
-            return (doorState == 0 || doorState == 3); // closed or closing
+            int toggle = GetEntProp(entity, Prop_Data, "m_toggle_state");
+            return (toggle == 1 || toggle == 3); // closed or closing
         }
 
         // v4.6 FIX: func_breakable no longer blocks (player can smash through
@@ -216,11 +231,12 @@ bool TraceFilterWalkableStrict(int entity, int contentsMask)
     {
         if (strncmp(class, "prop_static", 11) == 0) return true;
 
-        if (strncmp(class, "prop_door", 9) == 0)
+        if (strcmp(class, "prop_door_rotating") == 0)
         {
             int doorState = GetEntProp(entity, Prop_Send, "m_eDoorState");
             return (doorState == 0 || doorState == 3);
         }
+        if (strncmp(class, "prop_door", 9) == 0) return true; // unknown variant — assume closed
 
         if (strncmp(class, "prop_physics", 12) == 0) return true;
 
@@ -235,8 +251,10 @@ bool TraceFilterWalkableStrict(int entity, int contentsMask)
 
         if (strncmp(class, "func_door", 9) == 0)
         {
-            int doorState = GetEntProp(entity, Prop_Send, "m_eDoorState");
-            return (doorState == 0 || doorState == 3);
+            // Same fix as TraceFilterWalkable: func_door has no m_eDoorState;
+            // use datamap m_toggle_state (0=open, 1=closed, 2=opening, 3=closing)
+            int toggle = GetEntProp(entity, Prop_Data, "m_toggle_state");
+            return (toggle == 1 || toggle == 3);
         }
 
         if (strncmp(class, "func_breakable", 14) == 0)

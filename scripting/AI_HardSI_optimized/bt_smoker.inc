@@ -218,7 +218,7 @@ BT_Status SmokerAct_AcquireBoomedTarget(int client) {
     for (int i = 1; i <= MaxClients; i++) {
         if (!IsSurvivor(i) || !IsPlayerAlive(i)) continue;
         if (IsPinned(i)) continue;
-        if (GetEntProp(i, Prop_Data, "m_hasBeenBoomed") <= 0) continue;
+        if (GetEntProp(i, Prop_Send, "m_hasBeenBoomed") <= 0) continue;
         float p[3];
         GetClientAbsOrigin(i, p);
         float d = GetVectorDistance(pos, p);

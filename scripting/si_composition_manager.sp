@@ -385,7 +385,14 @@ public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroa
 // ============================================================================
 void ScheduleNextModeRotation()
 {
-    delete g_hModeTimer;
+    // v2.4.1 FIX: the previous timer's handle may already be closed by the
+    // engine (one-shot callback fired at the map-change edge) while
+    // g_hModeTimer still points at it — `delete` on a closed handle throws
+    // "Invalid Handle" (seen every map change in errors log).
+    if (g_hModeTimer != null && IsValidHandle(g_hModeTimer)) {
+        KillTimer(g_hModeTimer);
+    }
+    g_hModeTimer = null;
     float interval = GetRandomFloat(
         g_cvModeIntervalMin.FloatValue,
         g_cvModeIntervalMax.FloatValue);
