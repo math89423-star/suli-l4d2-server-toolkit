@@ -11,6 +11,11 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.42:
+ *   - 新加入玩家进服一律全默认（0 可用积分 + start 复活币，user）——
+ *     不再从持久化文件恢复（防中途进服带旧钱）；持久化恢复只用于
+ *     reload 时在线玩家。注：断线重连也视为新加入（进服 0）。
+ *
  * Changelog v1.7.41:
  *   - 战役首图（地图名含 m1）→ 可用积分/复活币一律清零（user：m1 首图
  *     开始应该都是 0；补上同前缀重开 c2m5→c2m1 的漏洞）。
@@ -508,7 +513,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.41"
+#define PLUGIN_VERSION "1.7.42"
 
 // ============================================================================
 // ConVar handles
@@ -1451,7 +1456,11 @@ public void OnClientPutInServer(int client)
 
 public void OnClientPostAdminCheck(int client)
 {
-    ScoreLoad_Player(client);   // v1.7.34: 从持久化文件恢复（无存档 = 新玩家默认）
+    // v1.7.42 (user): 新加入玩家 = 全默认状态（0 可用积分 + start 复活币）——
+    // 进服不恢复存档（防中途进服带旧战役的钱）；持久化只在 reload 时给
+    // 在线玩家恢复（OnPluginStart），保证玩的过程中不丢钱
+    g_iWallet[client] = 0;
+    g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
 }
 
 public void OnClientDisconnect(int client)
