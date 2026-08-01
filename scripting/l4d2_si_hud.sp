@@ -11,6 +11,12 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.43:
+ *   - FIX 同战役换图积分丢失 (user 实测): L4D2 changelevel 时客户端断线
+ *     自动重连 → v1.7.42 的"进服 0"把换图重连当新加入清空钱包。
+ *     断线记录 (SteamID, 时间)，20s 内同 ID 重连 = 换图重连 → 恢复存档；
+ *     否则 = 真实新加入 → 全默认 0。
+ *
  * Changelog v1.7.42:
  *   - 新加入玩家进服一律全默认（0 可用积分 + start 复活币，user）——
  *     不再从持久化文件恢复（防中途进服带旧钱）；持久化恢复只用于
@@ -513,7 +519,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.42"
+#define PLUGIN_VERSION "1.7.43"
 
 // ============================================================================
 // ConVar handles
@@ -688,6 +694,12 @@ char      g_sSavePath[PLATFORM_MAX_PATH];
 
 // v1.7.40: 前向声明（OnPluginStart/持久化区在 GetMapPrefix 定义之前使用）
 void GetMapPrefix(const char[] map, char[] out, int maxlen);
+
+// v1.7.43: 换图重连识别——L4D2 changelevel 时客户端断线自动重连，
+// 会被 OnClientPostAdminCheck 当成"新加入"清空钱包。断线时记录
+// (SteamID, 时间)，重连时 20s 内同 ID 匹配 = 换图重连 → 恢复存档。
+char      g_sDiscAuth[MAXPLAYERS + 1][32];
+float     g_fDiscTime[MAXPLAYERS + 1];
 
 // ============================================================================
 // Plugin Info
@@ -1456,16 +1468,46 @@ public void OnClientPutInServer(int client)
 
 public void OnClientPostAdminCheck(int client)
 {
-    // v1.7.42 (user): 新加入玩家 = 全默认状态（0 可用积分 + start 复活币）——
-    // 进服不恢复存档（防中途进服带旧战役的钱）；持久化只在 reload 时给
-    // 在线玩家恢复（OnPluginStart），保证玩的过程中不丢钱
-    g_iWallet[client] = 0;
-    g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
+    // v1.7.43: 换图重连判定——20s 内同 SteamID 断线过 = changelevel 自动重连
+    // → 恢复存档（同战役换图不丢钱）；否则 = 真实新加入 → 全默认 0
+    char auth[32];
+    bool reconnect = false;
+    if (GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth), false))
+    {
+        float now = GetGameTime();
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (g_fDiscTime[i] > 0.0 && StrEqual(g_sDiscAuth[i], auth)
+                && now - g_fDiscTime[i] < 20.0)
+            {
+                reconnect = true;
+                g_fDiscTime[i] = 0.0;   // 消费记录
+                break;
+            }
+        }
+    }
+
+    if (reconnect)
+    {
+        // v1.7.34: 从持久化文件恢复（存档战役校验在 ScoreLoad_Player 内）
+        ScoreLoad_Player(client);
+    }
+    else
+    {
+        // v1.7.42 (user): 新加入玩家 = 全默认状态（0 可用积分 + start 复活币）
+        g_iWallet[client] = 0;
+        g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
+    }
 }
 
 public void OnClientDisconnect(int client)
 {
     ScoreSave_Player(client);            // v1.7.34: 断线保存（必须在清零前）
+    // v1.7.43: 记录断线 SteamID + 时间（换图重连识别用）
+    if (GetClientAuthId(client, AuthId_Steam2, g_sDiscAuth[client], sizeof(g_sDiscAuth[]), false))
+        g_fDiscTime[client] = GetGameTime();
+    else
+        g_fDiscTime[client] = 0.0;
     g_fLastKillSoundTime[client] = 0.0;
     g_iKillStreak[client] = 0;
     g_iCommonStreak[client] = 0;           // v1.7.4
