@@ -3,8 +3,9 @@
 
 #include <sourcemod>
 #include <left4dhooks>
+#include <sdkhooks>    // v1.1: 打包/递药检测改用 SDKHooks OnUse（player_use 事件在 L4D2 不触发）
 
-#define PLUGIN_VERSION "1.0"
+#define PLUGIN_VERSION "1.2"
 
 ConVar g_hCvarEnable;
 ConVar g_hCvarIncap;
@@ -68,10 +69,23 @@ public void OnPluginStart()
     HookEvent("heal_success",     Event_HealSuccess);
     HookEvent("heal_interrupted", Event_HealInterrupted);
     HookEvent("pills_used",       Event_PillsUsed);
-    HookEvent("player_use",       Event_PlayerUse);
     HookEvent("round_start",      Event_RoundStart);
 
     CreateTimer(0.2, Timer_StateCheck, _, TIMER_REPEAT);
+
+    // v1.1 FIX: L4D2 的 player_use 事件从不触发（打包/递药无 PlayerUse 日志，
+    // 实测 0 条）→ 改用 SDKHooks OnUse（队友实体被 E 对准时引擎级回调）。
+    // 补 hook 已在线的玩家（reload 不触发 OnClientPutInServer）。
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i))
+            SDKHook(i, SDKHook_Use, OnUseHook);
+    }
+}
+
+public void OnClientPutInServer(int client)
+{
+    SDKHook(client, SDKHook_Use, OnUseHook);
 }
 
 public void OnClientDisconnect(int client)
@@ -142,13 +156,26 @@ void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
     bool defib = g_bDead[subject];
     g_bHanging[subject] = false;
     g_bDead[subject] = false;
+    // v1.1: 救人（按 E 交互）也会触发 OnUse 但手里是空手/电击器不记录；
+    // 保险起见救人完成时清掉打包/递药残留，防误配
+    g_iMedkitHealer[subject] = 0;
+    g_iPillGiver[subject] = 0;
 
     if (ledge)
+    {
         Reward(rescuer, g_hCvarLedge, "把挂边队友拉起来");
+        Reward(subject, g_hCvarLedge, "拉起来", true);
+    }
     else if (defib)
+    {
         Reward(rescuer, g_hCvarDefib, "电击复活队友");
+        Reward(subject, g_hCvarDefib, "电击复活", true);
+    }
     else
+    {
         Reward(rescuer, g_hCvarIncap, "救助倒地队友");
+        Reward(subject, g_hCvarIncap, "救助", true);
+    }
 }
 
 void Event_HealSuccess(Event event, const char[] name, bool dontBroadcast)
@@ -163,6 +190,7 @@ void Event_HealSuccess(Event event, const char[] name, bool dontBroadcast)
     if (rescuer == subject) return;  // 自己打包不算
 
     Reward(rescuer, g_hCvarMedkit, "给队友打包");
+    Reward(subject, g_hCvarMedkit, "打包", true);
 }
 
 void Event_HealInterrupted(Event event, const char[] name, bool dontBroadcast)
@@ -185,34 +213,40 @@ void Event_PillsUsed(Event event, const char[] name, bool dontBroadcast)
     if (giver == subject) return;  // 自己吃药不算
 
     Reward(giver, g_hCvarPills, "给队友递药");
+    Reward(subject, g_hCvarPills, "递药", true);
 }
 
-// player_use：打包/递药都是"用 E 对准队友"，按手里武器记录执行者
-void Event_PlayerUse(Event event, const char[] name, bool dontBroadcast)
+// v1.1 FIX: SDKHooks OnUse —— 队友实体被 E 对准（打包/递药）时引擎回调，
+// 按 activator（使用方）手里武器记录执行者。player_use 事件在 L4D2 从不触发。
+public Action OnUseHook(int entity, int activator, int caller, UseType type, float value)
 {
-    int player = GetClientOfUserId(event.GetInt("player"));
-    int target = event.GetInt("targetid");  // 玩家实体索引 == client index?
-    if (player < 1 || player > MaxClients || !IsClientInGame(player) || IsFakeClient(player)) return;
-    if (target < 1 || target > MaxClients || !IsClientInGame(target) || GetClientTeam(target) != 2) return;
+    if (entity < 1 || entity > MaxClients || !IsClientInGame(entity) || GetClientTeam(entity) != 2)
+        return Plugin_Continue;
+    if (activator < 1 || activator > MaxClients || !IsClientInGame(activator) || IsFakeClient(activator))
+        return Plugin_Continue;
+    if (activator == entity || GetClientTeam(activator) != 2)
+        return Plugin_Continue;
 
     char weapon[32];
-    GetClientWeapon(player, weapon, sizeof(weapon));
-    LogMessage("[RescueHeal] PlayerUse: %d(%N) -> target %d team %d weapon %s", player, player, target, GetClientTeam(target), weapon);
+    GetClientWeapon(activator, weapon, sizeof(weapon));
+    LogMessage("[RescueHeal] OnUse: %d(%N) use %d(%N) weapon %s type %d", activator, activator, entity, entity, weapon, type);
 
     if (StrEqual(weapon, "weapon_first_aid_kit", false))
     {
-        g_iMedkitHealer[target] = player;
-        LogMessage("[RescueHeal] PlayerUse: 记录打包者 %d -> %d", player, target);
+        g_iMedkitHealer[entity] = activator;
+        LogMessage("[RescueHeal] OnUse: 记录打包者 %d -> %d", activator, entity);
     }
     else if (StrEqual(weapon, "weapon_pain_pills", false) || StrEqual(weapon, "weapon_adrenaline", false))
     {
-        g_iPillGiver[target] = player;
-        g_iPillGiverTime[target] = GetTime();
-        LogMessage("[RescueHeal] PlayerUse: 记录递药者 %d -> %d", player, target);
+        g_iPillGiver[entity] = activator;
+        g_iPillGiverTime[entity] = GetTime();
+        LogMessage("[RescueHeal] OnUse: 记录递药者 %d -> %d", activator, entity);
     }
+    return Plugin_Continue;
 }
 
-void Reward(int client, ConVar cvar, const char[] what)
+// v1.2: toSubject=true 时给"被帮助的队友"加血（用户："给队友打包点击队友也要加血"）
+void Reward(int client, ConVar cvar, const char[] what, bool toSubject = false)
 {
     char cvarName[64];
     cvar.GetName(cvarName, sizeof(cvarName));
@@ -232,7 +266,12 @@ void Reward(int client, ConVar cvar, const char[] what)
     {
         LogMessage("[RescueHeal] Reward(%N) skip: at max HP (%d/%d) %s", client, curHP, maxHP, cvarName);
         if (g_hCvarAnnounce.BoolValue)
-            PrintToChat(client, "\x04[奖励]\x01 %s，但你已满血，奖励无法生效！", what);
+        {
+            if (toSubject)
+                PrintToChat(client, "\x04[奖励]\x01 你被队友%s，但你已满血！", what);
+            else
+                PrintToChat(client, "\x04[奖励]\x01 %s，但你已满血，奖励无法生效！", what);
+        }
         return;
     }
 
@@ -243,5 +282,10 @@ void Reward(int client, ConVar cvar, const char[] what)
     LogMessage("[RescueHeal] Reward(%N): %s +%d (curHP %d -> %d)", client, cvarName, newHP - curHP, curHP, newHP);
 
     if (g_hCvarAnnounce.BoolValue)
-        PrintToChat(client, "\x04[奖励]\x01 %s，恢复 \x05+%d\x01 实血！", what, newHP - curHP);
+    {
+        if (toSubject)
+            PrintToChat(client, "\x04[奖励]\x01 你被队友%s，恢复 \x05+%d\x01 实血！", what, newHP - curHP);
+        else
+            PrintToChat(client, "\x04[奖励]\x01 %s，恢复 \x05+%d\x01 实血！", what, newHP - curHP);
+    }
 }
