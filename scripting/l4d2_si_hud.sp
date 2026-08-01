@@ -11,6 +11,10 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.32:
+ *   - 排行榜播报（45s + 地图结束结算）末尾追加商店入口提醒：
+ *     "输入 !shop 或 !buy 打开商店，用可用积分兑换补给/武器"（user）。
+ *
  * Changelog v1.7.31b (static review fixes):
  *   - FIX 丢钱 Bug: 复活币持有上限检查在扣款之后 → 达上限购买扣 12000 不给币；
  *     检查移到扣款前。
@@ -455,7 +459,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.31b"
+#define PLUGIN_VERSION "1.7.32"
 
 // ============================================================================
 // ConVar handles
@@ -1024,6 +1028,8 @@ void ShowScoreboardTo(int client)
     // v1.7.28 (user): 播报计入可用积分 + 复活币（战役内资源，新战役清零）
     PrintToChat(client, "\x04[得分榜]\x01 可用积分 \x03%d\x01  复活币 \x03%d\x01 枚  复活 \x03%d\x01 次",
         g_iWallet[client], g_iReviveCoins[client], g_iRevivesLeft[client]);
+    // v1.7.32 (user): 积分总结后提醒玩家商店入口
+    PrintToChat(client, "\x04[得分榜]\x01 输入 \x05!shop\x01 或 \x05!buy\x01 打开商店，用可用积分兑换补给/武器");
 }
 
 // ============================================================================
