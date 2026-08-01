@@ -1760,8 +1760,17 @@ ArrayList g_hHPAClusterNodes;   // ArrayList of nodeIndices per cluster
 StringMap g_hHPAClusterAdj;     // "ci_cj" → 1 if clusters i and j are adjacent
 
 
-// ── HPA* ──
-stock void HPA_BuildClusters()
+// ── HPA* (v4.6.1: distributed across frames) ──
+// HPA_BuildClusters_Init() + HPA_BuildClusters_Frame() replace the old
+// single-frame HPA_BuildClusters(). On 5K+ node maps Pass 2 (cluster
+// adjacency: per-node GetNavConnections + 2×Format + 2×StringMap per edge)
+// was 30-60ms in ONE frame → SIGALRM, so v4.6 skipped HPA above 5000
+// areas and c2m3-class maps paid a 3s full A* with no cluster heuristic.
+// Now Pass 1 assigns HPA_CLUSTER_NODES_PER_FRAME nodes/frame, Pass 2
+// processes HPA_ADJ_NODES_PER_FRAME nodes/frame — ~0.2s total at 60fps.
+StringMap g_hHPAKeyMap;         // "cx_cy_cz" → clusterIndex (cross-frame)
+
+stock void HPA_BuildClusters_Init()
 {
     // Clean inner ArrayLists to prevent handle leak
     if (g_hHPAClusterNodes != null)
@@ -1777,120 +1786,157 @@ stock void HPA_BuildClusters()
     delete g_hHPAClusterCenters;
     delete g_hHPAClusterNodes;
     delete g_hHPAClusterAdj;
+    delete g_hHPAKeyMap;
 
     g_hHPAClusters = new StringMap();
     g_hHPAClusterCenters = new ArrayList(3);
     g_hHPAClusterNodes = new ArrayList();
     g_hHPAClusterAdj = new StringMap();
+    g_hHPAKeyMap = new StringMap();
 
+    g_iHPABuildStage = 1;
+    g_iHPABuildNode = 0;
+    g_iHPABuildCluster = 0;
+    g_iHPABuildNodeInCluster = 0;
+    g_iHPAClusterCount = 0;
+}
+
+// Returns true when the whole HPA build finished.
+stock bool HPA_BuildClusters_Frame()
+{
     float cellSize = g_hCvarHpaCellSize != null ? g_hCvarHpaCellSize.FloatValue : 1024.0;
     int nodeCount = g_hAStarNodes.Length;
-    StringMap clusterMap = new StringMap(); // key → clusterIndex
 
-    // Pass 1: assign nodes to clusters
-    for (int i = 0; i < nodeCount; i++)
+    // ---- Pass 1: assign nodes to clusters (batched) ----
+    if (g_iHPABuildStage == 1)
     {
-        float center[3];
-        g_hAStarCenters.GetArray(i, center, 3);
-
-        int cx = RoundToFloor(center[0] / cellSize);
-        int cy = RoundToFloor(center[1] / cellSize);
-        int cz = RoundToFloor(center[2] / cellSize);
-
-        char key[32];
-        Format(key, sizeof(key), "%d_%d_%d", cx, cy, cz);
-
-        int clusterIdx = -1;
-        if (!clusterMap.GetValue(key, clusterIdx))
+        int end = g_iHPABuildNode + HPA_CLUSTER_NODES_PER_FRAME;
+        if (end > nodeCount) end = nodeCount;
+        for (int i = g_iHPABuildNode; i < end; i++)
         {
-            clusterIdx = g_hHPAClusterCenters.Length / 3;
-            g_hHPAClusterCenters.PushArray(center, 3);
-            // Store nodeList handle as int inside g_hHPAClusterNodes
-            ArrayList nodeList = new ArrayList();
-            g_hHPAClusterNodes.Push(view_as<int>(nodeList));
-            nodeList.Push(i);
+            float center[3];
+            g_hAStarCenters.GetArray(i, center, 3);
 
-            clusterMap.SetValue(key, clusterIdx);
+            int cx = RoundToFloor(center[0] / cellSize);
+            int cy = RoundToFloor(center[1] / cellSize);
+            int cz = RoundToFloor(center[2] / cellSize);
 
-            // Update cluster center as average
-            float avg[3]; avg = center;
-            g_hHPAClusterCenters.SetArray(clusterIdx, avg, 3);
-        }
-        else
-        {
-            int handle = g_hHPAClusterNodes.Get(clusterIdx);
-            ArrayList nodeList = view_as<ArrayList>(handle);
-            nodeList.Push(i);
+            char key[32];
+            Format(key, sizeof(key), "%d_%d_%d", cx, cy, cz);
 
-            // Update running average for center
-            float curCenter[3];
-            g_hHPAClusterCenters.GetArray(clusterIdx, curCenter, 3);
-            int n = nodeList.Length;
-            curCenter[0] = (curCenter[0] * (n - 1) + center[0]) / n;
-            curCenter[1] = (curCenter[1] * (n - 1) + center[1]) / n;
-            curCenter[2] = (curCenter[2] * (n - 1) + center[2]) / n;
-            g_hHPAClusterCenters.SetArray(clusterIdx, curCenter, 3);
-        }
-    }
-
-    g_iHPAClusterCount = g_hHPAClusterCenters.Length / 3;
-
-    // Pass 2: compute cluster adjacency by checking nav area connections
-    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
-    for (int ci = 0; ci < g_iHPAClusterCount; ci++)
-    {
-        int nhandle = g_hHPAClusterNodes.Get(ci);
-        ArrayList nodes = view_as<ArrayList>(nhandle);
-
-        for (int ni = 0; ni < nodes.Length; ni++)
-        {
-            int nodeIdx = nodes.Get(ni);
-            int areaInt = g_hAStarNodes.Get(nodeIdx);
-            Address area = view_as<Address>(areaInt);
-
-            GetNavConnections(area, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
-
-            for (int c = 0; c < ConAdj.Length; c++)
+            int clusterIdx = -1;
+            if (!g_hHPAKeyMap.GetValue(key, clusterIdx))
             {
-                NavConnection nc;
-                ConAdj.GetArray(c, nc, sizeof(NavConnection));
-                if (nc.navArea == Address_Null) continue;
+                clusterIdx = g_hHPAClusterCenters.Length / 3;
+                g_hHPAClusterCenters.PushArray(center, 3);
+                // Store nodeList handle as int inside g_hHPAClusterNodes
+                ArrayList nodeList = new ArrayList();
+                g_hHPAClusterNodes.Push(view_as<int>(nodeList));
+                nodeList.Push(i);
 
-                int otherInt = view_as<int>(nc.navArea);
-                char keyB[16];
-                IntToString(otherInt, keyB, sizeof(keyB));
-                int otherIdx = -1;
-                if (!g_hAStarAreaToIndex.GetValue(keyB, otherIdx)) continue;
+                g_hHPAKeyMap.SetValue(key, clusterIdx);
 
-                // Find which cluster otherIdx belongs to
-                float otherCenter[3];
-                g_hAStarCenters.GetArray(otherIdx, otherCenter, 3);
-                int ocx = RoundToFloor(otherCenter[0] / cellSize);
-                int ocy = RoundToFloor(otherCenter[1] / cellSize);
-                int ocz = RoundToFloor(otherCenter[2] / cellSize);
+                // Update cluster center as average
+                float avg[3]; avg = center;
+                g_hHPAClusterCenters.SetArray(clusterIdx, avg, 3);
+            }
+            else
+            {
+                int handle = g_hHPAClusterNodes.Get(clusterIdx);
+                ArrayList nodeList = view_as<ArrayList>(handle);
+                nodeList.Push(i);
 
-                char okey[32];
-                Format(okey, sizeof(okey), "%d_%d_%d", ocx, ocy, ocz);
-
-                int cj = -1;
-                if (clusterMap.GetValue(okey, cj) && cj != ci)
-                {
-                    char adjKey[16];
-                    int minC = (ci < cj) ? ci : cj;
-                    int maxC = (ci < cj) ? cj : ci;
-                    Format(adjKey, sizeof(adjKey), "%d_%d", minC, maxC);
-                    g_hHPAClusterAdj.SetValue(adjKey, 1);
-                }
+                // Update running average for center
+                float curCenter[3];
+                g_hHPAClusterCenters.GetArray(clusterIdx, curCenter, 3);
+                int n = nodeList.Length;
+                curCenter[0] = (curCenter[0] * (n - 1) + center[0]) / n;
+                curCenter[1] = (curCenter[1] * (n - 1) + center[1]) / n;
+                curCenter[2] = (curCenter[2] * (n - 1) + center[2]) / n;
+                g_hHPAClusterCenters.SetArray(clusterIdx, curCenter, 3);
             }
         }
+        g_iHPABuildNode = end;
+        if (end < nodeCount) return false;
+        g_iHPAClusterCount = g_hHPAClusterCenters.Length / 3;
+        g_iHPABuildStage = 2;
+        g_iHPABuildCluster = 0;
+        g_iHPABuildNodeInCluster = 0;
+        if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+        // fall through — Pass 2 may begin this same frame
     }
 
-    delete clusterMap;
+    // ---- Pass 2: compute cluster adjacency (batched per node) ----
+    if (g_iHPABuildStage == 2)
+    {
+        int processed = 0;
+        while (g_iHPABuildCluster < g_iHPAClusterCount)
+        {
+            int nhandle = g_hHPAClusterNodes.Get(g_iHPABuildCluster);
+            ArrayList nodes = view_as<ArrayList>(nhandle);
 
-    #if DEBUG
-    LogMessage("[PTG] HPA*: %d clusters (cell=%.0f) for %d nav areas",
-        g_iHPAClusterCount, cellSize, nodeCount);
-    #endif
+            if (g_iHPABuildNodeInCluster < nodes.Length)
+            {
+                int nodeIdx = nodes.Get(g_iHPABuildNodeInCluster);
+                g_iHPABuildNodeInCluster++;
+
+                int areaInt = g_hAStarNodes.Get(nodeIdx);
+                Address area = view_as<Address>(areaInt);
+
+                GetNavConnections(area, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
+
+                for (int c = 0; c < ConAdj.Length; c++)
+                {
+                    NavConnection nc;
+                    ConAdj.GetArray(c, nc, sizeof(NavConnection));
+                    if (nc.navArea == Address_Null) continue;
+
+                    int otherInt = view_as<int>(nc.navArea);
+                    char keyB[16];
+                    IntToString(otherInt, keyB, sizeof(keyB));
+                    int otherIdx = -1;
+                    if (!g_hAStarAreaToIndex.GetValue(keyB, otherIdx)) continue;
+
+                    // Find which cluster otherIdx belongs to
+                    float otherCenter[3];
+                    g_hAStarCenters.GetArray(otherIdx, otherCenter, 3);
+                    int ocx = RoundToFloor(otherCenter[0] / cellSize);
+                    int ocy = RoundToFloor(otherCenter[1] / cellSize);
+                    int ocz = RoundToFloor(otherCenter[2] / cellSize);
+
+                    char okey[32];
+                    Format(okey, sizeof(okey), "%d_%d_%d", ocx, ocy, ocz);
+
+                    int cj = -1;
+                    if (g_hHPAKeyMap.GetValue(okey, cj) && cj != g_iHPABuildCluster)
+                    {
+                        char adjKey[16];
+                        int minC = (g_iHPABuildCluster < cj) ? g_iHPABuildCluster : cj;
+                        int maxC = (g_iHPABuildCluster < cj) ? cj : g_iHPABuildCluster;
+                        Format(adjKey, sizeof(adjKey), "%d_%d", minC, maxC);
+                        g_hHPAClusterAdj.SetValue(adjKey, 1);
+                    }
+                }
+                processed++;
+                if (processed >= HPA_ADJ_NODES_PER_FRAME) return false;
+            }
+            else
+            {
+                g_iHPABuildCluster++;
+                g_iHPABuildNodeInCluster = 0;
+            }
+        }
+
+        delete g_hHPAKeyMap;
+        g_hHPAKeyMap = null;
+        g_iHPABuildStage = 0;
+        #if DEBUG
+        LogMessage("[PTG] HPA*: %d clusters (cell=%.0f) for %d nav areas",
+            g_iHPAClusterCount, cellSize, nodeCount);
+        #endif
+        return true;
+    }
+    return true;
 }
 
 // HPA* heuristic boost: Euclidean distance between cluster centers.

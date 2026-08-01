@@ -87,6 +87,7 @@ void Guide_Prep()
     g_iPostStep = 0;
     g_iIGStage = 0;
     g_iSmoothStep = 0;
+    g_iHPABuildStage = 0; // v4.6.1: abort any in-flight distributed HPA build
     #if DEBUG
     g_iPrepFrames = 0;
     #endif
@@ -103,6 +104,7 @@ void Guide_Cleanup()
     g_iBuildPhase = 0;
     g_iPortalBatchIdx = 0;
     g_iHPAClusterCount = 0;
+    g_iHPABuildStage = 0; // v4.6.1: abort any in-flight distributed HPA build
     g_fPrepStartTime = 0.0;
     g_fLastPrepProgressTime = 0.0;
 
@@ -295,27 +297,36 @@ void OnFramePrep(bool new_frame = true)
                 }
             }
 
-            // --- Phase 2: HPA* clusters ---
+            // --- Phase 2: HPA* clusters (v4.6.1: distributed across frames) ---
+            // Old single-frame HPA_BuildClusters() was 30-60ms at 5K+ areas →
+            // SIGALRM, so v4.6 skipped HPA above 5000 and c2m3-class maps paid
+            // a 3s full A* with no cluster heuristic. Now the build runs on
+            // cursors (HPA_BuildClusters_Init + _Frame) and stays in phase 2
+            // until finished. Skipping is reserved for truly huge maps only.
             if (!budget_spent && g_iBuildPhase == 2)
             {
-                if (g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue)
+                if (g_hCvarHpaEnable != null && g_hCvarHpaEnable.BoolValue
+                    && g_hAStarNodes != null && g_hAStarNodes.Length > 1)
                 {
-                    // v4.6: skip HPA on very large maps. Pass 2 is ~30-60ms of
-                    // single-frame work (2× Format + 2× StringMap ops per edge)
-                    // and reliably triggers SIGALRM at 5K+ areas. HPA is only a
-                    // 5% heuristic boost — skipping changes nothing about
-                    // correctness, only A* convergence speed.
-                    if (g_hAStarNodes != null && g_hAStarNodes.Length > HPA_SKIP_THRESHOLD)
+                    if (g_hAStarNodes.Length > HPA_SKIP_THRESHOLD)
                     {
                         g_iHPAClusterCount = 0;
+                        g_iHPABuildStage = 0;
                         LogMessage("[PTG] HPA skipped: %d nav areas > threshold %d", g_hAStarNodes.Length, HPA_SKIP_THRESHOLD);
+                        g_iBuildPhase = 3;
                     }
                     else
                     {
-                        HPA_BuildClusters();
+                        // Start (idle) or continue the distributed build.
+                        if (g_iHPABuildStage == 0) HPA_BuildClusters_Init();
+                        if (HPA_BuildClusters_Frame())
+                            g_iBuildPhase = 3; // finished
                     }
                 }
-                g_iBuildPhase = 3;
+                else
+                {
+                    g_iBuildPhase = 3;
+                }
                 budget_spent = true;
             }
 

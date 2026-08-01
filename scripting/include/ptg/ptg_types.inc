@@ -175,6 +175,13 @@ float g_fAStarBestG;           // gScore of best reachable node
 
 // v4.0 HPA* globals (declared here for single-pass compiler)
 int g_iHPAClusterCount;
+// v4.6.1: HPA build is distributed across frames (single-frame build was
+// 30-60ms at 5K+ areas → SIGALRM). Cursors live here so the pipeline can
+// resume Pass 1/Pass 2 across frames.
+int g_iHPABuildStage;          // 0=idle 1=pass1(assign) 2=pass2(adjacency)
+int g_iHPABuildNode;           // pass1 cursor over g_hAStarNodes
+int g_iHPABuildCluster;        // pass2 cursor over clusters
+int g_iHPABuildNodeInCluster;  // pass2 cursor within current cluster
 
 // v4.0 batched index building — prevents SIGALRM (stack/CPU overflow) on large maps
 // by distributing AStar_BuildNodeIndex work across multiple frames.
@@ -268,7 +275,12 @@ int g_iFunnelIdx;
 #define FUNNEL_CELLS_PER_FRAME 20
 
 // ── v4.6 HPA large-map degradation ──
-#define HPA_SKIP_THRESHOLD 5000 // above this nav area count, skip HPA clustering entirely
+#define HPA_SKIP_THRESHOLD 12000 // v4.6.1: HPA build is now frame-distributed; only truly
+                                  // huge maps skip it. Below the old 5000 no change; c2m3-class
+                                  // maps (5951) now get the cluster heuristic (was: 30-60ms
+                                  // single-frame build → SIGALRM → skipped at >5000).
+#define HPA_CLUSTER_NODES_PER_FRAME 2500 // v4.6.1: pass-1 cluster-assign nodes per frame
+#define HPA_ADJ_NODES_PER_FRAME 700      // v4.6.1: pass-2 adjacency nodes per frame
 
 // ── v4.6 partial-path dead-end beacon ──
 // A* open set exhausted (disconnected nav mesh) — the path stops at the best
