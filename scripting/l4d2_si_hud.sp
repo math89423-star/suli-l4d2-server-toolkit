@@ -11,6 +11,10 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.37:
+ *   - 激光瞄准改为直接给当前武器加激光（user 确认，不再掉升级包）：
+ *     SetEntProp m_bHasLaserSight；无武器异常时退款。
+ *
  * Changelog v1.7.36:
  *   - 全部商品不限购（user）——只有复活币受持有上限 5 约束。
  *
@@ -489,7 +493,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.36"
+#define PLUGIN_VERSION "1.7.37"
 
 // ============================================================================
 // ConVar handles
@@ -2754,6 +2758,27 @@ void ShopBuy(int client, int slot)
         g_iReviveCoins[client]++;
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05复活币\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），复活币余额 \x03%d\x01 枚",
             price, g_iWallet[client], g_iReviveCoins[client]);
+        return;
+    }
+
+    // v1.7.37 (user): 激光瞄准直接给当前武器加激光（不 spawn 升级包）——
+    // m_bHasLaserSight 是 networked prop，设置即生效；换武器后丢失（原版语义）
+    if (StrEqual(g_ShopTable[slot].classname, "weapon_upgradepack_laser_sight"))
+    {
+        int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+        if (weapon > 0 && IsValidEntity(weapon))
+        {
+            SetEntProp(weapon, Prop_Send, "m_bHasLaserSight", 1);
+            PrintToChat(client, "\x04[商店]\x01 已购买 \x05激光瞄准\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），当前武器已装激光",
+                price, g_iWallet[client]);
+        }
+        else
+        {
+            // 无武器（异常）——退款
+            g_iWallet[client] += price;
+            g_iShopBought[client][slot]--;
+            PrintToChat(client, "\x04[商店]\x01 购买失败（未持有武器），积分已退回");
+        }
         return;
     }
 
