@@ -11,6 +11,16 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.31:
+ *   - 新加入玩家 = 全默认状态 (user)：0 可用积分 + si_hud_respawn_coin_start
+ *     (2) 枚复活币 + base 复活次数；显式初始化全部槽位。
+ *
+ * Changelog v1.7.30:
+ *   - 每图开始积分存档 (user："每一个Map开始时，要有一个存档")：
+ *     OnMapStart 拍快照（本关积分/特/死/友伤/被黑），团灭重开
+ *     (round_start 且非新图加载 = 同图 restart) 回滚到快照 + 复活次数回初始
+ *     + 杀旧计时器。钱包/复活币为战役级资源不受影响。
+ *
  * Changelog v1.7.29:
  *   - 复活币持有上限 5 枚 (user, si_hud_respawn_coin_max)：购买前检查
  *     （达上限拒绝购买），进入游戏/新图时 clamp；消耗复活币时播报剩余数量。
@@ -435,7 +445,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.29"
+#define PLUGIN_VERSION "1.7.31"
 
 // ============================================================================
 // ConVar handles
@@ -495,6 +505,7 @@ ConVar g_cvRespawnEnable;      // v1.7.28
 ConVar g_cvRespawnBase;        // v1.7.28
 ConVar g_cvRespawnDelay;       // v1.7.28
 ConVar g_cvRespawnCoinMax;     // v1.7.29: 复活币持有上限
+ConVar g_cvRespawnCoinStart;   // v1.7.31: 新玩家初始复活币
 ConVar g_cvSoundSI;
 ConVar g_cvSoundHeadshot;
 ConVar g_cvSoundTank;
@@ -534,6 +545,13 @@ int       g_iRevivesLeft[MAXPLAYERS + 1];             // 本图剩余自动复�
 int       g_iReviveCoins[MAXPLAYERS + 1];             // 复活币余额（战役内保留，新战役清零，断线清零）
 Handle    g_hRespawnTimer[MAXPLAYERS + 1];            // 复活计时器
 char      g_sPrevCampaign[16];                        // 上一张图的战役前缀（前缀变化 = 新战役 → 清钱包/复活币）
+// v1.7.30: 每图开始积分存档（团灭重开回滚到开局状态）
+bool      g_bFreshMapStart;                           // OnMapStart 置 true，round_start 消费
+int       g_iSaveTotalScore[MAXPLAYERS + 1];
+int       g_iSaveSIKills[MAXPLAYERS + 1];
+int       g_iSaveDeaths[MAXPLAYERS + 1];
+int       g_iSaveFFDamage[MAXPLAYERS + 1];
+int       g_iSaveBlacked[MAXPLAYERS + 1];
 int       g_iSIKills[MAXPLAYERS + 1];                 // v1.7.7: session SI/Witch/Tank kills
 int       g_iDeaths[MAXPLAYERS + 1];                  // v1.7.7: survivor deaths
 int       g_iFFDamage[MAXPLAYERS + 1];                // v1.7.7: friendly-fire damage dealt
@@ -766,6 +784,8 @@ public void OnPluginStart()
         "Seconds before auto respawn (was 35 in l4d2_auto_respawn).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvRespawnCoinMax = CreateConVar("si_hud_respawn_coin_max", "5",
         "Max revive coins a player may hold (checked on buy / join / map start).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
+    g_cvRespawnCoinStart = CreateConVar("si_hud_respawn_coin_start", "2",
+        "Revive coins a NEW player joins with (full default state: 0 wallet + these coins).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
 
     // ── Kill sounds (all empty = off by default) ────────
 
@@ -828,6 +848,7 @@ public void OnPluginStart()
     HookEvent("infected_hurt",  Event_InfectedHurt);    // v1.7.16: common damage points
     HookEvent("witch_spawn",    Event_WitchSpawn);      // v1.7.16: witch damage points
     HookEvent("round_end",      Event_RoundEnd);
+    HookEvent("round_start",    Event_RoundStart);      // v1.7.30: 团灭重开判定
     HookEvent("map_transition", Event_MapTransition);   // v1.7.9
 
     RegAdminCmd("sm_streak_test", Cmd_StreakTest, ADMFLAG_ROOT,
@@ -1002,6 +1023,7 @@ void ShowScoreboardTo(int client)
 public void OnMapStart()
 {
     g_bMapEndBroadcasted = false;          // v1.7.9
+    g_bFreshMapStart = true;               // v1.7.30: 本次 round_start 是新图开局
 
     // Precache configured sounds
     PrecacheCvarSound(g_cvSoundSI);
@@ -1053,6 +1075,37 @@ public void OnMapStart()
         int coinMax = g_cvRespawnCoinMax.IntValue;
         if (g_iReviveCoins[i] > coinMax)
             g_iReviveCoins[i] = coinMax;
+    }
+
+    // v1.7.30: 每图开始存档（用户："每一个Map开始时，要有一个存档"）——
+    // 此时 OnMapEnd 已把本关积分清零，存档 = 开局 0 分状态；团灭重开回滚用
+    SaveScoreState();
+}
+
+void SaveScoreState()
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        g_iSaveTotalScore[i] = g_iTotalScore[i];
+        g_iSaveSIKills[i] = g_iSIKills[i];
+        g_iSaveDeaths[i] = g_iDeaths[i];
+        g_iSaveFFDamage[i] = g_iFFDamage[i];
+        g_iSaveBlacked[i] = g_iBlacked[i];
+    }
+}
+
+void RestoreScoreState()
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        g_iTotalScore[i] = g_iSaveTotalScore[i];
+        g_iSIKills[i] = g_iSaveSIKills[i];
+        g_iDeaths[i] = g_iSaveDeaths[i];
+        g_iFFDamage[i] = g_iSaveFFDamage[i];
+        g_iBlacked[i] = g_iSaveBlacked[i];
+        // 复活次数一并回到开局初始（防旧回合计时器复活已死玩家）
+        g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
+        KillRespawnTimer(i);
     }
 }
 
@@ -1136,6 +1189,19 @@ public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
     return Plugin_Continue;
 }
 
+// v1.7.30: 团灭重开判定——round_start 时若没有 OnMapStart（同图 restart），
+// 回滚本关积分到地图开局快照（用户："这个map团灭了，要回到map初始时积分状态"）
+public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
+{
+    if (!g_bFreshMapStart)
+    {
+        RestoreScoreState();
+        PrintToChatAll("\x04[得分榜]\x01 团灭重开：本关积分已回滚到开局状态");
+    }
+    g_bFreshMapStart = false;
+    return Plugin_Continue;
+}
+
 // v1.7.9: checkpoint/finale finish — force ONE scoreboard broadcast before
 // the map ends (the last chance to see this map's tally).
 public Action Event_MapTransition(Event event, const char[] name, bool dontBroadcast)
@@ -1156,7 +1222,18 @@ public Action Event_MapTransition(Event event, const char[] name, bool dontBroad
 
 public void OnClientPutInServer(int client)
 {
-    // v1.7.29: 复活币持有上限 clamp（用户：上限 5 枚，进入游戏时检查）
+    // v1.7.31 (user): 新加入玩家 = 全默认状态 —— 0 可用积分 + 2 复活币 + base 复活次数
+    //（OnClientDisconnect 已清槽位防泄漏，这里显式初始化）
+    g_iWallet[client] = 0;
+    g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
+    g_iRevivesLeft[client] = g_cvRespawnBase.IntValue;
+    g_iTotalScore[client] = 0;
+    g_iSIKills[client] = 0;
+    g_iDeaths[client] = 0;
+    g_iFFDamage[client] = 0;
+    g_iBlacked[client] = 0;
+
+    // v1.7.29: 复活币持有上限 clamp（上限 5 枚）
     int coinMax = g_cvRespawnCoinMax.IntValue;
     if (g_iReviveCoins[client] > coinMax)
         g_iReviveCoins[client] = coinMax;
