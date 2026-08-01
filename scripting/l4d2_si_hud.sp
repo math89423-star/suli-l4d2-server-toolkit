@@ -2825,6 +2825,10 @@ void ShopBuy(int client, int slot)
     if (slot < 0 || slot >= SHOP_SLOTS) return;
     if (!IsClientInGame(client) || GetClientTeam(client) != 2) return;
 
+    // DEBUG v1.7.43b: 全量购买日志（排障激光分支不执行）
+    LogMessage("[shop-buy] client=%N slot=%d cls='%s' price=%d wallet=%d",
+        client, slot, g_ShopTable[slot].classname, g_ShopTable[slot].price, g_iWallet[client]);
+
     int price = g_ShopTable[slot].price;
     if (g_iWallet[client] < price)
     {
