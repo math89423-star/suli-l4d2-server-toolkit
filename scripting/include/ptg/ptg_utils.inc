@@ -467,6 +467,17 @@ stock int GetNavConnections(Address navArea, ArrayList conList, int team = TEAM_
     static NavConnection nav_connection;
     Address adjArea;
     int i;
+
+    // v4.7: portal classification lookup — hoisted once per call since every
+    // neighbor shares the same from-area index (human-capability edge filter).
+    int portalFromIdx = -1;
+    if (g_hAStarAreaToIndex != null)
+    {
+        char fromKey[16];
+        IntToString(view_as<int>(navArea), fromKey, sizeof(fromKey));
+        g_hAStarAreaToIndex.GetValue(fromKey, portalFromIdx);
+    }
+
     if (adjacent)
     {
         for (int dir = 0; dir < 4; dir++)
@@ -529,6 +540,35 @@ stock int GetNavConnections(Address navArea, ArrayList conList, int team = TEAM_
                         else
                         {
                             nav_connection.connectiontype = CONNECTED_CONDITIONAL;
+                        }
+                    }
+                }
+
+                // v4.7: human-capability filter. The engine's adjacency list
+                // includes jump links (cjump) that only bots can cross — L4D2
+                // humans cannot jump, so those edges are false routes to
+                // unreachable ledges. The portal classification (built in
+                // STAGE_PREP) drops them here; drops become one-way
+                // JUMP_DOWN; vaults stay VAULT. Unclassified pairs (dynamic
+                // nav changes) pass through unfiltered.
+                if (Portal_Active() && portalFromIdx >= 0)
+                {
+                    char toKey[16];
+                    IntToString(view_as<int>(adjArea), toKey, sizeof(toKey));
+                    int toIdx = -1;
+                    g_hAStarAreaToIndex.GetValue(toKey, toIdx);
+                    if (toIdx >= 0)
+                    {
+                        PortalInfo pinfo;
+                        bool pWalk = true;
+                        ConnectionType pCon = CONNECTED_ADJACENT;
+                        if (Portal_GetForPair(portalFromIdx, toIdx, pinfo, pWalk, pCon))
+                        {
+                            if (!pWalk) continue; // cjump / gap / deadly drop
+                            if (pCon == CONNECTED_JUMP_DOWN && nav_connection.connectiontype == CONNECTED_ADJACENT)
+                                nav_connection.connectiontype = CONNECTED_JUMP_DOWN;
+                            else if (pCon == CONNECTED_VAULT)
+                                nav_connection.connectiontype = CONNECTED_VAULT;
                         }
                     }
                 }

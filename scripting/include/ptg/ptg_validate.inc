@@ -75,6 +75,15 @@ void Guide_ValidateWalkable_Frame(any unused)
             {
                 Guide_RepairBlocked();
             }
+            else if (g_bGuideCellsBusy)
+            {
+                // v4.7: validation clean (or repair off) — release the busy
+                // gate coarse-first set and redraw the refined line. (With
+                // blocked>0 + repair on, REPAIR's completion clears it.)
+                g_bGuideCellsBusy = false;
+                g_iPathGen++;
+                Guide_RedrawAllToggled();
+            }
         }
         return;
     }
@@ -676,6 +685,7 @@ void Guide_RepairBlocked_Frame(any unused)
         // REPAIR was rewriting cells runs now (re-enters with busy=false);
         // otherwise flush any one-shot requests deferred during REPAIR.
         g_bGuideCellsBusy = false;
+        g_iPathGen++; // v4.7: repaired line supersedes the coarse/validated one — dedup redraws
         if (g_bDetourQueued && !g_bDetourActive)
         {
             Address queued = g_aDetourQueuedArea;

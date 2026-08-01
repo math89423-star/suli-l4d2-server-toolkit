@@ -246,7 +246,10 @@ stock bool DetectNonMeshConnections_Frame()
             bool detected = false;
 
             // --- JUMP_UP: jump from lower to higher (PlayerCaps validated) ---
-            if (!detected && !noJumpArea && !otherNoJump
+            // v4.7: humans cannot jump in L4D2 — only built when
+            // l4d_path_to_goal_human_can_jump is explicitly enabled.
+            if (!detected && g_hCvarHumanJump != null && g_hCvarHumanJump.BoolValue
+                && !noJumpArea && !otherNoJump
                 && dz >= g_Caps.max_step_up && dz <= g_Caps.max_jump_height
                 && xyDist < 80.0)
             {
@@ -331,7 +334,10 @@ stock bool DetectNonMeshConnections_Frame()
             }
 
             // --- GAP_JUMP: horizontal running jump across a gap (PlayerCaps validated) ---
-            if (!detected && dzAbs < g_Caps.max_step_up * 2.0
+            // v4.7: humans cannot jump in L4D2 — only built when
+            // l4d_path_to_goal_human_can_jump is explicitly enabled.
+            if (!detected && g_hCvarHumanJump != null && g_hCvarHumanJump.BoolValue
+                && dzAbs < g_Caps.max_step_up * 2.0
                 && xyDist >= 80.0 && xyDist <= g_Caps.max_gap_jump
                 && !noJumpArea && !otherNoJump)
             {
@@ -600,11 +606,19 @@ stock float AStar_EdgeCostVisible(int fromIndex, int toIndex, ConnectionType con
 
     if (g_hCvarGeomPenalty != null && g_hCvarGeomPenalty.BoolValue)
     {
-        float c1[3], c2[3];
-        AStar_SnapCenter(fromIndex, c1);
-        AStar_SnapCenter(toIndex, c2);
-        if (!twopos_traversable(c1, c2))
-            cost *= GEOM_HIDDEN_COST_MULT;
+        // v4.7: cheap mode — the portal classification (ptg_portal.inc) already
+        // excluded human-impossible edges, and waypoints now live on portal
+        // centers instead of nav centers. The per-expansion hull trace was the
+        // A* hot cost (1-2 traces per neighbor at 100 nodes/frame) — skip it;
+        // real LOS checks still happen in smoothing + hull validation.
+        if (g_hCvarAstarCheap == null || !g_hCvarAstarCheap.BoolValue)
+        {
+            float c1[3], c2[3];
+            AStar_SnapCenter(fromIndex, c1);
+            AStar_SnapCenter(toIndex, c2);
+            if (!twopos_traversable(c1, c2))
+                cost *= GEOM_HIDDEN_COST_MULT;
+        }
     }
     return cost;
 }
@@ -769,10 +783,14 @@ stock int AStar_SearchFrame(int maxNodes)
             // v4.0 Theta*: check parent-LOS for any-angle shortcuts during search.
             // If parent(current) has LOS to neighbor AND the direct path is shorter,
             // bypass current entirely — produces smoother paths with fewer waypoints.
+            // v4.7: disabled in portal mode — the search space (nav centers)
+            // differs from the drawing space (portal centers), so a search-time
+            // shortcut can approve geometry the drawn line punches through.
+            // Shortcuts happen in portal space via string-pull instead.
             bool thetaUsed = false;
             int cameFrom = currentIdx;
             float tentativeG;
-            if (g_hCvarThetaStar != null && g_hCvarThetaStar.BoolValue)
+            if (g_hCvarThetaStar != null && g_hCvarThetaStar.BoolValue && !Portal_Active())
             {
                 int parentIdx = g_hAStarCameFrom.Get(currentIdx);
                 if (parentIdx >= 0 && parentIdx < g_hAStarNodes.Length)
@@ -831,6 +849,40 @@ stock int AStar_SearchFrame(int maxNodes)
         }
 
         processed++;
+
+        // v4.7: in-loop frame budget — the A* stage previously ran a flat
+        // 100 nodes/frame with no in-loop time check; on huge maps each frame
+        // could take 3-10ms (hitch) while the whole build took minutes. Now
+        // the elapsed time is measured every 8 nodes and the per-frame cursor
+        // adapts (50..800) to the effective budget below.
+        if (processed % 8 == 0)
+        {
+            float effBudget = AStar_FrameBudgetMs();
+            float elapsedMs = (GetEngineTime() - g_tFrameStart) * 1000.0;
+            if (elapsedMs >= effBudget)
+            {
+                // over budget — shrink so the next frame is lighter
+                if (g_iAStarNodesPerFrame > 50)
+                {
+                    int shrunk = g_iAStarNodesPerFrame / 2;
+                    if (shrunk < 50) shrunk = 50;
+                    g_iAStarNodesPerFrame = shrunk;
+                }
+                break;
+            }
+        }
+    }
+
+    // v4.7: consumed the whole cursor under budget — grow it (cap 800).
+    if (processed >= maxNodes)
+    {
+        float effBudget = AStar_FrameBudgetMs();
+        float elapsedMs = (GetEngineTime() - g_tFrameStart) * 1000.0;
+        if (elapsedMs < effBudget * 0.6 && g_iAStarNodesPerFrame < 800)
+        {
+            g_iAStarNodesPerFrame += 100;
+            if (g_iAStarNodesPerFrame > 800) g_iAStarNodesPerFrame = 800;
+        }
     }
 
     if (g_hAStarOpen.Length == 0)
@@ -854,6 +906,20 @@ stock int AStar_SearchFrame(int maxNodes)
     return 0;
 }
 
+// v4.7: effective per-frame budget for the A* stage. The pipeline's global
+// budget (l4d_path_to_goal_budget, 0.5ms) is the hard per-frame cap — the A*
+// cursor adapts to it so builds never hitch. astar_budget_ms is an
+// independent ceiling for when the global budget is 0 (infinite).
+stock float AStar_FrameBudgetMs()
+{
+    float astarMs = (g_hCvarAstarBudgetMs != null) ? g_hCvarAstarBudgetMs.FloatValue : 1.5;
+    if (astarMs <= 0.0) astarMs = 1.5;
+    float globalMs = (g_hCvarBudget != null) ? g_hCvarBudget.FloatValue : 0.5;
+    if (globalMs > 0.0 && globalMs < astarMs)
+        return globalMs;
+    return astarMs;
+}
+
 // 2D triangle signed area. Used by funnel algorithm for left/right checks.
 // Returns: >0 if p is left of directed line a→b, <0 if right, 0 if collinear.
 stock float TriArea2D(const float a[3], const float b[3], const float p[3])
@@ -867,10 +933,11 @@ stock float TriArea2D(const float a[3], const float b[3], const float p[3])
 // v4.6: split into Init/ConvertFrame/ValidateFrame — the ground-snap traces
 // (2 per cell) and the validation cascade (up to ~20 traces per edge) ran
 // synchronously in STAGE_SMOOTH and crashed large maps via SIGALRM.
-// Direct conversion uses nav area centers — SSFA funnel is disabled because
-// geometric portal endpoints (midpoint of centers + perpendicular segment)
-// land on high ledges and outside air walls. Accurate portal geometry
-// requires L4D_NavArea_GetCorner, which does not exist in left4dhooks v1.168.
+// v4.7: waypoints come from the real shared-edge portals (ptg_portal.inc —
+// left4dhooks DOES expose L4D_NavArea_GetCorner since v1.168, verified at
+// runtime via corner_available). The old center-midpoint "portal" SSFA is
+// replaced by portal waypoints + string-pull; a correct SSFA funnel remains
+// available behind l4d_path_to_goal_funnel_ssfa (default 0).
 stock bool AStar_ReconstructPath_Init(ArrayList outCells)
 {
     outCells.Clear();
@@ -977,7 +1044,13 @@ stock bool AStar_ReconstructPath_ConvertFrame(ArrayList outCells, int maxCells)
         int idx = g_hSmoothNodePath.Get(ni);
 
         Cell cell;
-        AStar_CellFromNode(idx, cell);
+        // v4.7: portal waypoints — beam segments run through the shared edge
+        // between nav areas (doorways/corridor junctions) instead of
+        // center-to-center chords through walls. Fallback: area centers.
+        if (Portal_Active() && ni > 0)
+            Portal_CellFromEdge(g_hSmoothNodePath.Get(ni - 1), idx, cell);
+        else
+            AStar_CellFromNode(idx, cell);
 
         cell.flow = g_fSmoothStartFlow + (g_fSmoothGoalFlow - g_fSmoothStartFlow) * (float(ni) / float(pathLen - 1));
         outCells.PushArray(cell, sizeof(Cell));
@@ -1484,204 +1557,31 @@ stock int AStar_IdentifyGoal(int startIndex)
 
 
 // ── Portal computation ──
+// v4.7: thin shells — the real corner-based shared-edge build lives in
+// ptg_portal.inc. Signatures kept so the pipeline's STAGE_PREP phase 1
+// call sites are untouched.
+
 stock void AStar_ComputePortals()
 {
-    delete g_hPortalCache;
-    g_hPortalCache = new StringMap();
-
-    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
-    if (AdjNN == null) AdjNN = new ArrayList();
-
-    int nodeCount = g_hAStarNodes.Length;
-    char key[32];
-    float cornersA[4][3], cornersB[4][3];
-
-    for (int i = 0; i < nodeCount; i++)
-    {
-        int areaIntA = g_hAStarNodes.Get(i);
-        Address areaA = view_as<Address>(areaIntA);
-        if (areaA == Address_Null) continue;
-
-        // Get corners of area A — required for accurate portal detection
-
-        GetNavConnections(areaA, ConAdj, TEAM_SURVIVOR, true, false, false, CON_KEEP_ALL);
-
-        for (int n = 0; n < ConAdj.Length; n++)
-        {
-            NavConnection nc;
-            ConAdj.GetArray(n, nc, sizeof(NavConnection));
-            if (nc.navArea == Address_Null || nc.navArea == areaA) continue;
-
-            int areaIntB = view_as<int>(nc.navArea);
-            char keyB[16];
-            IntToString(areaIntB, keyB, sizeof(keyB));
-            int j = -1;
-            if (!g_hAStarAreaToIndex.GetValue(keyB, j)) continue;
-
-            int minI = (i < j) ? i : j;
-            int maxI = (i < j) ? j : i;
-            Format(key, sizeof(key), "%d_%d", minI, maxI);
-
-            if (g_hPortalCache.ContainsKey(key)) continue;
-
-            // Portal from centers — L4D_NavArea_GetCorner does NOT exist in left4dhooks
-            float cA[3], cB[3];
-            g_hAStarCenters.GetArray(i, cA, 3);
-            g_hAStarCenters.GetArray(j, cB, 3);
-
-            PortalInfo portal;
-            portal.center[0] = (cA[0] + cB[0]) / 2.0;
-            portal.center[1] = (cA[1] + cB[1]) / 2.0;
-
-            float dx = cB[0] - cA[0];
-            float dy = cB[1] - cA[1];
-            float dLen = SquareRoot(dx*dx + dy*dy);
-            if (dLen < 1.0) dLen = 1.0;
-
-            float px = -dy / dLen;
-            float py =  dx / dLen;
-            float halfWidth = 48.0;
-            if (halfWidth > dLen * 0.4) halfWidth = dLen * 0.4;
-
-            float zGround = (cA[2] > cB[2]) ? cA[2] : cB[2];
-            // v4.5: Use L4D_NavArea_GetZ for accurate floor height at portal XY.
-            // max(centerZ) places portals in mid-air on stairs and slopes.
-            {
-                float testPos[3];
-                testPos[0] = portal.center[0];
-                testPos[1] = portal.center[1];
-                testPos[2] = 0.0;
-                float zNavA = L4D_NavArea_GetZ(areaA, testPos);
-                float zNavB = L4D_NavArea_GetZ(nc.navArea, testPos);
-                float zNav = (zNavA > zNavB) ? zNavA : zNavB;
-                if (zNav > 0.0 && zNav < 50000.0)
-                    zGround = zNav + 16.0; // standing height above actual nav mesh floor
-            }
-            portal.center[2] = zGround;
-            portal.ep1[2] = zGround;
-            portal.ep2[2] = zGround;
-
-            portal.ep1[0] = portal.center[0] + px * halfWidth;
-            portal.ep1[1] = portal.center[1] + py * halfWidth;
-            portal.ep2[0] = portal.center[0] - px * halfWidth;
-            portal.ep2[1] = portal.center[1] - py * halfWidth;
-
-            g_hPortalCache.SetArray(key, portal, sizeof(PortalInfo));
-        }
-    }
-
-    StringMapSnapshot snap = g_hPortalCache.Snapshot();
-    LogMessage("[PTG] Portal cache built: %d portals for %d nav areas", snap.Length, nodeCount);
-    delete snap;
+    while (!Portal_ComputeBatch(PORTALS_PER_FRAME)) { /* cursor is internal */ }
+    if (!g_bPortalBuildFailed)
+        Portal_FinishBuild();
 }
 
-// v4.0: Batched portal computation — processes count nav areas per call,
-// starting from startIdx. Returns true if more areas remain.
+// v4.0: Batched portal computation — processes count nav areas per call.
+// Returns true if more areas remain. v4.7: the batch cursor (g_iPortalBatchIdx)
+// is owned by ptg_portal.inc — a mid-batch budget break resumes exactly where
+// it stopped, so the pipeline must NOT advance the cursor itself.
 // Called from STAGE_PREP phase 1 to avoid SIGALRM on large maps.
-stock bool AStar_ComputePortalsBatch(int startIdx, int count)
+stock bool AStar_ComputePortalsBatch(int count)
 {
-    int nodeCount = g_hAStarNodes.Length;
-
-    // First call: initialize the portal cache
-    if (startIdx == 0)
+    if (Portal_ComputeBatch(count))
     {
-        delete g_hPortalCache;
-        g_hPortalCache = new StringMap();
-        LogMessage("[PTG] Portal batch starting: %d nav areas, %d per frame", nodeCount, count);
-    }
-
-    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
-    if (AdjNN == null) AdjNN = new ArrayList();
-
-    char key[32];
-    float cornersA[4][3], cornersB[4][3];
-    int endIdx = startIdx + count;
-    if (endIdx > nodeCount) endIdx = nodeCount;
-
-    for (int i = startIdx; i < endIdx; i++)
-    {
-        int areaIntA = g_hAStarNodes.Get(i);
-        Address areaA = view_as<Address>(areaIntA);
-        if (areaA == Address_Null) continue;
-
-
-        GetNavConnections(areaA, ConAdj, TEAM_SURVIVOR, true, false, false, CON_KEEP_ALL);
-
-        for (int n = 0; n < ConAdj.Length; n++)
-        {
-            NavConnection nc;
-            ConAdj.GetArray(n, nc, sizeof(NavConnection));
-            if (nc.navArea == Address_Null || nc.navArea == areaA) continue;
-
-            int areaIntB = view_as<int>(nc.navArea);
-            char keyB[16];
-            IntToString(areaIntB, keyB, sizeof(keyB));
-            int j = -1;
-            if (!g_hAStarAreaToIndex.GetValue(keyB, j)) continue;
-
-            int minI = (i < j) ? i : j;
-            int maxI = (i < j) ? j : i;
-            Format(key, sizeof(key), "%d_%d", minI, maxI);
-
-            if (g_hPortalCache.ContainsKey(key)) continue;
-
-            // Portal from centers — L4D_NavArea_GetCorner does NOT exist in left4dhooks
-            // Compute portal geometrically: midpoint of centers + perpendicular segment
-            float cA[3], cB[3];
-            g_hAStarCenters.GetArray(i, cA, 3);
-            g_hAStarCenters.GetArray(j, cB, 3);
-
-            // Portal center = midpoint of nav area centers (at the shared boundary)
-            PortalInfo portal;
-            portal.center[0] = (cA[0] + cB[0]) / 2.0;
-            portal.center[1] = (cA[1] + cB[1]) / 2.0;
-
-            // Portal direction = perpendicular to AB connection (XY plane)
-            float dx = cB[0] - cA[0];
-            float dy = cB[1] - cA[1];
-            float dLen = SquareRoot(dx*dx + dy*dy);
-            if (dLen < 1.0) dLen = 1.0;
-
-            float px = -dy / dLen;  // perpendicular X (rotate AB by 90°)
-            float py =  dx / dLen;  // perpendicular Y
-
-            // Portal half-width: 48u (~3ft doorway), capped to 40% of area distance
-            float halfWidth = 48.0;
-            if (halfWidth > dLen * 0.4) halfWidth = dLen * 0.4;
-
-            // Z: use higher of the two areas (safe walkable height at +16 above ground)
-            float zGround = (cA[2] > cB[2]) ? cA[2] : cB[2];
-            // v4.5: Use L4D_NavArea_GetZ for accurate floor height at portal XY.
-            // max(centerZ) places portals in mid-air on stairs and slopes.
-            {
-                float testPos[3];
-                testPos[0] = portal.center[0];
-                testPos[1] = portal.center[1];
-                testPos[2] = 0.0;
-                float zNavA = L4D_NavArea_GetZ(areaA, testPos);
-                float zNavB = L4D_NavArea_GetZ(nc.navArea, testPos);
-                float zNav = (zNavA > zNavB) ? zNavA : zNavB;
-                if (zNav > 0.0 && zNav < 50000.0)
-                    zGround = zNav + 16.0; // standing height above actual nav mesh floor
-            }
-            portal.center[2] = zGround;
-            portal.ep1[2] = zGround;
-            portal.ep2[2] = zGround;
-
-            portal.ep1[0] = portal.center[0] + px * halfWidth;
-            portal.ep1[1] = portal.center[1] + py * halfWidth;
-            portal.ep2[0] = portal.center[0] - px * halfWidth;
-            portal.ep2[1] = portal.center[1] - py * halfWidth;
-
-            g_hPortalCache.SetArray(key, portal, sizeof(PortalInfo));
-        }
-    }
-
-    if (endIdx >= nodeCount)
-    {
-        StringMapSnapshot snap = g_hPortalCache.Snapshot();
-        LogMessage("[PTG] Portal cache built: %d portals for %d nav areas (batched)", snap.Length, nodeCount);
-        delete snap;
+        // build finished (or skipped)
+        if (g_bPortalBuildFailed)
+            LogMessage("[PTG] Portal build skipped (corner API unavailable or feature disabled)");
+        else
+            Portal_FinishBuild();
         return false; // done
     }
     return true; // more areas remain

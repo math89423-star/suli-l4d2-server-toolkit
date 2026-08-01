@@ -17,7 +17,7 @@
 #include <dhooks>
 #include <l4d_path_to_goal>
 
-#define PLUGIN_VERSION 			"4.6.1 2026-08-01"
+#define PLUGIN_VERSION 			"4.7 2026-08-02"
 
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
 // Per-client: each player toggles their own guide independently
@@ -182,6 +182,40 @@ public void OnPluginStart()
 
     g_hCvarGeomPenalty = CreateConVar("l4d_path_to_goal_geom_penalty", "1",
     "Penalize A* edges whose straight-line path is blocked by world geometry (walls/floors). Nav connections are logical, not physical — without this the guide path contains many beams that fail hull validation and get beaconed. 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    // ── v4.7 Portal + performance ConVars ──
+    g_hCvarPortals = CreateConVar("l4d_path_to_goal_portals", "1",
+    "Shared-edge portal waypoints + human-capability edge filter (requires left4dhooks L4D_NavArea_GetCorner). 0=legacy nav-center waypoints.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarPortalMinOverlap = CreateConVar("l4d_path_to_goal_portal_min_overlap", "12.0",
+    "Minimum shared-edge overlap (units) for a portal to count as a walkable boundary. Below this the pair is a jump link / gap.",FCVAR_NOTIFY, true, 4.0, true, 64.0);
+
+    g_hCvarPortalMaxDz = CreateConVar("l4d_path_to_goal_portal_max_dz", "48.0",
+    "Max Z delta (units) across a shared edge treated as plain walking. Above this the edge is classified as vault (arc-validated) or excluded.",FCVAR_NOTIFY, true, 16.0, true, 120.0);
+
+    g_hCvarHumanJump = CreateConVar("l4d_path_to_goal_human_can_jump", "0",
+    "L4D2 human players cannot jump (no jump key — only bots use nav jump links). 0=exclude all jump edges, 1=allow bot-style jump paths.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarAstarCheap = CreateConVar("l4d_path_to_goal_astar_cheap", "1",
+    "Skip per-edge hull LOS traces during A* search (portal classification + string-pull cover the checks; big speedup on large maps). 0=legacy expensive search.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarAstarBudgetMs = CreateConVar("l4d_path_to_goal_astar_budget_ms", "1.5",
+    "Per-frame CPU budget (ms) for the A* stage. Effective cap = min(this, l4d_path_to_goal_budget).",FCVAR_NOTIFY, true, 0.1, true, 10.0);
+
+    g_hCvarAstarNodes = CreateConVar("l4d_path_to_goal_astar_nodes", "300",
+    "Adaptive A* nodes-per-frame base (auto-ranges 50-800).",FCVAR_NOTIFY, true, 50.0, true, 800.0);
+
+    g_hCvarCoarseFirst = CreateConVar("l4d_path_to_goal_coarse_first", "1",
+    "Draw the unvalidated portal line immediately after the path is found; hull validation + REPAIR refresh it in the background. 0=wait for validation.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarStringPull = CreateConVar("l4d_path_to_goal_string_pull", "1",
+    "Multi-hop LOS string-pulling over portal waypoints (removes redundant waypoints in straight corridors). 0=off.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarFunnelSSFA = CreateConVar("l4d_path_to_goal_funnel_ssfa", "0",
+    "Classic SSFA funnel tightening over portal segments (short paths only, <=60 cells). 0=off.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_hCvarRedrawMinMove = CreateConVar("l4d_path_to_goal_redraw_min_move", "64.0",
+    "Client redraw dedup: skip the 0.3s redraw when the player moved less than this (units) and the path generation is unchanged. 0=always redraw.",FCVAR_NOTIFY, true, 0.0, true, 512.0);
 
     // ── v4.5 Accuracy + Legacy ConVars ──
     g_hCvarAccuracy = CreateConVar("l4d_path_to_goal_accuracy", "1",
@@ -478,6 +512,7 @@ Action Timer_ToggleRedraw(Handle timer)
     bool anyOn = false;
     bool pathAvailable = (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2);
     int beamsDrawn = 0;
+    int beamsSkipped = 0; // v4.7: dedup skips are NOT beam misses
 
     for (int i = 1; i <= MaxClients; i++)
     {
@@ -486,8 +521,40 @@ Action Timer_ToggleRedraw(Handle timer)
             anyOn = true;
             if (pathAvailable)
             {
-                AutoGuideDrawPath(i);
-                beamsDrawn++;
+                // v4.7 redraw dedup: nothing changed and the beams are still
+                // alive → skip. The beams have a 1s lifetime on a 0.3s timer,
+                // so stationary players got 3x redundant redraws; skipping
+                // cuts up to 2/3 of the TE traffic. Only for alive players —
+                // observer/death anchors are cheap and stateful.
+                if (IsPlayerAlive(i))
+                {
+                    float now = GetEngineTime();
+                    float duration = g_hCvarAutoDuration.FloatValue;
+                    if (duration <= 0.0) duration = 1.0;
+                    float minMove = (g_hCvarRedrawMinMove != null) ? g_hCvarRedrawMinMove.FloatValue : 64.0;
+                    bool genChanged = (g_iLastDrawGen[i] != g_iPathGen);
+                    bool beamsAlive = (now - g_fLastDrawTime[i]) < duration;
+                    bool moved = false;
+                    float origin[3];
+                    GetEntPropVector(i, Prop_Send, "m_vecOrigin", origin);
+                    if (GetVectorDistance(origin, g_fLastDrawPos[i], false) >= minMove)
+                        moved = true;
+                    if (!genChanged && beamsAlive && !moved)
+                    {
+                        beamsSkipped++;
+                        continue;
+                    }
+                    AutoGuideDrawPath(i);
+                    g_fLastDrawPos[i] = origin;
+                    g_iLastDrawGen[i] = g_iPathGen;
+                    g_fLastDrawTime[i] = now;
+                    beamsDrawn++;
+                }
+                else
+                {
+                    AutoGuideDrawPath(i);
+                    beamsDrawn++;
+                }
             }
             else if (!guide_prep)
             {
@@ -508,8 +575,9 @@ Action Timer_ToggleRedraw(Handle timer)
     // v4.5: Beam health check.
     // If path is available but no beams were drawn (path says ready but
     // g_GuideCells is null/empty — race condition), track consecutive misses.
-    // After 5 misses (1.5s), force a rebuild.
-    if (pathAvailable && beamsDrawn == 0)
+    // After 5 misses (1.5s), force a rebuild. v4.7: dedup skips don't count
+    // as misses — the beams are still alive by definition.
+    if (pathAvailable && beamsDrawn == 0 && beamsSkipped == 0)
     {
         g_iBeamsMissed++;
         if (g_iBeamsMissed > 5)

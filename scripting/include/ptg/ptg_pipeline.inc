@@ -101,6 +101,7 @@ void Guide_Cleanup()
     guide_prep = false;
     g_bPathDirty = false;
     g_bGuideCellsBusy = false; // v4.6: REPAIR chain died with the pipeline — unblock draws/requests
+    Portal_Clear(); // v4.7: drop portal classification + smoothing state (Portal_Active flips off)
     g_iBuildPhase = 0;
     g_iPortalBatchIdx = 0;
     g_iHPAClusterCount = 0;
@@ -225,7 +226,9 @@ void OnFramePrep(bool new_frame = true)
     {
         case STAGE_PREP:
         {
-            LogMessage("[PTG] STAGE_PREP entered, buildPhase=%d budget_spent=%d", g_iBuildPhase, budget_spent);
+            // v4.7: stage-entry log removed — it fired EVERY frame while PREP
+            // ran (8+ identical lines per second on big maps). Phase logs and
+            // the "Pipeline done" summary cover progress.
             // v4.0: Batched index construction — spreads expensive operations
             // (portal computation, HPA clustering, bridge detection) across
             // multiple frames to avoid SIGALRM on 5K+ nav area maps.
@@ -283,12 +286,13 @@ void OnFramePrep(bool new_frame = true)
             }
 
             // --- Phase 1: Batched portal computation ---
+            // v4.7: the batch cursor is owned by ptg_portal.inc (mid-batch
+            // budget breaks resume exactly where they stopped) — do not
+            // advance g_iPortalBatchIdx here.
             if (!budget_spent && g_iBuildPhase == 1)
             {
-                LogMessage("[PTG] Build phase 1: portal batch idx=%d", g_iPortalBatchIdx);
-                if (AStar_ComputePortalsBatch(g_iPortalBatchIdx, PORTALS_PER_FRAME))
+                if (AStar_ComputePortalsBatch(PORTALS_PER_FRAME))
                 {
-                    g_iPortalBatchIdx += PORTALS_PER_FRAME;
                     budget_spent = true;
                 }
                 else
@@ -566,13 +570,38 @@ void OnFramePrep(bool new_frame = true)
                         g_iSmoothStep = 3;
                     budget_spent = true;
                 }
-                case 3: // 3D funnel Z-transitions (frame-budgeted)
+                case 3: // v4.7: multi-hop string-pull over portal waypoints
+                {
+                    if (g_hPullResult != null)
+                    {
+                        if (Portal_StringPull_Frame(g_GuideCells))
+                            g_iSmoothStep = 4;
+                        else
+                            budget_spent = true;
+                    }
+                    else
+                    {
+                        if (!Portal_StringPull_Init(g_GuideCells))
+                            g_iSmoothStep = 4; // cvar off / too short — nothing to do
+                        else
+                            budget_spent = true; // work started
+                    }
+                }
+                case 4: // v4.7: SSFA funnel (cvar default 0, single-shot ≤ 60 cells)
+                {
+                    if (Funnel_SSFA_Init(g_GuideCells))
+                        Funnel_SSFA_Frame();
+                    Funnel_SSFA_Apply(g_GuideCells);
+                    g_iSmoothStep = 5;
+                    budget_spent = true;
+                }
+                case 5: // 3D funnel Z-transitions (frame-budgeted)
                 {
                     if (g_hFunnelResult != null)
                     {
                         // funnel in progress — keep pushing
                         if (Funnel3D_InsertZTransitions_Frame(g_GuideCells))
-                            g_iSmoothStep = 4;
+                            g_iSmoothStep = 6;
                         else
                             budget_spent = true;
                     }
@@ -581,12 +610,12 @@ void OnFramePrep(bool new_frame = true)
                         // funnel not started — init it (no-op when cvar off / too short)
                         Funnel3D_InsertZTransitions_Init(g_GuideCells);
                         if (g_hFunnelResult == null)
-                            g_iSmoothStep = 4; // nothing to do
+                            g_iSmoothStep = 6; // nothing to do
                         else
                             budget_spent = true; // work started — continue next frame
                     }
                 }
-                case 4: // finish
+                case 6: // finish
                 {
                     if (g_GuideCells == null)
                     {
@@ -753,6 +782,24 @@ void OnFramePrep(bool new_frame = true)
                 }
             }
             g_iLoop = 1;
+
+            // v4.7 coarse-first: show the unvalidated portal polyline
+            // immediately; hull validation + REPAIR refresh it in the
+            // background. Only when the portal build is active (the refined
+            // center path is already fast to validate without it). The busy
+            // gate makes drawers snapshot while STAGE_VALIDATE mutates cells.
+            if (g_hCvarCoarseFirst != null && g_hCvarCoarseFirst.BoolValue
+                && Portal_Active() && !g_bCoarseDrawn
+                && g_GuideCells != null && g_GuideCells.Length >= 2
+                && g_hCvarTraceHull != null && g_hCvarTraceHull.BoolValue)
+            {
+                g_bCoarseDrawn = true;
+                g_bGuideCellsBusy = true;
+                guide_ready = true;
+                g_iPathGen++;
+                Guide_RedrawAllToggled();
+                LogMessage("[PTG] Coarse portal line drawn (%d cells) — validating in background", g_GuideCells.Length);
+            }
             } // if (!budget_spent)
         }
         case STAGE_VALIDATE:
@@ -860,6 +907,8 @@ void OnFramePrep(bool new_frame = true)
         LogMessage("[PTG] Pipeline done: %d guide cells ready%s", g_GuideCells != null ? g_GuideCells.Length : -1,
             g_bAStarPartialPath ? " — PARTIAL path (disconnected nav mesh, dead-end beacon placed)" : "");
         Guide_ValidateWalkable(); // v2.2: hull-trace validate all beams against world geometry
+        // v4.7: refined path supersedes the coarse line — dedup clients redraw
+        g_iPathGen++;
         // v4.5: Immediately redraw for all toggled clients — no 0.3s gap
         Guide_RedrawAllToggled();
         beams_cooldown_reset(); // reset cooldowns but not requests to draw

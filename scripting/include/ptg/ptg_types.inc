@@ -134,11 +134,15 @@ void InitPlayerCaps()
 // Portal between two adjacent nav areas — the shared boundary edge.
 // Path waypoints should be portal centers, not area centers, so beams
 // pass through actual doorways/corridor junctions instead of through walls.
+// v4.7: now carries the human-capability classification (see ptg_portal.inc).
 enum struct PortalInfo
 {
     float ep1[3];    // first endpoint of shared edge
     float ep2[3];    // second endpoint of shared edge
     float center[3]; // midpoint of shared edge (primary waypoint)
+    float dz;        // v4.7: Z delta across the portal (fromArea - toArea, + = drop)
+    ConnectionType connectiontype; // v4.7: ADJACENT / VAULT / JUMP_DOWN (human-traversable)
+    bool walkable;   // v4.7: false = excluded (cjump / gap / deadly drop)
 }
 
 // Binary heap entry for A* priority queue
@@ -187,7 +191,8 @@ int g_iHPABuildNodeInCluster;  // pass2 cursor within current cluster
 // by distributing AStar_BuildNodeIndex work across multiple frames.
 int g_iBuildPhase;              // 0=basic index, 1=portals, 2=HPA, 3=bridges, 4=post-build init
 int g_iPortalBatchIdx;          // current batch position in portal computation
-#define PORTALS_PER_FRAME 250   // nav areas to process per frame for portal computation
+#define PORTALS_PER_FRAME 100   // v4.7: was 250 — corner-based build calls 4 GetCorner natives
+                                // per area + GetZ per pair; 250/frame blew the 0.5ms budget
 
 // Spatial hash for fast nearby-area queries
 StringMap g_hSpatialHash;      // "cx_cy_cz" → ArrayList of {navArea(int), center(float[3])}
@@ -199,6 +204,26 @@ ArrayList g_hNonMeshEdges;     // NonMeshEdge — all detected non-mesh connecti
 // Portal cache — shared-edge midpoints between adjacent nav areas
 // Key: "minIdx_maxIdx" (canonical ordering), Value: PortalInfo
 StringMap g_hPortalCache;
+
+// ── v4.7 portal geometry (ptg_portal.inc) ──
+StringMap g_hPortalExcluded;      // "minIdx_maxIdx" → 1 — pairs classified NOT human-traversable
+ArrayList g_hCornerCache;         // per node: float[12] (4 corners × 3) — built during portal phase
+bool g_bPortalReady = false;      // portal classification finished for this build (Portal_Active gate)
+bool g_bPortalBuildFailed = false;// portal build skipped (corner API unavailable / cvar off)
+int g_iPathGen = 0;               // path generation counter — redraw dedup key
+bool g_bCoarseDrawn = false;      // coarse (unvalidated) line already drawn for this build
+int g_iAStarNodesPerFrame = 300;  // v4.7: adaptive A* nodes/frame (clamped 50..800)
+float g_fLastDrawPos[MAXPLAYERS+1][3]; // v4.7: per-client last draw anchor (redraw dedup)
+int g_iLastDrawGen[MAXPLAYERS+1];      // v4.7: per-client path generation at last draw
+float g_fLastDrawTime[MAXPLAYERS+1];   // v4.7: per-client last draw engine time
+
+// ── v4.7 string-pull / SSFA state (ptg_portal.inc) ──
+ArrayList g_hPullResult = null;   // string-pull result (Cell) being built
+int g_iPullJ = 0;                 // string-pull source cursor
+int g_iPullAnchor = 0;            // string-pull index into g_hPullResult (current anchor)
+int g_iPullLastSrc = 0;           // string-pull source index of the last committed cell
+ArrayList g_hSSFAPortals = null;  // SSFA: PortalInfo chain between consecutive cells
+ArrayList g_hSSFAPath = null;     // SSFA: output waypoints (float[3])
 
 // GetNavConnections filter
 #define CON_KEEP_ALL 0 // keep all adjacent connections
@@ -219,6 +244,10 @@ ConVar g_hCvarThetaStar, g_hCvarThetaLosMax;
 ConVar g_hCvarHpaEnable, g_hCvarHpaCellSize;
 ConVar g_hCvarFlowWeight, g_hCvarZCostFactor;
 ConVar g_hCvarGeomPenalty; // v4.6: penalize A* edges whose straight line is blocked by world geometry
+// ── v4.7 portal + performance cvars ──
+ConVar g_hCvarPortals, g_hCvarPortalMinOverlap, g_hCvarPortalMaxDz, g_hCvarHumanJump;
+ConVar g_hCvarAstarCheap, g_hCvarAstarBudgetMs, g_hCvarAstarNodes;
+ConVar g_hCvarCoarseFirst, g_hCvarStringPull, g_hCvarFunnelSSFA, g_hCvarRedrawMinMove;
 // v4.6: blocked-edge feedback — hull validation records beam pairs that fail,
 // A* re-runs with those nav edges heavily penalized. Iterated up to
 // GEOM_ITER_MAX times. Cleared per map (nav areas change with the map).
@@ -419,7 +448,30 @@ void GetCvars()
         if (g_hCvarRepairEnable != null) g_hCvarRepairEnable.SetBool(false);
         if (g_hCvarBeaconEnable != null) g_hCvarBeaconEnable.SetBool(false);
         if (g_hCvarGeomPenalty != null) g_hCvarGeomPenalty.SetBool(false);
+        // v4.7: portal pipeline + perf features off in legacy mode
+        if (g_hCvarPortals != null) g_hCvarPortals.SetBool(false);
+        if (g_hCvarStringPull != null) g_hCvarStringPull.SetBool(false);
+        if (g_hCvarFunnelSSFA != null) g_hCvarFunnelSSFA.SetBool(false);
+        if (g_hCvarCoarseFirst != null) g_hCvarCoarseFirst.SetBool(false);
     }
+    }
+
+    // v4.7: L4D2 human players cannot jump (no jump key — only bots use nav
+    // jump links). Zero the jump caps so no code path builds jump edges for
+    // the human guide; vault/drop remain (mantle + falling are real mechanics).
+    if (g_hCvarHumanJump != null && !g_hCvarHumanJump.BoolValue)
+    {
+        g_Caps.max_jump_height = 0.0;
+        g_Caps.max_jump_distance = 0.0;
+        g_Caps.max_gap_jump = 0.0;
+    }
+
+    // v4.7: adaptive A* cursor base (the search loop re-adapts it per frame)
+    if (g_hCvarAstarNodes != null)
+    {
+        int baseNodes = view_as<int>(g_hCvarAstarNodes.FloatValue + 0.5);
+        if (g_iAStarNodesPerFrame != baseNodes)
+            g_iAStarNodesPerFrame = baseNodes;
     }
 }
 

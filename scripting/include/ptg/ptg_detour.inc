@@ -441,7 +441,18 @@ bool Detour_ConvertFrame(int maxCells)
         int nodeIdx = g_hDetourNodes.Get(localIdx);
 
         Cell cell;
-        AStar_CellFromNode(nodeIdx, cell);
+        // v4.7: match the main path's coordinate style — portal centers when
+        // the portal build is active, area centers otherwise. Mixing styles
+        // would make the splice jump at the window boundary.
+        if (Portal_Active() && g_iDetourConvIdx > 0)
+        {
+            int prevNodeIdx = g_hDetourNodes.Get(g_hDetourPath.Get(g_iDetourConvIdx - 1));
+            Portal_CellFromEdge(prevNodeIdx, nodeIdx, cell);
+        }
+        else
+        {
+            AStar_CellFromNode(nodeIdx, cell);
+        }
 
         // flow interpolated across the window
         cell.flow = startFlow + (goalFlow - startFlow) * (float(g_iDetourConvIdx) / float(pathLen - 1));

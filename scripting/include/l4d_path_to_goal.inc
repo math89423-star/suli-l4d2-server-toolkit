@@ -62,6 +62,11 @@ public void __pl_l4d_path_to_goal_SetNTVOptional()
 //    TryHull, GetNavConnections, valid_ground, ValidateJumpArc, etc.
 #include "ptg/ptg_utils.inc"
 
+// 2b. Portal geometry — shared-edge portals + human-capability classification
+//     (v4.7). Between utils and astar: GetNavConnections (utils) consumes the
+//     classification caches; the A* engine consumes portal waypoints.
+#include "ptg/ptg_portal.inc"
+
 // 3. A* engine — pathfinding kernel (~1930 lines)
 //    Heuristic, EdgeCost, SearchFrame, portals, HPA*, non-mesh detection,
 //    bridge detection, Funnel3D smoothing, ReconstructPath.
