@@ -11,6 +11,10 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.29:
+ *   - 复活币持有上限 5 枚 (user, si_hud_respawn_coin_max)：购买前检查
+ *     （达上限拒绝购买），进入游戏/新图时 clamp；消耗复活币时播报剩余数量。
+ *
  * Changelog v1.7.28:
  *   - RESPAWN LIMIT (user): 每图初始 si_hud_respawn_base (2) 次自动复活
  *     (=3 条命), 复活延迟 si_hud_respawn_delay 15s (was 35 via l4d2_auto_
@@ -431,7 +435,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.28"
+#define PLUGIN_VERSION "1.7.29"
 
 // ============================================================================
 // ConVar handles
@@ -490,6 +494,7 @@ ConVar g_cvShopEnable;         // v1.7.27
 ConVar g_cvRespawnEnable;      // v1.7.28
 ConVar g_cvRespawnBase;        // v1.7.28
 ConVar g_cvRespawnDelay;       // v1.7.28
+ConVar g_cvRespawnCoinMax;     // v1.7.29: 复活币持有上限
 ConVar g_cvSoundSI;
 ConVar g_cvSoundHeadshot;
 ConVar g_cvSoundTank;
@@ -759,6 +764,8 @@ public void OnPluginStart()
         "Auto-respawn count per player per map (3 lives total with the initial one).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
     g_cvRespawnDelay = CreateConVar("si_hud_respawn_delay", "15.0",
         "Seconds before auto respawn (was 35 in l4d2_auto_respawn).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+    g_cvRespawnCoinMax = CreateConVar("si_hud_respawn_coin_max", "5",
+        "Max revive coins a player may hold (checked on buy / join / map start).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
 
     // ── Kill sounds (all empty = off by default) ────────
 
@@ -1042,6 +1049,10 @@ public void OnMapStart()
     {
         g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
         KillRespawnTimer(i);
+        // v1.7.29: 复活币持有上限 clamp（用户：上限 5 枚，进服/新图/消耗时检查）
+        int coinMax = g_cvRespawnCoinMax.IntValue;
+        if (g_iReviveCoins[i] > coinMax)
+            g_iReviveCoins[i] = coinMax;
     }
 }
 
@@ -1140,8 +1151,16 @@ public Action Event_MapTransition(Event event, const char[] name, bool dontBroad
 }
 
 // ============================================================================
-// OnClientDisconnect
+// OnClientPutInServer / OnClientDisconnect
 // ============================================================================
+
+public void OnClientPutInServer(int client)
+{
+    // v1.7.29: 复活币持有上限 clamp（用户：上限 5 枚，进入游戏时检查）
+    int coinMax = g_cvRespawnCoinMax.IntValue;
+    if (g_iReviveCoins[client] > coinMax)
+        g_iReviveCoins[client] = coinMax;
+}
 
 public void OnClientDisconnect(int client)
 {
@@ -2468,6 +2487,13 @@ void ShopBuy(int client, int slot)
     // 复活币（classname 空）：不 spawn 物品，余额 +1 枚（战役内保留）
     if (g_ShopTable[slot].classname[0] == '\0')
     {
+        // v1.7.29: 持有上限检查（用户：上限 5 枚）
+        if (g_iReviveCoins[client] >= g_cvRespawnCoinMax.IntValue)
+        {
+            PrintToChat(client, "\x04[商店]\x01 复活币已达持有上限 \x03%d\x01 枚，无法再购买",
+                g_cvRespawnCoinMax.IntValue);
+            return;
+        }
         g_iReviveCoins[client]++;
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05复活币\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），复活币余额 \x03%d\x01 枚",
             price, g_iWallet[client], g_iReviveCoins[client]);
