@@ -104,6 +104,20 @@ void Guide_ValidateWalkable_Frame(any unused)
         float dist = GetVectorDistance(cell1.center, cell2.center, false);
         float distXY = GetVectorDistance(cell1.center, cell2.center, true);
 
+        // v4.6.1: hard cap on un-verified vertical drops. dz>140 exceeds the
+        // engine's DZ_TOO_LOW fall-damage threshold — the player cannot step
+        // down that far, and a straight beam through the void reads as
+        // "punching through the roof/floor" (c2m4 2026-08-01: barn→cellar
+        // drops with dz≈190 drew beams through the slab; the floating
+        // Funnel3D waypoints are fixed separately). Only real ladders and
+        // elevators (nav LADDER / elevator connections) may exceed it.
+        if (dz > 140.0 && !navArea_has_climb(cell1.navArea) && !navArea_has_climb(cell2.navArea))
+        {
+            g_bBeamWalkable.Push(0);
+            g_vBlocked++;
+            continue;
+        }
+
         // Strategy 0: Ladder / elevator shaft — pure vertical passage
         // v4.7: ONLY near-vertical XY<40 stays legal (ladders, elevator
         // shafts). The v4.6 widen (dz>100 && XY<120 unconditional pass,
@@ -248,6 +262,17 @@ void Guide_ValidateWalkable_Frame(any unused)
     }
 
     RequestFrame(Guide_ValidateWalkable_Frame, 0);
+}
+
+// v4.6.1: does the nav area connect to a ladder or elevator? Exempts real
+// climbing structures from the vertical-drop hard cap (dz > 140).
+stock bool navArea_has_climb(Address navArea)
+{
+    if (navArea == Address_Null || !elevator_available) return false;
+    if (L4D_NavArea_GetElevator(navArea) > 0) return true;
+    if (ladders1 == null) ladders1 = new ArrayList();
+    ladders1.Clear();
+    return NavArea_GetLadders(navArea, ladders1) > 0;
 }
 
 bool frame_budget_exceeded()

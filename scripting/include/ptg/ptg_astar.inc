@@ -2283,8 +2283,27 @@ stock bool Funnel3D_InsertZTransitions_Frame(ArrayList cells)
                     float zMax = (prev.center[2] > curr.center[2]) ? prev.center[2] : curr.center[2];
                     float snapped = groundPos[2] + 2.0;
                     if (snapped < zMin - 20.0 || snapped > zMax + 20.0)
-                        snapped = mid.center[2]; // trace hit a different floor — keep interpolation
+                    {
+                        // v4.6.1: trace hit a DIFFERENT floor — do NOT insert a
+                        // floating interpolation point. On c2m4 (2026-08-01) the
+                        // barn→cellar drop segments (dz≈190) kept their raw
+                        // interpolated Z when the 500u trace missed (interpolated
+                        // XY sits beside the stairs, over the void): 7 of 41
+                        // guide cells were floating navArea=null waypoints, and
+                        // the beams between them passed hull validation through
+                        // stair gaps — the player saw beams punching through the
+                        // roof/floor. Skipping the waypoint lets hull validation
+                        // judge the direct segment instead.
+                        continue;
+                    }
                     mid.center[2] = snapped;
+                }
+                else
+                {
+                    // v4.6.1: no ground within 500u of the interpolated XY —
+                    // the point hangs in the void (stair gaps, shafts). Same
+                    // reason as above: skip it, don't draw a floating cell.
+                    continue;
                 }
 
                 g_hFunnelResult.PushArray(mid, sizeof(Cell));
