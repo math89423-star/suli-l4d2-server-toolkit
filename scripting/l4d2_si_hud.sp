@@ -11,6 +11,12 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.34:
+ *   - 持久化 (user 确认): 钱包 + 复活币按 SteamID 存 KeyValues
+ *     (data/si_hud_scores.txt)。保存时机: 断线 / OnPluginEnd(reload) /
+ *     60s 周期 / 新战役清零后；进服恢复（无存档 = 新玩家默认 0+start 币）。
+ *     彻底解决 reload/重启丢战役资产；reload 后在线玩家也从文件恢复。
+ *
  * Changelog v1.7.33:
  *   - 瓦斯罐/煤气罐去掉每图限购（user）→ 无限购（limit 0）。
  *
@@ -475,7 +481,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.33"
+#define PLUGIN_VERSION "1.7.34"
 
 // ============================================================================
 // ConVar handles
@@ -640,6 +646,10 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
+
+// v1.7.34: 持久化——钱包/复活币按 SteamID 存 KeyValues（data/si_hud_scores.txt），
+// reload/重启不丢；保存时机: 断线 / OnPluginEnd(reload) / 60s 周期 / 新战役清零后
+char      g_sSavePath[PLATFORM_MAX_PATH];
 
 // ============================================================================
 // Plugin Info
@@ -899,23 +909,110 @@ public void OnPluginStart()
     CreateTimer(45.0, Timer_ScoreboardBroadcast, INVALID_HANDLE, TIMER_REPEAT);
 
     // v1.7.32d FIX: plugin reload 不触发 OnClientPutInServer —— 已在线的玩家
-    // 复活次数/复活币/钱包全是 0（reload 清零副作用）。补全默认初始化，
-    // 否则 reload 后死亡无自动复活（玩家只会看到引擎原生的 30s 僵尸重生倒计时）。
-    // 注：钱包/复活币暂无持久化，reload = 战役资产归零（待持久化解决）。
+    // 复活次数/复活币/钱包全是 0（reload 清零副作用）。补全初始化：
+    // 复活次数回 base，钱包/复活币从持久化文件恢复（v1.7.34）。
+    ScoreSave_Init();
     for (int i = 1; i <= MaxClients; i++)
     {
         if (IsClientInGame(i) && !IsFakeClient(i))
         {
             g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
-            g_iReviveCoins[i] = g_cvRespawnCoinStart.IntValue;
-            g_iWallet[i] = 0;
             g_iTotalScore[i] = 0;
             g_iSIKills[i] = 0;
             g_iDeaths[i] = 0;
             g_iFFDamage[i] = 0;
             g_iBlacked[i] = 0;
+            ScoreLoad_Player(i);   // v1.7.34: 恢复钱包/复活币
         }
     }
+
+    // v1.7.34: 周期持久化（防崩溃丢数据 + 中途进服玩家恢复接近实时的值）
+    CreateTimer(60.0, Timer_ScoreSave, INVALID_HANDLE, TIMER_REPEAT);
+}
+
+// ============================================================================
+// v1.7.34: 持久化 —— 钱包/复活币按 SteamID 存 KeyValues
+// ============================================================================
+
+public void OnPluginEnd()
+{
+    // reload/卸载前保存所有在线玩家（reload 不触发 OnClientDisconnect）。
+    // ⚠ reload 顺序: OnPluginEnd 先于 OnPluginStart → g_sSavePath 还是空串，
+    // 必须先重新 Init（BuildPath 纯函数可重复调用）。
+    ScoreSave_Init();
+    ScoreSave_All();
+}
+
+void ScoreSave_Init()
+{
+    BuildPath(Path_SM, g_sSavePath, sizeof(g_sSavePath), "data/si_hud_scores.txt");
+}
+
+void ScoreSave_Player(int client)
+{
+    if (client < 1 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client))
+        return;
+
+    char auth[32];
+    if (!GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth), false))
+        return;
+
+    KeyValues kv = new KeyValues("si_hud_scores");
+    if (FileExists(g_sSavePath))
+        kv.ImportFromFile(g_sSavePath);
+
+    kv.JumpToKey(auth, true);
+    kv.SetNum("wallet", g_iWallet[client]);
+    kv.SetNum("coins", g_iReviveCoins[client]);
+    kv.Rewind();
+    kv.ExportToFile(g_sSavePath);
+    delete kv;
+}
+
+void ScoreSave_All()
+{
+    for (int i = 1; i <= MaxClients; i++)
+        ScoreSave_Player(i);
+}
+
+void ScoreLoad_Player(int client)
+{
+    if (client < 1 || client > MaxClients || IsFakeClient(client))
+        return;
+
+    // 默认（无存档/新玩家）：0 可用积分 + start 枚复活币（v1.7.31 用户定）
+    g_iWallet[client] = 0;
+    g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
+
+    if (!FileExists(g_sSavePath))
+        return;
+
+    char auth[32];
+    if (!GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth), false))
+        return;
+
+    KeyValues kv = new KeyValues("si_hud_scores");
+    if (!kv.ImportFromFile(g_sSavePath))
+    {
+        delete kv;
+        return;
+    }
+
+    if (kv.JumpToKey(auth))
+    {
+        g_iWallet[client] = kv.GetNum("wallet", 0);
+        g_iReviveCoins[client] = kv.GetNum("coins", g_cvRespawnCoinStart.IntValue);
+        int coinMax = g_cvRespawnCoinMax.IntValue;   // 上限 clamp
+        if (g_iReviveCoins[client] > coinMax)
+            g_iReviveCoins[client] = coinMax;
+    }
+    delete kv;
+}
+
+public Action Timer_ScoreSave(Handle timer)
+{
+    ScoreSave_All();
+    return Plugin_Continue;
 }
 
 // Debug (v1.7.1): play the streak award sound directly, bypassing the whole
@@ -1114,6 +1211,7 @@ public void OnMapStart()
             g_iWallet[i] = 0;
             g_iReviveCoins[i] = 0;
         }
+        ScoreSave_All();                 // v1.7.34: 清零同步写回文件（进服恢复无歧义）
         PrintToChatAll("\x04[商店]\x01 新战役开始：可用积分与复活币已结算清零");
     }
     strcopy(g_sPrevCampaign, sizeof(g_sPrevCampaign), prefix);
@@ -1274,25 +1372,24 @@ public Action Event_MapTransition(Event event, const char[] name, bool dontBroad
 
 public void OnClientPutInServer(int client)
 {
-    // v1.7.31 (user): 新加入玩家 = 全默认状态 —— 0 可用积分 + 2 复活币 + base 复活次数
-    //（OnClientDisconnect 已清槽位防泄漏，这里显式初始化）
-    g_iWallet[client] = 0;
-    g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
+    // v1.7.31 (user): 新加入玩家 = 全默认状态 —— 0 可用积分 + start 复活币 + base 复活次数
+    // v1.7.34: 钱包/复活币恢复移到 OnClientPostAdminCheck（此时 Steam auth 才可用）
     g_iRevivesLeft[client] = g_cvRespawnBase.IntValue;
     g_iTotalScore[client] = 0;
     g_iSIKills[client] = 0;
     g_iDeaths[client] = 0;
     g_iFFDamage[client] = 0;
     g_iBlacked[client] = 0;
+}
 
-    // v1.7.29: 复活币持有上限 clamp（上限 5 枚）
-    int coinMax = g_cvRespawnCoinMax.IntValue;
-    if (g_iReviveCoins[client] > coinMax)
-        g_iReviveCoins[client] = coinMax;
+public void OnClientPostAdminCheck(int client)
+{
+    ScoreLoad_Player(client);   // v1.7.34: 从持久化文件恢复（无存档 = 新玩家默认）
 }
 
 public void OnClientDisconnect(int client)
 {
+    ScoreSave_Player(client);            // v1.7.34: 断线保存（必须在清零前）
     g_fLastKillSoundTime[client] = 0.0;
     g_iKillStreak[client] = 0;
     g_iCommonStreak[client] = 0;           // v1.7.4
