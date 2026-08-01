@@ -11,6 +11,9 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.44:
+ *   - 商店新商品：电锯 (weapon_chainsaw) 5000 分，无限购（user）。
+ *
  * Changelog v1.7.43:
  *   - FIX 同战役换图积分丢失 (user 实测): L4D2 changelevel 时客户端断线
  *     自动重连 → v1.7.42 的"进服 0"把换图重连当新加入清空钱包。
@@ -519,7 +522,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.43"
+#define PLUGIN_VERSION "1.7.44"
 
 // ============================================================================
 // ConVar handles
@@ -659,7 +662,7 @@ int       g_iLastCommonEnt[MAXPLAYERS + 1];
 // 价格/限购写死在此表（改价格需重编译）；掉落（loot_drop v1.7.0）出小件。
 // ============================================================================
 
-#define SHOP_SLOTS      11
+#define SHOP_SLOTS      12
 
 enum struct ShopItem
 {
@@ -682,6 +685,7 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "医疗包",      "weapon_first_aid_kit",          4000,  0 },
     { "激光瞄准",    "weapon_upgradepack_laser_sight", 3500,  0 },
     { "M60 轻机枪",  "weapon_rifle_m60",              5000,  0 },
+    { "电锯",        "weapon_chainsaw",               5000,  0 },   // v1.7.44
     { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0 },
     { "复活币",      "",                              12000,  0 }
 };
@@ -1273,6 +1277,9 @@ public void OnMapStart()
     PrecacheModel("models/v_models/v_m60.mdl");
     PrecacheModel("models/w_models/weapons/w_grenade_launcher.mdl");
     PrecacheModel("models/v_models/v_grenade_launcher.mdl");
+    // v1.7.44: chainsaw (电锯 5000)
+    PrecacheModel("models/w_models/weapons/w_chainsaw.mdl");
+    PrecacheModel("models/v_models/v_chainsaw.mdl");
 
     // HP display is now on-hit only (player_hurt → RefreshHPForClient → 0.5s hide).
     // Persistent timer is no longer started — SI HP only shows when you damage them.
