@@ -59,6 +59,16 @@ void Guide_Prep()
     g_fPrepStartTime = GetEngineTime();
     g_iPrepMapGen = g_iMapGeneration;
     g_iPrepStage = STAGE_PREP;
+    // v4.6 FIX: reset the whole prep sub-state machine. Watchdog resets and
+    // failed builds leave g_iBuildPhase/g_iPostStep/g_iSmoothStep dirty (they
+    // were only cleared on success/cleanup) — re-entering PREP with a stale
+    // phase skips node-index building, and a stale g_iSmoothStep=4 crashes
+    // SMOOTH on the deleted g_GuideCells (Invalid Handle 0).
+    g_iBuildPhase = 0;
+    g_iPortalBatchIdx = 0;
+    g_iPostStep = 0;
+    g_iIGStage = 0;
+    g_iSmoothStep = 0;
     #if DEBUG
     g_iPrepFrames = 0;
     #endif
@@ -548,10 +558,26 @@ void OnFramePrep(bool new_frame = true)
                 }
                 case 4: // finish
                 {
+                    if (g_GuideCells == null)
+                    {
+                        // v4.6 FIX: g_iSmoothStep leaks across pipeline restarts
+                        // (only reset on a successful finish). A fallback retry
+                        // jumps straight into STAGE_ASTAR→SMOOTH and can land
+                        // here with g_GuideCells deleted by the previous <2-cell
+                        // abort → Invalid Handle 0 (error 4) every cycle.
+                        // Rebuild from case 0 instead. (Note: SourcePawn rejects
+                        // `break` from a nested if — hence the if/else structure.)
+                        LogMessage("[PTG] SMOOTH case 4 with null cell list — restarting build");
+                        g_iSmoothStep = 0;
+                        budget_spent = true;
+                    }
+                    else
+                    {
                     if (g_GuideCells.Length < 2)
                     {
                         LogMessage("[PTG] A* produced <2 guide cells — falling back");
                         delete g_GuideCells;
+                        g_iSmoothStep = 0; // v4.6 FIX: don't leak step 4 into the next build
                         guide_prep = false;
                         g_iPrepStage = STAGE_NONE;
                         return;
@@ -587,9 +613,10 @@ void OnFramePrep(bool new_frame = true)
                         g_hPartialBeacon.PushArray(lastCell.center, 3);
                     }
 
-                    g_iLoop = 1;
-                    g_iSmoothStep = 0; // reset for next build
-                    budget_spent = true;
+                        g_iLoop = 1;
+                        g_iSmoothStep = 0; // reset for next build
+                        budget_spent = true;
+                    }
                 }
             } // switch (g_iSmoothStep)
         }

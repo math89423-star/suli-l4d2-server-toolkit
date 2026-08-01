@@ -869,6 +869,20 @@ Action Timer_AutoCheck(Handle timer)
     // but neither prep nor ready, the pipeline errored out. Retry a few times.
     if (!guide_ready && !guide_prep && g_iFallbackStage >= 2)
     {
+        // v4.6 FIX: honor the 60s backoff here too. The backoff gate above
+        // only guards the `stage < 2` block, but stage==3 (backoff) also
+        // matches `>= 2` — and g_iFallbackRetries was reset to 0 on entry,
+        // so the retry fired every 2s forever, defeating the backoff and
+        // hammering unbuildable maps (e.g. tumtara ships without a nav mesh).
+        if (g_iFallbackStage >= 3)
+        {
+            if (GetEngineTime() < g_fFallbackBackoffUntil)
+                return Plugin_Stop; // still in backoff window — no background work
+            g_iFallbackStage = 0;   // backoff over — retry standard prep next tick
+            g_iFallbackRetries = 0;
+            g_iPrepAttempts = 0;
+            return Plugin_Stop;
+        }
         if (g_iFallbackRetries < MAX_FALLBACK_RETRIES)
         {
             g_iFallbackRetries++;
@@ -951,6 +965,13 @@ Action Timer_AutoCheck(Handle timer)
 void Guide_Prep_Fallback()
 {
     if (!enable || !gamemode_guidable || !map_started || !nav_started) return;
+
+    // v4.6 FIX: fallback jumps into STAGE_ASTAR, skipping the STAGE_PREP
+    // resets — a stale g_iSmoothStep (e.g. 4 from an aborted build) lands
+    // SMOOTH directly on case 4 with a deleted g_GuideCells → Invalid Handle 0.
+    g_iSmoothStep = 0;
+    g_iPostStep = 0;
+    g_iIGStage = 0;
 
     // Build A* node index if not already done (may have been built by standard prep)
     if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
