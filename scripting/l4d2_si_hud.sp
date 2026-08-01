@@ -11,6 +11,16 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.31b (static review fixes):
+ *   - FIX 丢钱 Bug: 复活币持有上限检查在扣款之后 → 达上限购买扣 12000 不给币；
+ *     检查移到扣款前。
+ *   - FIX 限购泄漏: OnClientDisconnect 未清 g_iShopBought → 下个进服玩家
+ *     继承"已购满"。
+ *   - FIX 越界风险: witch 实体索引写入/读取 (ShowWitchHP / witch kill card /
+ *     WitchTakeDamage) 无 < 2048 检查 → 补上（SourcePawn 越界=运行时错误）。
+ *   - FIX 句柄: 复活计时器 + 倒计时 DataPack 加 TIMER_FLAG_NO_MAPCHANGE
+ *     （换图不再留下悬挂句柄/泄漏 dp）。
+ *
  * Changelog v1.7.31:
  *   - 新加入玩家 = 全默认状态 (user)：0 可用积分 + si_hud_respawn_coin_start
  *     (2) 枚复活币 + base 复活次数；显式初始化全部槽位。
@@ -445,7 +455,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.31"
+#define PLUGIN_VERSION "1.7.31b"
 
 // ============================================================================
 // ConVar handles
@@ -1250,6 +1260,9 @@ public void OnClientDisconnect(int client)
     g_iRevivesLeft[client] = 0;            // v1.7.28
     g_iReviveCoins[client] = 0;            // v1.7.28
     KillRespawnTimer(client);              // v1.7.28
+    // v1.7.31b fix: 限购计数断线清零（否则下个进服玩家继承"已购满"）
+    for (int j = 0; j < SHOP_SLOTS; j++)
+        g_iShopBought[client][j] = 0;
     g_iSIKills[client] = 0;                // v1.7.7
     g_iDeaths[client] = 0;
     g_iFFDamage[client] = 0;
@@ -1593,7 +1606,8 @@ public Action WitchTakeDamage(int victim, int &attacker, int &inflictor,
         g_iWallet[attacker] += pts;             // v1.7.27
         // v1.7.25: display copy for ShowWitchHP / witch kill card
         // (victim = witch ENTITY idx)
-        if (g_cvHPEnable.BoolValue)
+        // v1.7.31b fix: 实体索引 < 2048 才写（SourcePawn 越界 = 运行时错误）
+        if (g_cvHPEnable.BoolValue && victim >= 1 && victim < 2048)
             g_iDmgPtsKiller[attacker][victim] += pts;
     }
     return Plugin_Continue;
@@ -1799,8 +1813,13 @@ void ShowWitchHP(int client, int witch)
 
     char msg[256];
     // v1.7.25: Witch damage points on the HP line — killer's own share.
-    int pts = g_iDmgPtsKiller[client][witch];
-    g_iDmgPtsKiller[client][witch] = 0;
+    // v1.7.31b fix: 实体索引边界检查
+    int pts = 0;
+    if (witch >= 1 && witch < 2048)
+    {
+        pts = g_iDmgPtsKiller[client][witch];
+        g_iDmgPtsKiller[client][witch] = 0;
+    }
     if (pts > 0)
         Format(msg, sizeof(msg), "WITCH  女巫  [%s] %d/%d +%d\n",
             bar, hp, maxHp, pts);
@@ -1977,8 +1996,13 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
             char card[192];
             BuildKillCard(card, sizeof(card), weaponDisplay, "WITCH 女巫", headshot);
             // v1.7.25: same as the SI card — killer's damage share + kill pts.
-            int dmgPts = g_iDmgPtsKiller[attacker][witchEnt];
-            g_iDmgPtsKiller[attacker][witchEnt] = 0;
+            // v1.7.31b fix: 实体索引边界检查
+            int dmgPts = 0;
+            if (witchEnt >= 1 && witchEnt < 2048)
+            {
+                dmgPts = g_iDmgPtsKiller[attacker][witchEnt];
+                g_iDmgPtsKiller[attacker][witchEnt] = 0;
+            }
             if (dmgPts > 0)
             {
                 char tmp[32];
@@ -2558,19 +2582,22 @@ void ShopBuy(int client, int slot)
         return;
     }
 
+    // 复活币持有上限检查（必须在扣款前——v1.7.31b fix：原来在扣款后，
+    // 达上限购买会扣分不给币）
+    if (g_ShopTable[slot].classname[0] == '\0'
+        && g_iReviveCoins[client] >= g_cvRespawnCoinMax.IntValue)
+    {
+        PrintToChat(client, "\x04[商店]\x01 复活币已达持有上限 \x03%d\x01 枚，无法再购买",
+            g_cvRespawnCoinMax.IntValue);
+        return;
+    }
+
     g_iWallet[client] -= price;
     g_iShopBought[client][slot]++;
 
     // 复活币（classname 空）：不 spawn 物品，余额 +1 枚（战役内保留）
     if (g_ShopTable[slot].classname[0] == '\0')
     {
-        // v1.7.29: 持有上限检查（用户：上限 5 枚）
-        if (g_iReviveCoins[client] >= g_cvRespawnCoinMax.IntValue)
-        {
-            PrintToChat(client, "\x04[商店]\x01 复活币已达持有上限 \x03%d\x01 枚，无法再购买",
-                g_cvRespawnCoinMax.IntValue);
-            return;
-        }
         g_iReviveCoins[client]++;
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05复活币\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），复活币余额 \x03%d\x01 枚",
             price, g_iWallet[client], g_iReviveCoins[client]);
@@ -2675,7 +2702,9 @@ void ScheduleRespawn(int client, bool hasCount)
     KillRespawnTimer(client);
     int userid = GetClientUserId(client);
     float delay = g_cvRespawnDelay.FloatValue;
-    g_hRespawnTimer[client] = CreateTimer(delay, Timer_Respawn, userid);
+    // v1.7.31b fix: NO_MAPCHANGE — 换图时引擎清普通 timer 会留下悬挂句柄
+    // 和 DataPack 泄漏；标记后跨图继续，回调里 IsClientInGame/IsPlayerAlive 兜底
+    g_hRespawnTimer[client] = CreateTimer(delay, Timer_Respawn, userid, TIMER_FLAG_NO_MAPCHANGE);
 
     if (hasCount)
         PrintToChat(client, "\x04[复活]\x01 你已死亡（本图剩余复活 \x03%d\x01 次），将在 \x03%.0f 秒\x01 后自动复活",
@@ -2691,7 +2720,7 @@ void ScheduleRespawn(int client, bool hasCount)
             DataPack dp = new DataPack();
             dp.WriteCell(userid);
             dp.WriteCell(thresholds[i]);
-            CreateTimer(delay - float(thresholds[i]), Timer_RespawnCountdown, dp);
+            CreateTimer(delay - float(thresholds[i]), Timer_RespawnCountdown, dp, TIMER_FLAG_NO_MAPCHANGE);
         }
     }
 }
