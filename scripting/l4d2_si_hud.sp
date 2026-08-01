@@ -11,6 +11,17 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.40:
+ *   - FIX 切战役后可用积分仍保留 (user 实测): reload/重启后 g_sPrevCampaign
+ *     为空 → 战役切换判定失效（strlen==0 跳过清零）→ 上战役的钱被持久化
+ *     恢复。双修复: ①OnPluginStart 初始化当前图前缀（判定基准恢复）；
+ *     ②持久化文件存战役标记，恢复时校验（跨战役存档不恢复）。
+ *
+ * Changelog v1.7.38:
+ *   - FIX 激光不生效 (user 实测 v1.7.37 无效): 直接设 m_bHasLaserSight prop
+ *     客户端不渲染光束 → 改回升级包但 spawn 在脚下（接触自动拾取，引擎
+ *     完整拾取路径，100% 生效）。
+ *
  * Changelog v1.7.37:
  *   - 激光瞄准改为直接给当前武器加激光（user 确认，不再掉升级包）：
  *     SetEntProp m_bHasLaserSight；无武器异常时退款。
@@ -493,7 +504,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.37"
+#define PLUGIN_VERSION "1.7.40"
 
 // ============================================================================
 // ConVar handles
@@ -665,6 +676,9 @@ int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（O
 // v1.7.34: 持久化——钱包/复活币按 SteamID 存 KeyValues（data/si_hud_scores.txt），
 // reload/重启不丢；保存时机: 断线 / OnPluginEnd(reload) / 60s 周期 / 新战役清零后
 char      g_sSavePath[PLATFORM_MAX_PATH];
+
+// v1.7.40: 前向声明（OnPluginStart/持久化区在 GetMapPrefix 定义之前使用）
+void GetMapPrefix(const char[] map, char[] out, int maxlen);
 
 // ============================================================================
 // Plugin Info
@@ -919,6 +933,10 @@ public void OnPluginStart()
     RegConsoleCmd("sm_shop", Cmd_Shop, "Open the score shop (spend score on supplies/weapons).");
     RegConsoleCmd("sm_buy", Cmd_Shop, "Open the score shop (spend score on supplies/weapons).");
 
+    // v1.7.39d DEBUG: 直接测 m_bHasLaserSight prop 有效性（绕过商店/钱包）
+    RegConsoleCmd("sm_laser_test", Cmd_LaserTest,
+        "DEBUG: SetEntProp m_bHasLaserSight on current weapon + readback log");
+
     // v1.7.6: periodic per-player broadcast (45s default; 0=off via cvar
     // check inside the callback; interval change needs plugin reload)
     CreateTimer(45.0, Timer_ScoreboardBroadcast, INVALID_HANDLE, TIMER_REPEAT);
@@ -943,6 +961,12 @@ public void OnPluginStart()
 
     // v1.7.34: 周期持久化（防崩溃丢数据 + 中途进服玩家恢复接近实时的值）
     CreateTimer(60.0, Timer_ScoreSave, INVALID_HANDLE, TIMER_REPEAT);
+
+    // v1.7.40 FIX: reload/重启后 g_sPrevCampaign 为空 → 之后的战役切换判定
+    // 失效（strlen==0 跳过清零）→ 上一战役的钱被持久化恢复。初始化当前图前缀
+    char initMap[64];
+    GetCurrentMap(initMap, sizeof(initMap));
+    GetMapPrefix(initMap, g_sPrevCampaign, sizeof(g_sPrevCampaign));
 }
 
 // ============================================================================
@@ -979,6 +1003,8 @@ void ScoreSave_Player(int client)
     kv.JumpToKey(auth, true);
     kv.SetNum("wallet", g_iWallet[client]);
     kv.SetNum("coins", g_iReviveCoins[client]);
+    // v1.7.40: 存档所属战役（恢复时校验，防跨战役恢复旧钱）
+    kv.SetString("campaign", g_sPrevCampaign);
     kv.Rewind();
     kv.ExportToFile(g_sSavePath);
     delete kv;
@@ -1013,13 +1039,30 @@ void ScoreLoad_Player(int client)
         return;
     }
 
+    // v1.7.40: 存档战役校验——存档战役 ≠ 当前战役 → 不恢复（跨战役的钱作废）
+    char savedCampaign[16];
+    char curMap[64];
+    GetCurrentMap(curMap, sizeof(curMap));
+    char curPrefix[16];
+    GetMapPrefix(curMap, curPrefix, sizeof(curPrefix));
+
     if (kv.JumpToKey(auth))
     {
-        g_iWallet[client] = kv.GetNum("wallet", 0);
-        g_iReviveCoins[client] = kv.GetNum("coins", g_cvRespawnCoinStart.IntValue);
-        int coinMax = g_cvRespawnCoinMax.IntValue;   // 上限 clamp
-        if (g_iReviveCoins[client] > coinMax)
-            g_iReviveCoins[client] = coinMax;
+        kv.GetString("campaign", savedCampaign, sizeof(savedCampaign));
+        if (strlen(savedCampaign) > 0 && !StrEqual(savedCampaign, curPrefix))
+        {
+            // 跨战役存档：保持默认（0 + start 币），不恢复
+            g_iWallet[client] = 0;
+            g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
+        }
+        else
+        {
+            g_iWallet[client] = kv.GetNum("wallet", 0);
+            g_iReviveCoins[client] = kv.GetNum("coins", g_cvRespawnCoinStart.IntValue);
+            int coinMax = g_cvRespawnCoinMax.IntValue;   // 上限 clamp
+            if (g_iReviveCoins[client] > coinMax)
+                g_iReviveCoins[client] = coinMax;
+        }
     }
     delete kv;
 }
@@ -1276,7 +1319,7 @@ void RestoreScoreState()
     }
 }
 
-void GetMapPrefix(const char[] map, char[] out, int maxlen)
+public void GetMapPrefix(const char[] map, char[] out, int maxlen)
 {
     int idx = FindCharInString(map, '_');
     if (idx <= 0 || idx >= maxlen)
@@ -2761,14 +2804,17 @@ void ShopBuy(int client, int slot)
         return;
     }
 
-    // v1.7.37 (user): 激光瞄准直接给当前武器加激光（不 spawn 升级包）——
-    // m_bHasLaserSight 是 networked prop，设置即生效；换武器后丢失（原版语义）
+    // v1.7.39 (诊断中): 社区标准做法 = SetEntProp m_bHasLaserSight 直接加。
+    // 回读日志确诊: 1=prop 有效设置成功（问题在客户端渲染） / 0或错误=prop 无效
     if (StrEqual(g_ShopTable[slot].classname, "weapon_upgradepack_laser_sight"))
     {
         int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
         if (weapon > 0 && IsValidEntity(weapon))
         {
             SetEntProp(weapon, Prop_Send, "m_bHasLaserSight", 1);
+            int back = GetEntProp(weapon, Prop_Send, "m_bHasLaserSight");
+            LogMessage("[shop-laser] set weapon=%d readback=%d client=%N cls=%s",
+                weapon, back, client, g_ShopTable[slot].classname);
             PrintToChat(client, "\x04[商店]\x01 已购买 \x05激光瞄准\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），当前武器已装激光",
                 price, g_iWallet[client]);
         }
@@ -2868,6 +2914,28 @@ public Action Cmd_Shop(int client, int args)
         return Plugin_Handled;
     }
     OpenShopMenu(client);
+    return Plugin_Handled;
+}
+
+public Action Cmd_LaserTest(int client, int args)
+{
+    if (client < 1 || !IsClientInGame(client))
+        return Plugin_Handled;
+
+    int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+    if (weapon > 0 && IsValidEntity(weapon))
+    {
+        SetEntProp(weapon, Prop_Send, "m_bHasLaserSight", 1);
+        int back = GetEntProp(weapon, Prop_Send, "m_bHasLaserSight");
+        char cls[64];
+        GetEntityClassname(weapon, cls, sizeof(cls));
+        LogMessage("[laser-test] weapon=%d cls=%s readback=%d", weapon, cls, back);
+        PrintToChat(client, "\x04[laser-test]\x01 weapon=%d %s readback=%d", weapon, cls, back);
+    }
+    else
+    {
+        PrintToChat(client, "\x04[laser-test]\x01 无武器");
+    }
     return Plugin_Handled;
 }
 
