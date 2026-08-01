@@ -362,10 +362,28 @@ bool RequestGuide(int client, float duration = 5.0, bool backward = false, bool 
                     continue;
                 }
                 g_GuideCells.GetArray(g_iForward,cell,sizeof(Cell));
-                DrawBeam(client,pos_forward,cell.center,duration,color_forward);
+                // v4.7: jump-validated beams (vault/jump arc) render as a
+                // parabola — a straight line would clip through the ledge or
+                // barrier the jump cleared.
+                if (cell.jumpFlag)
+                {
+                    float apex[3];
+                    apex[0] = (pos_forward[0] + cell.center[0]) * 0.5;
+                    apex[1] = (pos_forward[1] + cell.center[1]) * 0.5;
+                    apex[2] = (pos_forward[2] + cell.center[2]) * 0.5 + 60.0;
+                    float maxZ = (pos_forward[2] > cell.center[2]) ? pos_forward[2] : cell.center[2];
+                    if (apex[2] > maxZ + 40.0) apex[2] = maxZ + 40.0;
+                    DrawBeam(client,pos_forward,apex,duration,color_forward);
+                    DrawBeam(client,apex,cell.center,duration,color_forward);
+                    i_draw += 2;
+                }
+                else
+                {
+                    DrawBeam(client,pos_forward,cell.center,duration,color_forward);
+                    i_draw += 1;
+                }
                 pos_forward = cell.center;
                 end = false;
-                i_draw += 1;
                 if (i_draw>=g_hCvarMax.IntValue) break;
             }
             if (backward && g_iBackward>0)
@@ -380,10 +398,30 @@ bool RequestGuide(int client, float duration = 5.0, bool backward = false, bool 
                     continue;
                 }
                 g_GuideCells.GetArray(g_iBackward,cell,sizeof(Cell));
-                DrawBeam(client,cell.center,pos_backward,duration,color_backward);
+                // v4.7: jump arc (backward leg) — the flag sits on the cell the
+                // beam ENTERS, which in backward direction is g_iBackward+1
+                // (this beam runs cell[g_iBackward] → cell[g_iBackward+1]).
+                Cell jumpCell;
+                g_GuideCells.GetArray(g_iBackward + 1, jumpCell, sizeof(Cell));
+                if (jumpCell.jumpFlag)
+                {
+                    float apex[3];
+                    apex[0] = (cell.center[0] + pos_backward[0]) * 0.5;
+                    apex[1] = (cell.center[1] + pos_backward[1]) * 0.5;
+                    apex[2] = (cell.center[2] + pos_backward[2]) * 0.5 + 60.0;
+                    float maxZ = (cell.center[2] > pos_backward[2]) ? cell.center[2] : pos_backward[2];
+                    if (apex[2] > maxZ + 40.0) apex[2] = maxZ + 40.0;
+                    DrawBeam(client,cell.center,apex,duration,color_backward);
+                    DrawBeam(client,apex,pos_backward,duration,color_backward);
+                    i_draw += 2;
+                }
+                else
+                {
+                    DrawBeam(client,cell.center,pos_backward,duration,color_backward);
+                    i_draw += 1;
+                }
                 pos_backward = cell.center;
                 end = false;
-                i_draw += 1;
             }
         }
     }

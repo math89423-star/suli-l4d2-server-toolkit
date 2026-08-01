@@ -53,7 +53,8 @@
 
 | 插件 | 说明 |
 |------|------|
-| `l4d2_si_hud.smx` | 所有特感血量 HUD 实时显示 |
+| `l4d2_si_hud.smx` | 特感血量 HUD + 战地击杀横幅（☠ 并排骷髅头 + 得分，v1.5.0） |
+| `l4d2_bf_killfeedback.smx` | 战地击杀音效（6 种 MP3，v4.2.0；v4.2.1 待发 sound.cache） |
 | `advertisements.smx` | 定时轮播服务器公告（120s 间隔） |
 | `auto_motd.smx` | 自动显示 MOTD 欢迎信息 |
 | `l4d2_broadcast.smx` | 广播玩家死亡/受伤/受击事件 |
@@ -129,7 +130,7 @@
 
 - **副本服务器差异**：参考服务器不使用 `l4d2_tickrate_enabler.smx`（改用 `-tickrate 60` 启动参数），这是两项 60-tick 方案之间的唯一差异。
 - **已删除的插件**：`mapchooser.smx`、`nominations.smx`、`rockthevote.smx`、`randomcycle.smx` 已永久删除（mapchooser 无法创建有效地图列表）。
-- **已移除的插件**（2026-07-29）：`l4d2_maptankfix`、`l4d2_tank_ranking`、`l4d2_si_kill_heal`、`l4d2_bf_killfeedback`（音效后续归击杀 HUD 统一管理）。
+- **已移除的插件**（2026-07-29）：`l4d2_maptankfix`、`l4d2_tank_ranking`、`l4d2_si_kill_heal`（`l4d2_bf_killfeedback` 已于 2026-07-31 以纯音效版 v4.2.0 恢复部署：HUD 归 si_hud，音效归 bf_killfeedback）。
 - **重命名**：`l4d2_tank_core` → `l4d2_tank_unified`，`L4D_All_Infected_HUD_HP` → `l4d2_si_hud`。
 - **关键配置**：武器属性、团灭换图阈值（4 次）、弹药量等在 `cfg/sourcemod/sourcemod.cfg` 中统一定义。
 - **Tank HP**：`l4d2_tank_unified.smx` → 存活人数（含 BOT）× 3000，最低 12,000 HP。

@@ -104,14 +104,16 @@ void Guide_ValidateWalkable_Frame(any unused)
         float dist = GetVectorDistance(cell1.center, cell2.center, false);
         float distXY = GetVectorDistance(cell1.center, cell2.center, true);
 
-        // Strategy 0: Ladder / elevator / vertical drop
-        // v4.6 FIX: widen the vertical-transition pass. Floor-to-floor nav
-        // connections (stairwells, elevator shafts, drop-downs) are legitimate
-        // paths the player can take, but a straight hull trace between levels
-        // punches through the floor slab and fails. The old XY<40 only covered
-        // pure ladders — stairwells/atrium drops run 40..120 XY. Raise the dz
-        // bar to 100 so flat wall-clipping beams stay blocked.
-        if (dz > 100.0 && distXY < 120.0)
+        // Strategy 0: Ladder / elevator shaft — pure vertical passage
+        // v4.7: ONLY near-vertical XY<40 stays legal (ladders, elevator
+        // shafts). The v4.6 widen (dz>100 && XY<120 unconditional pass,
+        // including drops) made every floor-to-roof nav connection "legal"
+        // without checking the space between — beams punched through floor
+        // slabs and A* routed paths up onto roofs and back down (loops +
+        // vertical lines). Wider cross-level beams (including drops) fall
+        // through to the standard hull strategies below and get beaconed
+        // where no real passage (stairwell) exists.
+        if (dz > 100.0 && distXY < 40.0)
         {
             g_bBeamWalkable.Push(1);
             continue;
@@ -120,16 +122,27 @@ void Guide_ValidateWalkable_Frame(any unused)
         // Strategy 0.5: Vault / climb — moderate-height obstacle to jump over
         // Two cells close horizontally but with a box/crate/ledge between them.
         // The player can vault: step up onto the higher cell, walk across, drop down.
-        // Trace at the higher cell's level (+10u clearance) with low hull.
+        // v4.7 FIX: the old test only traced a horizontal line at the higher
+        // cell's level — a cross-FLOOR connection (dz 30..100 between floors)
+        // passed whenever the upper floor was open, and the drawn line then
+        // punched through the floor slab. Verify the actual parabolic jump
+        // trajectory (low → 60u apex → high, same as Strategy 8) so only real
+        // vaults pass; the drawer renders the arc via jumpFlag.
         if (dz >= 30.0 && dz <= 100.0 && distXY < 120.0)
         {
-            float vaultZ = (cell1.center[2] > cell2.center[2] ? cell1.center[2] : cell2.center[2]) + 10.0;
-            float sv[3], ev[3];
-            sv = baseStart; sv[2] = vaultZ;
-            ev = baseEnd;   ev[2] = vaultZ;
-            // Only the higher-level horizontal trace needs to clear — player steps up naturally
-            if (TryHull(sv, ev, lowMins, lowMaxs))
+            float sj[3], ej[3], mj[3];
+            sj = baseStart; sj[2] += 28.0;
+            ej = baseEnd;   ej[2] += 28.0;
+            mj[0] = (sj[0] + ej[0]) / 2.0;
+            mj[1] = (sj[1] + ej[1]) / 2.0;
+            mj[2] = (sj[2] + ej[2]) / 2.0 + 60.0;
+            if (TryHull(sj, mj, lowMins, lowMaxs) && TryHull(mj, ej, lowMins, lowMaxs))
             {
+                // v4.7: the beam into cell2 is a JUMP — a straight drawn line
+                // clips through the ledge/obstacle side. Mark the cell so the
+                // drawer renders a parabolic arc instead.
+                cell2.jumpFlag = true;
+                g_GuideCells.SetArray(i + 1, cell2, sizeof(Cell));
                 g_vVault++;
                 g_bBeamWalkable.Push(1);
                 continue;
@@ -221,6 +234,13 @@ void Guide_ValidateWalkable_Frame(any unused)
             mj[2] = (sj[2] + ej[2]) / 2.0 + 60.0;
             walkable = TryHull(sj, mj, lowMins, lowMaxs)
                     && TryHull(mj, ej, lowMins, lowMaxs);
+            // v4.7: jump-validated beam — drawer must render an arc, not a
+            // straight line through the obstacle the jump cleared.
+            if (walkable)
+            {
+                cell2.jumpFlag = true;
+                g_GuideCells.SetArray(i + 1, cell2, sizeof(Cell));
+            }
         }
 
         g_bBeamWalkable.Push(walkable ? 1 : 0);
@@ -261,36 +281,8 @@ ArrayList g_hBeaconCells; // beacon positions for unreachable transitions
 
 int g_iRepairMapGen = -1; // map generation when repair started; abort if stale
 
-// v4.6 FIX: snap a position to the real walkable surface. Mirrors the ground
-// snap in AStar_CellFromNode — REPAIR's mutated coordinates (Z-stepped,
-// offset, subdivided, rerouted cells) were written back raw, leaving guide
-// lines floating in the air or clipped through floors/slopes.
-stock void GroundSnapPosition(float pos[3])
-{
-    float traceStart[3], traceEnd[3], traceHit[3];
-    traceStart = pos;
-    traceStart[2] += 200.0;
-    traceEnd = pos;
-    traceEnd[2] -= 800.0;
-    TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
-    if (TR_DidHit())
-    {
-        TR_GetEndPosition(traceHit);
-        pos[2] = traceHit[2] + 2.0; // +2 above floor surface
-    }
-    else
-    {
-        // Upward fallback for inverted surfaces
-        traceStart[2] = pos[2] - 16.0;
-        traceEnd[2]   = pos[2] + 128.0;
-        TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
-        if (TR_DidHit())
-        {
-            TR_GetEndPosition(traceHit);
-            pos[2] = traceHit[2] + 2.0;
-        }
-    }
-}
+// GroundSnapPosition now lives in ptg_utils.inc (defined before both
+// ptg_astar.inc and ptg_validate.inc — SourcePawn single-pass compiler).
 
 // ======================================================================
 // v4.6 FIX: REPAIR Strategy 4+ — multi-hop local A* reroute.
@@ -694,6 +686,7 @@ void Guide_RepairBlocked_Frame(any unused)
                     GroundSnapPosition(cell2.center);
                     if (twopos_traversable(cell1.center, cell2.center))
                     {
+                        cell2.jumpFlag = false; // v4.7: repaired via straight line — no arc
                         g_GuideCells.SetArray(g_ri + 1, cell2, sizeof(Cell));
                         g_bBeamWalkable.Set(g_ri, 1);
                         repaired = true;
@@ -711,6 +704,7 @@ void Guide_RepairBlocked_Frame(any unused)
                         GroundSnapPosition(cell1.center);
                         if (twopos_traversable(cell1.center, cell2.center))
                         {
+                            cell1.jumpFlag = false; // v4.7: straight line — no arc
                             g_GuideCells.SetArray(g_ri, cell1, sizeof(Cell));
                             g_bBeamWalkable.Set(g_ri, 1);
                             repaired = true;
@@ -764,6 +758,8 @@ void Guide_RepairBlocked_Frame(any unused)
                         GroundSnapPosition(cell2.center);
                         if (twopos_traversable(cell1.center, cell2.center))
                         {
+                            cell1.jumpFlag = false; // v4.7: straight line — no arc
+                            cell2.jumpFlag = false;
                             g_GuideCells.SetArray(g_ri, cell1, sizeof(Cell));
                             g_GuideCells.SetArray(g_ri + 1, cell2, sizeof(Cell));
                             g_bBeamWalkable.Set(g_ri, 1);

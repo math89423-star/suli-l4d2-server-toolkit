@@ -162,6 +162,9 @@ public Action Timer_ChangeLevel(Handle timer, DataPack pack)
     pack.ReadString(nextMap, sizeof(nextMap));
     delete pack;
 
-    ForceChangeLevel(nextMap, "Campaign Finale Auto Transition");
+    // FIX (2026-08-01): ForceChangeLevel kicks ALL clients (it is the `map`
+    // command equivalent) — after a finale win that drops every player.
+    // Engine `changelevel` keeps the connection (client auto-reconnects).
+    ServerCommand("changelevel %s", nextMap);
     return Plugin_Stop;
 }

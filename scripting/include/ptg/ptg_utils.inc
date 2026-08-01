@@ -266,6 +266,38 @@ bool TraceFilterNoClients(int entity, int contentsMask)
     return true;
 }
 
+// v4.6 FIX: snap a position to the real walkable surface. REPAIR/SMOOTH
+// mutated coordinates (Z-stepped, offset, subdivided, rerouted, nav-center
+// midpoints) were written back raw, leaving guide lines floating in the air
+// or clipped through floors/slopes. Uses the STRICT filter so snapping rests
+// on true world surfaces, not on top of physics props or unbroken tables.
+stock void GroundSnapPosition(float pos[3])
+{
+    float traceStart[3], traceEnd[3], traceHit[3];
+    traceStart = pos;
+    traceStart[2] += 200.0;
+    traceEnd = pos;
+    traceEnd[2] -= 800.0;
+    TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
+    if (TR_DidHit())
+    {
+        TR_GetEndPosition(traceHit);
+        pos[2] = traceHit[2] + 2.0; // +2 above floor surface
+    }
+    else
+    {
+        // Upward fallback for inverted surfaces
+        traceStart[2] = pos[2] - 16.0;
+        traceEnd[2]   = pos[2] + 128.0;
+        TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
+        if (TR_DidHit())
+        {
+            TR_GetEndPosition(traceHit);
+            pos[2] = traceHit[2] + 2.0;
+        }
+    }
+}
+
 stock bool pos_underwater(const float pos[3])
 {
 	static float top[3], bottom[3];

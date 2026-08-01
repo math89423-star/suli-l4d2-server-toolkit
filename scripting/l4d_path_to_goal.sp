@@ -137,8 +137,8 @@ public void OnPluginStart()
 
     // ── v4.0 Advanced Features ──
 
-    g_hCvarFunnel3D = CreateConVar("l4d_path_to_goal_funnel_3d", "1",
-    "Enable 3D funnel algorithm for multi-floor building navigation. 0=2D funnel only (legacy), 1=3D funnel with Z-layer awareness.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_hCvarFunnel3D = CreateConVar("l4d_path_to_goal_funnel_3d", "0",
+    "Enable 3D funnel algorithm for multi-floor building navigation. 0=2D funnel only (legacy), 1=3D funnel with Z-layer awareness. v4.7: default 0 — the Z-transition pass inserts interpolated waypoints inside floor gaps (dz>80 triggers up to 8 per edge), rendering as vertical beams through floors; cross-level segments are validated/beaconed instead.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     g_hCvarFunnelZStep = CreateConVar("l4d_path_to_goal_funnel_z_step", "80.0",
     "Max Z height change (units) between consecutive funnel portals before forcing an intermediate waypoint.",FCVAR_NOTIFY, true, 32.0, true, 500.0);

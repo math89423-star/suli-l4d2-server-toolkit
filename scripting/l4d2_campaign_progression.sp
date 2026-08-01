@@ -76,6 +76,8 @@ public Action Timer_ChangeLevel(Handle timer, DataPack pack)
     char nextMap[64];
     pack.ReadString(nextMap, sizeof(nextMap));
     delete pack;
-    ForceChangeLevel(nextMap, "Campaign Progression");
+    // FIX (2026-08-01): ForceChangeLevel kicks ALL clients (`map` equivalent).
+    // changelevel keeps the connection.
+    ServerCommand("changelevel %s", nextMap);
     return Plugin_Stop;
 }

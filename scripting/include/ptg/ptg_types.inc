@@ -33,6 +33,8 @@ enum struct Cell
 	float flow;
     Address navArea;
 	float center[3]; // cell position slightly above ground
+	bool jumpFlag;   // v4.7: beam INTO this cell was validated as a jump/vault
+	                 // (parabolic path) — the drawer renders an arc, not a line
 }
 
 // How are two nav areas connected?
@@ -214,7 +216,10 @@ ConVar g_hCvarGeomPenalty; // v4.6: penalize A* edges whose straight line is blo
 // A* re-runs with those nav edges heavily penalized. Iterated up to
 // GEOM_ITER_MAX times. Cleared per map (nav areas change with the map).
 StringMap g_hBlockedEdges;
-#define GEOM_ITER_MAX 3
+#define GEOM_ITER_MAX 1 // v4.7: was 3 — each rebuild rewrites the whole path
+                        // (visible oscillation) and the penalty pushed A* onto
+                        // roofs (cross-level edges were unconditionally legal).
+                        // One iteration handles isolated wall-clipping edges.
 #define GEOM_ITER_EDGE_PENALTY 5.0
 int g_iGeomIter;
 ConVar g_hCvarAccuracy;

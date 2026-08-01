@@ -11,6 +11,192 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.22:
+ *   - BF-style hit feedback for commons (user): EVERY damage tick shows
+ *     its score — "† 小僵尸 +52" (dmg pts only) on every hit, no kill
+ *     required (BF1/BFV pop the damage score on each hit). Same-frame
+ *     kills overwrite with the +92 kill line (hurt fires before death).
+ *
+ * Changelog v1.7.21:
+ *   - Common kill line shows the FULL kill score (user spec): this target's
+ *     damage points (dmg × weapon mult — magnum 50hp = 87) PLUS the fixed
+ *     kill points (5/10) → "† 小僵尸 +92" per "50×1.75 + 5". The damage
+ *     pts for commons were already scored on hit; now they also SURFACE on
+ *     the kill line (commons have no HP row to show them on). Same buffer
+ *     g_iDmgPts[entity], consumed with the kill.
+ *
+ * Changelog v1.7.20:
+ *   - Damage points NOW VISIBLE in the hit area (user: "hit区域还是只有
+ *     击杀得分"): the SI HP line appends "+N" (e.g. "HUNTER [|||||     ]
+ *     132/250 +8") — same for the Witch HP line. Buffer g_iDmgPts[2048]
+ *     keyed by ENTITY index (SI client idx + Witch entity idx), accumulated
+ *     per hurt event, consumed+zeroed by the per-frame HP display, fully
+ *     cleared on round end (mid-frame-dead victims cannot leak). Only
+ *     populated when the HP display is on (else nothing consumes it).
+ *     Commons damage points deliberately NOT shown (horde spam).
+ *
+ * Changelog v1.7.19:
+ *   - Settle tally ALSO flashes in the center hit area for 2s (user) with
+ *     the icon version "† 小僵尸 ×3、☠ 特感 ×2、+430分" (center/HUD font
+ *     has those glyphs); the chat line stays plain-text (Verdana lacks
+ *     ☠/†; × renders wrong there → ASCII "x").
+ *
+ * Changelog v1.7.18:
+ *   - Settle tally: × (U+00D7) → ASCII "x" (user saw it render wrong in
+ *     chat); prefix "[战地]" → "[得分]" (user: unified with the scoreboard
+ *     "[得分榜]" style — half-width brackets).
+ *
+ * Changelog v1.7.17:
+ *   - Streak window si_hud_bf_window 10s → 6s (user: 10s too long).
+ *
+ * Changelog v1.7.16:
+ *   - BF-style damage points (user): everyone who damages an SI (incl.
+ *     Tank) earns score — tank/charger fights are fair, not just the final
+ *     killer. points = dmg_health × weapon mult × si_hud_bf_damage_coeff
+ *     (default 1.0: 1 damage = 1 point, weapon mults deviate). Goes to
+ *     the scoreboard total only — NOT the streak
+ *     (award = kill streaks), NOT the chat (spam). Witch + commons excluded
+ *     (no player_hurt events). Kill points do NOT scale by weapon (user).
+ *   - Weapon-class damage multipliers: AR 1.0 / SMG 1.5 / magnum+melee
+ *     1.75 / pump shotgun 1.5 / auto shotguns + snipers 0.75 / other 1.0.
+ *   - Streak settle record moved to the killer's OWN chat box (user): the
+ *     old 2s center card vanished before the longer award sounds ended.
+ *     Chat lines persist, so the tally stays visible while the sound plays.
+ *   - Common infected HP damage ALSO earns damage points (user) via the
+ *     infected_hurt event (commons fire no player_hurt). Independent coeff
+ *     cvar si_hud_bf_damage_coeff_common (default 1.0); watch the board —
+ *     at 1.0, horde-mowing out-scores SI kills.
+ *   - Witch damage points via SDKHooks_OnTakeDamage (witch_spawn hook) —
+ *     she is an NPC: no player_hurt, no infected_hurt.
+ *   - CHAT-SAFE chars (user): the chat font (Verdana) has NO Box Drawing
+ *     (═ → "?") and NO ☠ (U+2620 → "?") — scoreboard dividers are now
+ *     ASCII "-", the settle tally dropped †/☠ icons (plain text, × stays:
+ *     U+00D7 is Latin-1). Icons stay in the center channel (HUD font OK).
+ *
+ * Changelog v1.7.15:
+ *   - Player names shown in green (user); names are sanitized (control
+ *     chars stripped) so a crafted name cannot inject color codes.
+ *
+ * Changelog v1.7.14:
+ *   - Scoreboard switched to compact single-line rows (user choice): the
+ *     L4D2 chat font is proportional (Verdana), so space-padded column
+ *     alignment can never work. "#1 Ellis：680分 特5 死0 友伤8 被黑0".
+ *     Removed PadRight/DisplayWidth/TruncateToWidth.
+ *
+ * Changelog v1.7.13:
+ *   - REAL alignment fix: removed the / color codes from inside the
+ *     scoreboard rows — L4D2 chat renders them as invisible placeholders
+ *     (~1 col each), so the row had 2 extra columns vs the header and every
+ *     column after the colored score shifted. Now only the shared
+ *     "[得分榜]" prefix is colored; alignment is pure spaces.
+ *
+ * Changelog v1.7.12:
+ *   - Alignment FIX (user screenshotted): header column widths now equal
+ *     the data column widths (特感/死亡 3, 友伤 4, 被黑 3 — the CJK labels
+ *     are 2 cols each and were padded wider than the %-Nd columns), and
+ *     separators are 1 space on both header and rows.
+ *
+ * Changelog v1.7.11:
+ *   - Long player names no longer shift the columns: over-width names are
+ *     truncated to the column width (width-2 + "…", never splitting a
+ *     UTF-8 codepoint).
+ *
+ * Changelog v1.7.10:
+ *   - Scoreboard number columns left-aligned (user) to match the header.
+ *
+ * Changelog v1.7.9:
+ *   - Scoreboard stats now survive until MAP end (round_end only resets the
+ *     streak state — a wipe-restart keeps the map's tally).
+ *   - Map-end final broadcast: checkpoint/finale finish (map_transition)
+ *     force-broadcasts the scoreboard once; other changelevel paths
+ *     (vote / wipe-mapchange) fall back to OnMapEnd. Flag prevents double.
+ *
+ * Changelog v1.7.8:
+ *   - Scoreboard rendered as an aligned TABLE: columns padded by display
+ *     width (CJK = 2 cols, ASCII = 1) with ═/─ borders and a header row —
+ *     "# | 玩家 | 得分 | 特感 | 死亡 | 友伤 | 被黑", sorted by score.
+ *
+ * Changelog v1.7.7:
+ *   - Scoreboard now shows FIVE stats per player, sorted by total score:
+ *     score (分), SI kills (特), deaths (死), friendly-fire damage (友伤),
+ *     killed-by-teammate count (被黑, user: "被队友击杀次数").
+ *     Tracked in player_death (deaths + blacked) and player_hurt
+ *     (survivor→survivor damage); SI kills via StackStreakKill.
+ *
+ * Changelog v1.7.6:
+ *   - Chat scoreboard (user): type !rank / !score / !top in the Y-key chat —
+ *     top si_hud_scoreboard_top (6) scorers, a divider line, then your own
+ *     score + rank ("[得分榜] #1 粟藜 1234分 / ---- / 你的得分：456分（第 12 名）").
+ *     ALSO auto-broadcast per-player every si_hud_scoreboard_interval (45s,
+ *     0=off; interval change needs reload). Backed by session total
+ *     g_iTotalScore (all kill points incl. commons), reset per round/map end/disconnect.
+ *
+ * Changelog v1.7.5:
+ *   - Settle card is now a text tally (user): "† 小僵尸 ×3、☠ 特感 ×2、+430分"
+ *     — commons first, zero-count entries omitted, total = kills + streak bonus.
+ *
+ * Changelog v1.7.4:
+ *   - Icon row rework (user): SI skulls (☠) and common daggers (†) counted
+ *     SEPARATELY (3 commons + 1 SI → "☠ †††", not 4 skulls); one row of up
+ *     to si_hud_icons_max (15) icons, over that shows "+N" (not "N+x").
+ *     Commons now also grow the icon row (two-line display like the SI card).
+ *   - Award tiers now trigger on the SETTLED SCORE, not the kill count
+ *     (si_hud_streak_score_l2..l15, defaults 200/400/700/1100/1500/2000):
+ *     common spam (5-10 pts) cannot climb tiers; a single Tank/Witch kill
+ *     (500+) lands in tier 4. Streak count is still shown on the settle
+ *     card. Keep: common scoring 5/10, commons refresh the window (user).
+ *
+ * Changelog v1.7.3:
+ *   - Common infected fully taken over: kills now score (5 base + 5 headshot,
+ *     cvar si_hud_bf_points_common/_common_hs), stack the streak (→ the
+ *     streak window and the award settle), and show a short center line
+ *     (si_hud_common_time 1.0s): "† 小僵尸 +5" (U+2020 dagger marks commons;
+ *     headshot shows ★ U+2605 — same "gold" marker as the SI card, center
+ *     text has no color codes). No chat feed (spam). Headshot kill sound
+ *     unchanged. Streak stack logic extracted to StackStreakKill().
+ *
+ * Changelog v1.7.2:
+ *   - User tuning: streak window si_hud_bf_window 4.0 → 10.0 (the streak-
+ *     interrupt timeout); kill card stays at si_hud_killcard_time 2.0.
+ *   - Scoring overhaul (BF1/BF5 reference): per-class base points by
+ *     difficulty + max HP (Boomer/Smoker 75, Hunter/Jockey 100, Spitter 125,
+ *     Charger 150, Witch/Tank 500) + headshot +50 / melee +50 / full-HP +50
+ *     (SI never hurt before dying — tracked via player_hurt, reset on
+ *     player_spawn/round_end/map end). Tank now gets bonuses too; Witch
+ *     gets headshot/melee (no full-HP: player_hurt never fires for NPCs).
+ *   - Streak settle display (BF1 multi-kill bonus): when the window closes
+ *     with streak >= 2, alongside the award sound the killer sees
+ *     "☠☠ 连杀结算 ×3 +430" (accumulated score + streak bonus
+ *     +30/+50/+100 for 2-3/4-5/6+) for 2s on the center channel.
+ *   - Volume: si_hud_streak_sound_volume 0.9 → 1.0; all six award mp3s
+ *     re-mastered to uniform loudness (loudnorm mean ≈ -15 dB, previously
+ *     -15 to -26 dB) and re-shipped as bf_award_*.mp3 (new names force
+ *     clients to re-download; old bf_streak_* files deleted).
+ *
+ * Changelog v1.7.1:
+ *   - User decision: the kill card leaves PrintHintText for good. Banner +
+ *     card merge into ONE two-line PrintCenterText message (BF5-style:
+ *     "☠☠☠ 爆头击杀 +150" over "[M16] ☠ HUNTER 猎人"), shown for
+ *     si_hud_killcard_time (2.0s) then cleared with " " — the center
+ *     channel has no shadow box, no priming bug, and clears instantly.
+ *     The hint channel is a dead end on L4D2: ~10s engine display (NOT the
+ *     ~4s of CS:GO) that cannot be shortened without the "" purge that
+ *     garbles the next CJK hint. (HudMsg/ShowHudText/game_text are dead
+ *     too — L4D2 client font/splitscreen bugs, AM thread p=2792713.
+ *     KeyHintText shows nothing on this build either.)
+ *   - Dropped the "(head shot)" suffix: headshots now show a GOLD ☠
+ *     (BF5-style; center text does parse \x07RRGGBB colors — mode 13).
+ *     The headshot point bonus already existed (si_hud_bf_points_headshot).
+ *   - si_hud_banner_time deprecated: banner + card now share one message
+ *     timed by si_hud_killcard_time (default 2.0s).
+ *   - SOUND FIX (streak award was silent): the play/precache path stripped
+ *     the .mp3 extension — L4D2 resolves bare sound names to .wav only, so
+ *     precache and playback both failed silently. Now keeps the full path
+ *     (verified pattern from bf_killfeedback v4.2.0) + SOUND_FROM_PLAYER.
+ *   - bf_streak_spotting.mp3 was mastered at -18.4dB peak (8x quieter than
+ *     the other awards) — re-mastered to -1.6dB and shipped as
+ *     bf_streak_spotting_v2.mp3 (new name so clients re-download it).
+ *
  * Changelog v1.7.0:
  *   - REAL FIX (user retested v1.6.9: garble STILL there, ~10s straight):
  *     the "" purge was the root cause all along. PrintHintText("") destroys
@@ -184,7 +370,7 @@
 #include <sdktools>
 #include <sdkhooks>
 
-#define PLUGIN_VERSION "1.7.0"
+#define PLUGIN_VERSION "1.7.22"
 
 // ============================================================================
 // ConVar handles
@@ -198,13 +384,47 @@ ConVar g_cvChatEnable;
 ConVar g_cvKillHintEnable;
 ConVar g_cvKillCardEnable;
 ConVar g_cvKillCardTime;
-ConVar g_cvBannerTime;
 ConVar g_cvBFWindow;
-ConVar g_cvBFPointsSI;
+ConVar g_cvBFPointsSmoker;
+ConVar g_cvBFPointsBoomer;
+ConVar g_cvBFPointsHunter;
+ConVar g_cvBFPointsJockey;
+ConVar g_cvBFPointsSpitter;
+ConVar g_cvBFPointsCharger;
 ConVar g_cvBFPointsHeadshot;
 ConVar g_cvBFPointsMelee;
 ConVar g_cvBFPointsTank;
 ConVar g_cvBFPointsWitch;
+ConVar g_cvBFFullHP;
+ConVar g_cvStreakBonus2;
+ConVar g_cvStreakBonus4;
+ConVar g_cvStreakBonus6;
+ConVar g_cvCommonEnable;
+ConVar g_cvCommonTime;
+ConVar g_cvBFPointsCommon;
+ConVar g_cvBFPointsCommonHS;
+ConVar g_cvIconsMax;
+// v1.7.16: BF-style damage points — weapon-class damage multipliers
+ConVar g_cvDamageEnable;
+ConVar g_cvDamageCoeff;
+ConVar g_cvDamageCoeffCommon;
+ConVar g_cvDmgMultAR;
+ConVar g_cvDmgMultSMG;
+ConVar g_cvDmgMultMagnum;
+ConVar g_cvDmgMultMelee;
+ConVar g_cvDmgMultPump;
+ConVar g_cvDmgMultAuto;
+ConVar g_cvDmgMultSniper;
+ConVar g_cvDmgMultOther;
+ConVar g_cvStreakScoreL2;
+ConVar g_cvStreakScoreL4;
+ConVar g_cvStreakScoreL6;
+ConVar g_cvStreakScoreL9;
+ConVar g_cvStreakScoreL12;
+ConVar g_cvStreakScoreL15;
+ConVar g_cvScoreboardEnable;
+ConVar g_cvScoreboardTop;
+ConVar g_cvScoreboardInterval;
 ConVar g_cvSoundSI;
 ConVar g_cvSoundHeadshot;
 ConVar g_cvSoundTank;
@@ -235,10 +455,21 @@ float     g_fLastKillSoundTime[MAXPLAYERS + 1];       // sound cooldown
 int       g_iKillStreak[MAXPLAYERS + 1];              // BF banner: kills in current streak
 int       g_iStreakScore[MAXPLAYERS + 1];             // BF banner: rolling score in current streak (v1.6.7)
 float     g_fLastStreakKillTime[MAXPLAYERS + 1];      // BF banner: last streak-kill time
+int       g_iCommonStreak[MAXPLAYERS + 1];            // v1.7.4: common streak count (separate icons from SI skulls, shared window)
+int       g_iTotalScore[MAXPLAYERS + 1];              // v1.7.6: session total score (scoreboard; resets per round)
+int       g_iSIKills[MAXPLAYERS + 1];                 // v1.7.7: session SI/Witch/Tank kills
+int       g_iDeaths[MAXPLAYERS + 1];                  // v1.7.7: survivor deaths
+int       g_iFFDamage[MAXPLAYERS + 1];                // v1.7.7: friendly-fire damage dealt
+int       g_iBlacked[MAXPLAYERS + 1];                 // v1.7.7: killed by a teammate (被黑)
+bool      g_bMapEndBroadcasted;                        // v1.7.9: map-end scoreboard already broadcast
+float     g_fSIHurtAt[MAXPLAYERS + 1];                // v1.7.2: last hurt time per SI (0.0 = untouched → full-HP kill bonus)
 ArrayList g_hHurtVictims[MAXPLAYERS + 1];             // per-client victims hit this frame (AoE batch)
 bool      g_bFrameQueued[MAXPLAYERS + 1];             // per-client: RequestFrame already pending
-bool      g_bKillCardQueued[MAXPLAYERS + 1];          // per-client: kill card frame pending
-char      g_sKillCardText[MAXPLAYERS + 1][192];       // per-client: kill card text (shown next frame)
+// v1.7.20: damage points shown in the hit-area HP display — indexed by
+// ENTITY index (covers SI client indexes AND the NPC Witch entity, both
+// ≤ MaxEdicts). Accumulated per hurt event, consumed (zeroed) by the
+// per-frame HP display. Totals only, no streak/chat — see changelog.
+int       g_iDmgPts[2048];
 
 // ============================================================================
 // Plugin Info
@@ -286,29 +517,119 @@ public void OnPluginStart()
         "PrintCenterText kill banner for attacker (☠ skulls + type + points).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     g_cvKillCardEnable = CreateConVar("si_hud_killcard_enable", "1",
-        "Kill card on PrintHintText (lower-center shadow box): [weapon] ☠ SI name. Natural fade-out only (no active clear — v1.6.4).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+        "Kill card line (second line of the center kill feedback, v1.7.1): [weapon] ☠ SI name (gold ☠ on headshot).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     g_cvKillCardTime = CreateConVar("si_hud_killcard_time", "2.0",
-        "DEPRECATED (v1.7.0): the engine hint duration is fixed at ~4s and cannot be shortened. Kept so existing cfg files don't error; has no effect.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+        "Kill feedback (banner + kill card, one center message) display duration in seconds before the center clear.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
-    g_cvBannerTime = CreateConVar("si_hud_banner_time", "1.0",
-        "Center banner (skulls + points) display duration in seconds before PrintCenterText clear.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    CreateConVar("si_hud_banner_time", "1.0",
+        "DEPRECATED (v1.7.1): banner and kill card share one message timed by si_hud_killcard_time. Kept so cfg files don't error.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
     // ── BF-style kill banner (skulls + points) ─────────
 
-    g_cvBFWindow = CreateConVar("si_hud_bf_window", "4.0",
-        "Kill streak window (s): kills within this time stack side-by-side skulls.", FCVAR_NOTIFY, true, 1.0, true, 10.0);
+    g_cvBFWindow = CreateConVar("si_hud_bf_window", "6.0",
+        "Kill streak window (s) — the streak-interrupt timeout: kills within this time stack skulls; when it closes the streak settles (award sound + settle score).", FCVAR_NOTIFY, true, 1.0, true, 30.0);
 
-    g_cvBFPointsSI = CreateConVar("si_hud_bf_points_si", "100",
-        "BF banner points: SI kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsHeadshot = CreateConVar("si_hud_bf_points_headshot", "50",
-        "BF banner points: headshot bonus.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsMelee = CreateConVar("si_hud_bf_points_melee", "50",
-        "BF banner points: melee bonus.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    // v1.7.2: per-class base points (difficulty + max HP) — BF1/BF5-style
+    // scoring. Boomer/Smoker are easy kills, Charger/Spitter are high-value.
+    g_cvBFPointsSmoker = CreateConVar("si_hud_bf_points_smoker", "75",
+        "BF banner points: Smoker kill (250 HP, easy).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsBoomer = CreateConVar("si_hud_bf_points_boomer", "75",
+        "BF banner points: Boomer kill (50 HP, easiest).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsHunter = CreateConVar("si_hud_bf_points_hunter", "100",
+        "BF banner points: Hunter kill (325 HP).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsJockey = CreateConVar("si_hud_bf_points_jockey", "100",
+        "BF banner points: Jockey kill (325 HP).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsSpitter = CreateConVar("si_hud_bf_points_spitter", "125",
+        "BF banner points: Spitter kill (100 HP but high threat / hard to reach).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsCharger = CreateConVar("si_hud_bf_points_charger", "150",
+        "BF banner points: Charger kill (600 HP, highest threat SI).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
     g_cvBFPointsTank = CreateConVar("si_hud_bf_points_tank", "500",
         "BF banner points: Tank kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
     g_cvBFPointsWitch = CreateConVar("si_hud_bf_points_witch", "500",
         "BF banner points: Witch kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsHeadshot = CreateConVar("si_hud_bf_points_headshot", "50",
+        "BF banner points: headshot bonus (BF1: +10, scaled to L4D2).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsMelee = CreateConVar("si_hud_bf_points_melee", "50",
+        "BF banner points: melee bonus.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFFullHP = CreateConVar("si_hud_bf_points_fullhp", "50",
+        "BF banner points: full-HP kill bonus — SI that was never hurt before dying.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+
+    // v1.7.2: streak settle bonus (BF1 double/triple/multi-kill bonus, +30/+50/+100)
+    g_cvStreakBonus2 = CreateConVar("si_hud_streak_bonus_l2", "30",
+        "Streak settle bonus: streak 2-3 (BF1 Double Kill).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvStreakBonus4 = CreateConVar("si_hud_streak_bonus_l4", "50",
+        "Streak settle bonus: streak 4-5 (BF1 Triple Kill).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvStreakBonus6 = CreateConVar("si_hud_streak_bonus_l6", "100",
+        "Streak settle bonus: streak 6+ (BF1 Multi Kill).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+
+    // v1.7.3: common infected fully taken over — they score, stack the
+    // streak (and the award settle), and show a center kill line (†).
+    g_cvCommonEnable = CreateConVar("si_hud_common_enable", "1",
+        "Common infected kill line on the center channel (†).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvCommonTime = CreateConVar("si_hud_common_time", "1.0",
+        "Common infected kill line display duration in seconds (shorter than the SI card — no spam).", FCVAR_NOTIFY, true, 0.2, true, 5.0);
+    g_cvBFPointsCommon = CreateConVar("si_hud_bf_points_common", "5",
+        "BF banner points: common infected kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsCommonHS = CreateConVar("si_hud_bf_points_common_hs", "5",
+        "BF banner points: common infected headshot bonus (total = base + this).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+
+    // v1.7.4: icon row cap — SI skulls (☠) and common daggers (†) counted
+    // separately, one row of up to this many icons; over it shows "+N".
+    g_cvIconsMax = CreateConVar("si_hud_icons_max", "15",
+        "Max kill icons on one line (☠ skulls + † daggers, separate segments); over this shows +N.", FCVAR_NOTIFY, true, 1.0, true, 30.0);
+
+    // v1.7.16: BF-style damage points — hurting an SI (incl. Tank) earns
+    // score, so tank/charger fights are fair (not just the final killer).
+    // Damage points go to the scoreboard total only — NOT the streak
+    // (award = kill streaks), NOT the chat (spam). Witch excluded (NPC
+    // Witch fires no player_hurt); commons excluded (no player_hurt).
+    g_cvDamageEnable = CreateConVar("si_hud_bf_damage_enable", "1",
+        "Damage points: earn score for damaging SI (incl. Tank).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvDamageCoeff = CreateConVar("si_hud_bf_damage_coeff", "1.0",
+        "Damage points coefficient: points = dmg_health × weapon mult × this (1.0 = 1 damage = 1 point; only the listed weapons deviate from 1.0).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDamageCoeffCommon = CreateConVar("si_hud_bf_damage_coeff_common", "1.0",
+        "Common infected damage points coefficient (infected_hurt): amount × weapon mult × this. NOTE: commons are unlimited — at 1.0, mowing zombie hordes out-scores SI kills (melee 1.75 × 50hp = 87/一刀 vs 击杀 5 分); drop to ~0.1 if the board floods.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDmgMultAR = CreateConVar("si_hud_bf_damage_mult_ar", "1.0",
+        "Damage mult: assault rifles (rifle/ak47/desert/sg552).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDmgMultSMG = CreateConVar("si_hud_bf_damage_mult_smg", "1.5",
+        "Damage mult: SMGs (smg/silenced/mp5).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDmgMultMagnum = CreateConVar("si_hud_bf_damage_mult_magnum", "1.75",
+        "Damage mult: magnum pistol.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDmgMultMelee = CreateConVar("si_hud_bf_damage_mult_melee", "1.75",
+        "Damage mult: melee weapons.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDmgMultPump = CreateConVar("si_hud_bf_damage_mult_pump", "1.5",
+        "Damage mult: pump shotgun.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDmgMultAuto = CreateConVar("si_hud_bf_damage_mult_auto", "0.75",
+        "Damage mult: auto shotguns (autoshotgun/spas).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDmgMultSniper = CreateConVar("si_hud_bf_damage_mult_sniper", "0.75",
+        "Damage mult: snipers (hunting/military/awp/scout).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDmgMultOther = CreateConVar("si_hud_bf_damage_mult_other", "1.0",
+        "Damage mult: everything else (pistol etc.).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+
+    // v1.7.4: award tiers trigger on the SETTLED STREAK SCORE (not kill
+    // count) — commons score little, so spamming zombies cannot cheaply
+    // climb the tiers; a single Tank kill (500) lands in tier 4.
+    g_cvStreakScoreL2 = CreateConVar("si_hud_streak_score_l2", "200",
+        "Award tier score threshold: 200+ → spotting (was 2-3 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    g_cvStreakScoreL4 = CreateConVar("si_hud_streak_score_l4", "400",
+        "Award tier score threshold: 400+ → purchase (was 4-5 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    g_cvStreakScoreL6 = CreateConVar("si_hud_streak_score_l6", "700",
+        "Award tier score threshold: 700+ → war_bonds (was 6-8 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    g_cvStreakScoreL9 = CreateConVar("si_hud_streak_score_l9", "1100",
+        "Award tier score threshold: 1100+ → dogtag (was 9-11 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    g_cvStreakScoreL12 = CreateConVar("si_hud_streak_score_l12", "1500",
+        "Award tier score threshold: 1500+ → medal (was 12-14 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    g_cvStreakScoreL15 = CreateConVar("si_hud_streak_score_l15", "2000",
+        "Award tier score threshold: 2000+ → rankup (was 15+ streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+
+    // v1.7.6: Y-key chat scoreboard — !rank / !score / !top
+    g_cvScoreboardEnable = CreateConVar("si_hud_scoreboard_enable", "1",
+        "Enable the chat scoreboard (!rank / !score / !top).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvScoreboardTop = CreateConVar("si_hud_scoreboard_top", "6",
+        "Scoreboard shows this many top entries, then a divider and your own score.", FCVAR_NOTIFY, true, 1.0, true, 24.0);
+    g_cvScoreboardInterval = CreateConVar("si_hud_scoreboard_interval", "45.0",
+        "Auto-broadcast the scoreboard to every survivor every N seconds (0=off).", FCVAR_NOTIFY, true, 0.0, true, 600.0);
 
     // ── Kill sounds (all empty = off by default) ────────
 
@@ -341,20 +662,23 @@ public void OnPluginStart()
     g_cvStreakEnable = CreateConVar("si_hud_streak_sound_enable", "1",
         "Play the BF1 award sound when a kill streak settles (streak >= 2).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvStreakVol = CreateConVar("si_hud_streak_sound_volume", "0.9",
+    g_cvStreakVol = CreateConVar("si_hud_streak_sound_volume", "1.0",
         "Streak award sound volume, independent of si_hud_sound_volume.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvStreakSnd2 = CreateConVar("si_hud_streak_sound_l2", "battlefield/bf_streak_spotting.mp3",
+    // v1.7.2: all six awards re-mastered to a uniform loudness (loudnorm,
+    // mean ≈ -15 dB) and re-shipped under the bf_award_* names so clients
+    // are forced to re-download them (old bf_streak_* files deleted).
+    g_cvStreakSnd2 = CreateConVar("si_hud_streak_sound_l2", "battlefield/bf_award_spotting.mp3",
         "Streak 2-3 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd4 = CreateConVar("si_hud_streak_sound_l4", "battlefield/bf_streak_purchase.mp3",
+    g_cvStreakSnd4 = CreateConVar("si_hud_streak_sound_l4", "battlefield/bf_award_purchase.mp3",
         "Streak 4-5 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd6 = CreateConVar("si_hud_streak_sound_l6", "battlefield/bf_streak_war_bonds.mp3",
+    g_cvStreakSnd6 = CreateConVar("si_hud_streak_sound_l6", "battlefield/bf_award_warbonds.mp3",
         "Streak 6-8 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd9 = CreateConVar("si_hud_streak_sound_l9", "battlefield/bf_streak_dogtag.mp3",
+    g_cvStreakSnd9 = CreateConVar("si_hud_streak_sound_l9", "battlefield/bf_award_dogtag.mp3",
         "Streak 9-11 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd12 = CreateConVar("si_hud_streak_sound_l12", "battlefield/bf_streak_medal.mp3",
+    g_cvStreakSnd12 = CreateConVar("si_hud_streak_sound_l12", "battlefield/bf_award_medal.mp3",
         "Streak 12-14 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd15 = CreateConVar("si_hud_streak_sound_l15", "battlefield/bf_streak_rankup.mp3",
+    g_cvStreakSnd15 = CreateConVar("si_hud_streak_sound_l15", "battlefield/bf_award_rankup.mp3",
         "Streak 15+ award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
 
     AutoExecConfig(true, "l4d2_si_hud");
@@ -362,9 +686,165 @@ public void OnPluginStart()
     // ── Events ──────────────────────────────────────────
 
     HookEvent("player_hurt",    Event_PlayerHurt);
+    HookEvent("player_spawn",   Event_PlayerSpawn);
     HookEvent("player_death",   Event_PlayerDeath);
     HookEvent("infected_death", Event_InfectedDeath);
+    HookEvent("infected_hurt",  Event_InfectedHurt);    // v1.7.16: common damage points
+    HookEvent("witch_spawn",    Event_WitchSpawn);      // v1.7.16: witch damage points
     HookEvent("round_end",      Event_RoundEnd);
+    HookEvent("map_transition", Event_MapTransition);   // v1.7.9
+
+    RegAdminCmd("sm_streak_test", Cmd_StreakTest, ADMFLAG_ROOT,
+        "sm_streak_test — debug: play the L2 streak sound + the SI kill sound directly");
+
+    // v1.7.6: chat scoreboard (Y key) — !rank / !score / !top
+    RegConsoleCmd("sm_rank", Cmd_Scoreboard, "Show the scoreboard (top + your rank).");
+    RegConsoleCmd("sm_score", Cmd_Scoreboard, "Show the scoreboard (top + your rank).");
+    RegConsoleCmd("sm_top", Cmd_Scoreboard, "Show the scoreboard (top + your rank).");
+
+    // v1.7.6: periodic per-player broadcast (45s default; 0=off via cvar
+    // check inside the callback; interval change needs plugin reload)
+    CreateTimer(45.0, Timer_ScoreboardBroadcast, INVALID_HANDLE, TIMER_REPEAT);
+}
+
+// Debug (v1.7.1): play the streak award sound directly, bypassing the whole
+// streak logic, so a silent streak can be bisected: if this is silent the
+// play/precache path is broken; if it plays, the streak settle logic is.
+public Action Cmd_StreakTest(int client, int args)
+{
+    if (client < 1 || !IsClientInGame(client))
+        return Plugin_Handled;
+
+    char l2[PLATFORM_MAX_PATH], si[PLATFORM_MAX_PATH];
+    g_cvStreakSnd2.GetString(l2, sizeof(l2));
+    g_cvSoundSI.GetString(si, sizeof(si));
+
+    PlayStreakSound(client, l2);
+    PlayClientSound(client, si);
+
+    LogMessage("[streak_test] L2='%s' SI='%s' emitted to %N", l2, si, client);
+    PrintToChat(client, "\x04[streak test]\x01 L2='%s'  SI='%s'", l2, si);
+    return Plugin_Handled;
+}
+
+// ============================================================================
+// v1.7.6: chat scoreboard — !rank / !score / !top (Y key)
+// ============================================================================
+
+// v1.7.9: force-broadcast the scoreboard to every survivor (map end).
+void BroadcastScoreboard()
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && GetClientTeam(i) == 2)
+            ShowScoreboardTo(i);
+    }
+}
+
+// v1.7.6: periodic broadcast — every player gets the scoreboard to their
+// own chat every si_hud_scoreboard_interval seconds (no cross-player spam).
+public Action Timer_ScoreboardBroadcast(Handle timer)
+{
+    if (!g_cvEnable.BoolValue || !g_cvScoreboardEnable.BoolValue)
+        return Plugin_Continue;
+    if (g_cvScoreboardInterval.FloatValue <= 0.0)
+        return Plugin_Continue;
+
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && GetClientTeam(i) == 2)
+            ShowScoreboardTo(i);
+    }
+    return Plugin_Continue;
+}
+
+public Action Cmd_Scoreboard(int client, int args)
+{
+    if (client < 1 || !IsClientInGame(client))
+        return Plugin_Handled;
+    if (!g_cvEnable.BoolValue || !g_cvScoreboardEnable.BoolValue)
+        return Plugin_Handled;
+
+    ShowScoreboardTo(client);
+    return Plugin_Handled;
+}
+
+void ShowScoreboardTo(int client)
+{
+    int count = 0;
+    int clients[MAXPLAYERS + 1];
+    int scores[MAXPLAYERS + 1];
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && GetClientTeam(i) == 2 && g_iTotalScore[i] > 0)
+        {
+            clients[count] = i;
+            scores[count] = g_iTotalScore[i];
+            count++;
+        }
+    }
+
+    if (count == 0)
+    {
+        PrintToChat(client, "\x04[得分榜]\x01 还没有得分，杀点特感吧！");
+        return;
+    }
+
+    // insertion sort, descending by score (teams ≤ 24 players)
+    for (int i = 1; i < count; i++)
+    {
+        int keyScore = scores[i];
+        int keyClient = clients[i];
+        int j = i - 1;
+        while (j >= 0 && scores[j] < keyScore)
+        {
+            scores[j + 1] = scores[j];
+            clients[j + 1] = clients[j];
+            j--;
+        }
+        scores[j + 1] = keyScore;
+        clients[j + 1] = keyClient;
+    }
+
+    int top = g_cvScoreboardTop.IntValue;
+    if (top > count) top = count;
+
+    // v1.7.14: compact single-line rows — the L4D2 chat font is proportional
+    // (Verdana), so space-padded columns can never align; label-based rows
+    // look clean in any font. Colors are fine now (no alignment to break).
+    PrintToChat(client, "\x04[得分榜]\x01 ------------------------------------");
+
+    char name[64];
+    for (int k = 0; k < top; k++)
+    {
+        int c = clients[k];
+        GetClientName(c, name, sizeof(name));
+        // v1.7.15: green player name; strip control chars from the name so
+        // a crafted name cannot inject color codes / newlines into chat.
+        for (int i = 0; name[i] != '\0'; i++)
+        {
+            if (name[i] < 0x20)
+                name[i] = '?';
+        }
+        PrintToChat(client, "\x04[得分榜]\x01 \x05#%d\x01 \x03%s\x01：\x03%d分\x01 特%d 死%d 友伤%d 被黑%d",
+            k + 1, name, scores[k],
+            g_iSIKills[c], g_iDeaths[c], g_iFFDamage[c], g_iBlacked[c]);
+    }
+
+    PrintToChat(client, "\x04[得分榜]\x01 ------------------------------------");
+
+    // v1.7.6 (user): divider line, then own stats (with rank)
+    int myRank = -1;
+    for (int k = 0; k < count; k++)
+    {
+        if (clients[k] == client) { myRank = k; break; }
+    }
+    if (myRank >= 0)
+        PrintToChat(client, "\x04[得分榜]\x01 你的战绩：\x03%d分\x01 特%d 死%d 友伤%d 被黑%d（第 \x05%d\x01 名）",
+            scores[myRank], g_iSIKills[client], g_iDeaths[client],
+            g_iFFDamage[client], g_iBlacked[client], myRank + 1);
+    else
+        PrintToChat(client, "\x04[得分榜]\x01 你的战绩：0分");
 }
 
 // ============================================================================
@@ -373,6 +853,8 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
+    g_bMapEndBroadcasted = false;          // v1.7.9
+
     // Precache configured sounds
     PrecacheCvarSound(g_cvSoundSI);
     PrecacheCvarSound(g_cvSoundHeadshot);
@@ -393,6 +875,14 @@ public void OnMapStart()
 
 public void OnMapEnd()
 {
+    // v1.7.9: fallback broadcast for map changes that never fired
+    // map_transition (vote / changelevel / wipe-mapchange paths).
+    if (g_cvEnable.BoolValue && g_cvScoreboardEnable.BoolValue && !g_bMapEndBroadcasted)
+    {
+        BroadcastScoreboard();
+        g_bMapEndBroadcasted = true;
+    }
+
     // HP hide timers are TIMER_FLAG_NO_MAPCHANGE — auto-cleaned on map end.
     // Clean up per-client AoE batch state and streak settle timers
     for (int i = 1; i <= MaxClients; i++)
@@ -401,9 +891,23 @@ public void OnMapEnd()
         delete g_hHurtVictims[i];
         KillStreakTimer(i);
         g_iKillStreak[i] = 0;
+        g_iCommonStreak[i] = 0;            // v1.7.4
         g_iStreakScore[i] = 0;
+        g_iTotalScore[i] = 0;              // v1.7.6: scoreboard resets per round
+        g_iSIKills[i] = 0;                 // v1.7.7
+        g_iDeaths[i] = 0;
+        g_iFFDamage[i] = 0;
+        g_iBlacked[i] = 0;
         g_fLastStreakKillTime[i] = 0.0;
+        g_fSIHurtAt[i] = 0.0;              // v1.7.2: full-HP bonus state
     }
+    // v1.7.20: damage-point display buffer is entity-indexed — clear the
+    // WHOLE array (SI client indexes + the Witch entity range) so a victim
+    // that died mid-frame (its pts were never displayed) cannot leak into
+    // the next round's display.
+    for (int i = 0; i < 2048; i++)
+        g_iDmgPts[i] = 0;
+    g_bMapEndBroadcasted = false;          // v1.7.9: fresh map, fresh flag
 }
 
 // ============================================================================
@@ -413,12 +917,31 @@ public void OnMapEnd()
 
 public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 {
+    // v1.7.9: only the streak state resets here — the scoreboard stats
+    // (score / SI kills / deaths / FF / blacked) survive until MAP end,
+    // so a wipe-restart does not wipe the round's tally.
     for (int i = 1; i <= MaxClients; i++)
     {
         KillStreakTimer(i);
         g_iKillStreak[i] = 0;
+        g_iCommonStreak[i] = 0;            // v1.7.4
         g_iStreakScore[i] = 0;
         g_fLastStreakKillTime[i] = 0.0;
+        g_fSIHurtAt[i] = 0.0;              // v1.7.2
+    }
+    return Plugin_Continue;
+}
+
+// v1.7.9: checkpoint/finale finish — force ONE scoreboard broadcast before
+// the map ends (the last chance to see this map's tally).
+public Action Event_MapTransition(Event event, const char[] name, bool dontBroadcast)
+{
+    if (!g_cvEnable.BoolValue || !g_cvScoreboardEnable.BoolValue)
+        return Plugin_Continue;
+    if (!g_bMapEndBroadcasted)
+    {
+        BroadcastScoreboard();
+        g_bMapEndBroadcasted = true;
     }
     return Plugin_Continue;
 }
@@ -431,12 +954,18 @@ public void OnClientDisconnect(int client)
 {
     g_fLastKillSoundTime[client] = 0.0;
     g_iKillStreak[client] = 0;
+    g_iCommonStreak[client] = 0;           // v1.7.4
     g_iStreakScore[client] = 0;
+    g_iTotalScore[client] = 0;             // v1.7.6
+    g_iSIKills[client] = 0;                // v1.7.7
+    g_iDeaths[client] = 0;
+    g_iFFDamage[client] = 0;
+    g_iBlacked[client] = 0;
     g_fLastStreakKillTime[client] = 0.0;
+    g_fSIHurtAt[client] = 0.0;             // v1.7.2
     KillHPHideTimer(client);
     KillStreakTimer(client);
     g_bFrameQueued[client] = false;
-    g_bKillCardQueued[client] = false;
     delete g_hHurtVictims[client];
 }
 
@@ -444,8 +973,90 @@ public void OnClientDisconnect(int client)
 // Event: player_hurt — immediate HP refresh for the attacker
 // ============================================================================
 
+// v1.7.16: weapon-class damage multiplier for the damage points. Kill
+// points do NOT scale (user decision) — only the damage score uses this.
+// AR 1.0 / SMG 1.5 / magnum+melee 1.75 / pump 1.5 / auto shotguns + snipers
+// 0.75 / everything else (pistol etc.) 1.0. Weak guns pay more per HP.
+float GetDamageMult(int client)
+{
+    int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+    if (weapon < 1 || !IsValidEntity(weapon))
+        return g_cvDmgMultOther.FloatValue;
+
+    char cls[32];
+    GetEdictClassname(weapon, cls, sizeof(cls));
+    if (StrEqual(cls, "weapon_rifle") || StrEqual(cls, "weapon_rifle_ak47")
+        || StrEqual(cls, "weapon_rifle_desert") || StrEqual(cls, "weapon_rifle_sg552"))
+        return g_cvDmgMultAR.FloatValue;
+    if (StrEqual(cls, "weapon_smg") || StrEqual(cls, "weapon_smg_silenced")
+        || StrEqual(cls, "weapon_smg_mp5"))
+        return g_cvDmgMultSMG.FloatValue;
+    if (StrEqual(cls, "weapon_pistol_magnum"))
+        return g_cvDmgMultMagnum.FloatValue;
+    if (StrEqual(cls, "weapon_melee"))
+        return g_cvDmgMultMelee.FloatValue;
+    if (StrEqual(cls, "weapon_pumpshotgun"))
+        return g_cvDmgMultPump.FloatValue;
+    if (StrEqual(cls, "weapon_autoshotgun") || StrEqual(cls, "weapon_shotgun_spas"))
+        return g_cvDmgMultAuto.FloatValue;
+    if (StrEqual(cls, "weapon_hunting_rifle") || StrEqual(cls, "weapon_sniper_military")
+        || StrEqual(cls, "weapon_sniper_awp") || StrEqual(cls, "weapon_sniper_scout"))
+        return g_cvDmgMultSniper.FloatValue;
+    return g_cvDmgMultOther.FloatValue;
+}
+
 public Action Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 {
+    // v1.7.2: track SI hurt time for the full-HP kill bonus — runs
+    // independent of the HP display gate below (the bonus must not stop
+    // working just because the HP HUD is disabled).
+    int hurtVictim = GetClientOfUserId(event.GetInt("userid"));
+    if (g_cvEnable.BoolValue
+        && hurtVictim >= 1 && hurtVictim <= MaxClients
+        && IsClientInGame(hurtVictim) && GetClientTeam(hurtVictim) == 3)
+    {
+        g_fSIHurtAt[hurtVictim] = GetGameTime();
+    }
+
+    // v1.7.7: friendly-fire damage tally (survivor → survivor)
+    int ffAttacker = GetClientOfUserId(event.GetInt("attacker"));
+    if (ffAttacker >= 1 && ffAttacker <= MaxClients
+        && IsClientInGame(ffAttacker) && GetClientTeam(ffAttacker) == 2
+        && hurtVictim >= 1 && hurtVictim <= MaxClients
+        && GetClientTeam(hurtVictim) == 2)
+    {
+        g_iFFDamage[ffAttacker] += event.GetInt("dmg_health");
+    }
+
+    // v1.7.16: BF-style damage points — every survivor who damages an SI
+    // (incl. Tank) earns score, scaled by weapon class. Runs before the HP
+    // gate (damage scoring must not depend on the HP display cvar). Does
+    // NOT touch the streak (award = kill streaks) and shows no chat spam —
+    // it feeds the scoreboard total only.
+    int dmgAttacker = GetClientOfUserId(event.GetInt("attacker"));
+    if (g_cvEnable.BoolValue && g_cvDamageEnable.BoolValue
+        && dmgAttacker >= 1 && dmgAttacker <= MaxClients
+        && IsClientInGame(dmgAttacker) && GetClientTeam(dmgAttacker) == 2
+        && hurtVictim >= 1 && hurtVictim <= MaxClients
+        && IsClientInGame(hurtVictim) && GetClientTeam(hurtVictim) == 3)
+    {
+        int dmg = event.GetInt("dmg_health");
+        if (dmg > 0)
+        {
+            int pts = RoundToFloor(dmg * GetDamageMult(dmgAttacker)
+                * g_cvDamageCoeff.FloatValue);
+            if (pts > 0)
+            {
+                g_iTotalScore[dmgAttacker] += pts;
+                // v1.7.20: display copy for the hit-area HP line — only
+                // accumulated when the HP display is on (else nothing
+                // consumes it and it would go stale).
+                if (g_cvHPEnable.BoolValue)
+                    g_iDmgPts[hurtVictim] += pts;
+            }
+        }
+    }
+
     if (!g_cvEnable.BoolValue || !g_cvHPEnable.BoolValue)
         return Plugin_Continue;
 
@@ -500,6 +1111,16 @@ Action Witch_OnTakeDamage(int victim, int &attacker, int &inflictor,
     return Plugin_Continue;
 }
 
+// v1.7.2: SI (re)spawn resets the hurt tracker — a fresh SI starts as
+// "untouched" for the full-HP kill bonus.
+public Action Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+    int client = GetClientOfUserId(event.GetInt("userid"));
+    if (client >= 1 && client <= MaxClients && GetClientTeam(client) == 3)
+        g_fSIHurtAt[client] = 0.0;
+    return Plugin_Continue;
+}
+
 // ============================================================================
 // Event: player_death — SI kill feedback
 // ============================================================================
@@ -541,6 +1162,118 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
         return Plugin_Continue;
     }
 
+    // ── Branch C (v1.7.7): survivor death stats ──────
+
+    if (victim >= 1 && victim <= MaxClients
+        && IsClientInGame(victim) && GetClientTeam(victim) == 2)
+    {
+        g_iDeaths[victim]++;
+        if (attacker >= 1 && attacker <= MaxClients
+            && attacker != victim && IsClientInGame(attacker)
+            && GetClientTeam(attacker) == 2)
+        {
+            g_iBlacked[victim]++;          // 被队友击杀（被黑）
+        }
+    }
+    return Plugin_Continue;
+}
+
+// ============================================================================
+// Event: infected_hurt — common infected damage points (v1.7.16)
+// ============================================================================
+
+// v1.7.16 (user): commons' HP damage counts into the damage points too.
+// Commons fire NO player_hurt — infected_hurt is their equivalent
+// (fields: entityid / attacker / amount / type). Same rules as SI damage:
+// points = amount × weapon mult × si_hud_bf_damage_coeff_common (default
+// 1.0 = 1:1 like SI). Scoreboard total only — no streak, no chat spam.
+// WARNING in the cvar help: commons are unlimited, so at 1.0 horde-mowing
+// out-scores SI kills (melee 1.75 × ~50hp = 87 一刀 vs 击杀 5 分).
+public Action Event_InfectedHurt(Event event, const char[] name, bool dontBroadcast)
+{
+    if (!g_cvEnable.BoolValue || !g_cvDamageEnable.BoolValue)
+        return Plugin_Continue;
+
+    int attacker = GetClientOfUserId(event.GetInt("attacker"));
+    if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker))
+        return Plugin_Continue;
+    if (GetClientTeam(attacker) != 2)
+        return Plugin_Continue;
+
+    int amount = event.GetInt("amount");
+    if (amount <= 0)
+        return Plugin_Continue;
+
+    int pts = RoundToFloor(amount * GetDamageMult(attacker) * g_cvDamageCoeffCommon.FloatValue);
+    if (pts > 0)
+    {
+        g_iTotalScore[attacker] += pts;
+        // v1.7.22: BF-style hit feedback — EVERY hit shows its damage-score
+        // even without a kill (user: "只要造成伤害了，就有得分反馈"; BF1/BFV
+        // pop the damage score near the crosshair on every hit). Commons
+        // have no HP row, so the line is "† 小僵尸 +52" (damage pts only;
+        // the kill line adds the fixed kill pts → +92). Same short channel
+        // as the common kill line (common_time 1s); a same-frame kill
+        // overwrites it with the +92 kill line (death fires after hurt).
+        if (g_cvKillHintEnable.BoolValue && g_cvCommonEnable.BoolValue)
+        {
+            char msg[96];
+            Format(msg, sizeof(msg), "† 小僵尸 +%d", pts);
+            KillHPHideTimer(attacker);
+            PrintCenterText(attacker, msg);
+            g_hHPHideTimer[attacker] = CreateTimer(g_cvCommonTime.FloatValue,
+                Timer_HideHP, GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
+        }
+        // v1.7.21: display copy for the kill line — commons have NO HP
+        // display row, so their damage points surface when the kill line
+        // shows "† 小僵尸 +92" (= dmg pts + kill pts, user spec
+        // "50×1.75 + 5"). NO hp_enable gate here — consumed by the kill
+        // line, not by the HP display.
+        int entity = event.GetInt("entityid");
+        if (entity >= 1 && entity < 2048)
+            g_iDmgPts[entity] += pts;
+    }
+    return Plugin_Continue;
+}
+
+// ============================================================================
+// Event: witch_spawn — Witch damage points (v1.7.16, SDKHooks)
+// ============================================================================
+
+// The Witch is an NPC (not a player entity) — player_hurt never fires for
+// her and she is not a common, so neither event covers her. witch_spawn
+// hooks the entity with SDKHooks_OnTakeDamage; the hook lives as long as
+// the entity does (freed on kill/despawn automatically).
+public Action Event_WitchSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+    int witch = event.GetInt("entityid");
+    if (witch > 0 && IsValidEntity(witch) && IsValidEdict(witch))
+        SDKHook(witch, SDKHook_OnTakeDamage, WitchTakeDamage);
+    return Plugin_Continue;
+}
+
+public Action WitchTakeDamage(int victim, int &attacker, int &inflictor,
+                              float &damage, int &damagetype)
+{
+    if (!g_cvEnable.BoolValue || !g_cvDamageEnable.BoolValue)
+        return Plugin_Continue;
+    if (damage <= 0.0)
+        return Plugin_Continue;
+    if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker))
+        return Plugin_Continue;
+    if (GetClientTeam(attacker) != 2)
+        return Plugin_Continue;
+
+    // Same coefficient as SI (1.0 = 1:1): Witch 500 HP fully burned =
+    // ~500 pts, matching her kill score.
+    int pts = RoundToFloor(damage * GetDamageMult(attacker) * g_cvDamageCoeff.FloatValue);
+    if (pts > 0)
+    {
+        g_iTotalScore[attacker] += pts;
+        // v1.7.20: display copy for ShowWitchHP (victim = witch ENTITY idx)
+        if (g_cvHPEnable.BoolValue)
+            g_iDmgPts[victim] += pts;
+    }
     return Plugin_Continue;
 }
 
@@ -553,8 +1286,7 @@ public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroad
     if (!g_cvEnable.BoolValue)
         return Plugin_Continue;
 
-    if (!event.GetBool("headshot"))
-        return Plugin_Continue;
+    bool headshot = event.GetBool("headshot");
 
     int attacker = GetClientOfUserId(event.GetInt("attacker"));
     if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker))
@@ -562,15 +1294,54 @@ public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroad
     if (GetClientTeam(attacker) != 2)
         return Plugin_Continue;
 
-    char sound[PLATFORM_MAX_PATH];
-    g_cvSoundCommonHS.GetString(sound, sizeof(sound));
-    if (sound[0] == '\0')
-        return Plugin_Continue;
+    // v1.7.3: common infected are fully taken over — they score points,
+    // stack the streak (→ award settle), and show a center kill line.
+    // † (U+2020 dagger) marks a common kill; ★ (U+2605) marks a headshot —
+    // same as the SI card (center text has NO color codes, so "gold" is
+    // ★, verified v1.7.1). No chat feed for commons (spam).
+    int points = g_cvBFPointsCommon.IntValue;
+    if (headshot) points += g_cvBFPointsCommonHS.IntValue;
+    if (points > 0)
+        StackStreakKill(attacker, points, true);
 
-    if (!SoundCooldownOK(attacker))
-        return Plugin_Continue;
+    if (g_cvKillHintEnable.BoolValue && g_cvCommonEnable.BoolValue)
+    {
+        // v1.7.4: two-line like the SI card — icon row on top (★/† prefix
+        // on the second line marks THIS kill's headshot).
+        // v1.7.21 (user): the line shows the FULL kill score — this target's
+        // damage points (dmg × weapon mult, e.g. magnum 50hp = 87) PLUS the
+        // fixed kill points (5/10): "† 小僵尸 +92" per "50×1.75 + 5".
+        int entity = event.GetInt("entityid");
+        int dmgPts = 0;
+        if (entity >= 1 && entity < 2048)
+        {
+            dmgPts = g_iDmgPts[entity];
+            g_iDmgPts[entity] = 0;   // consumed with the kill
+        }
+        int showPts = points + dmgPts;
 
-    PlayClientSound(attacker, sound);
+        char icons[80];
+        BuildStreakIcons(icons, sizeof(icons), attacker);
+        char msg[160];
+        if (headshot)
+            Format(msg, sizeof(msg), "%s\n★ 小僵尸 +%d", icons, showPts);
+        else
+            Format(msg, sizeof(msg), "%s\n† 小僵尸 +%d", icons, showPts);
+
+        KillHPHideTimer(attacker);
+        PrintCenterText(attacker, msg);
+        g_hHPHideTimer[attacker] = CreateTimer(g_cvCommonTime.FloatValue, Timer_HideHP,
+            GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
+    }
+
+    // Headshot kill sound (existing; empty = off).
+    if (headshot)
+    {
+        char sound[PLATFORM_MAX_PATH];
+        g_cvSoundCommonHS.GetString(sound, sizeof(sound));
+        if (sound[0] != '\0' && SoundCooldownOK(attacker))
+            PlayClientSound(attacker, sound);
+    }
     return Plugin_Continue;
 }
 
@@ -643,8 +1414,16 @@ void Frame_ShowHurtVictims(any userId)
         bar[10] = '\0';
 
         char line[128];
-        Format(line, sizeof(line), "%s  [%s] %d/%d\n",
-            siName, bar, hp, maxHp);
+        // v1.7.20: append this victim's accumulated damage points (consumed
+        // here — per-frame copy, so a later display never double-counts).
+        int pts = g_iDmgPts[victim];
+        g_iDmgPts[victim] = 0;
+        if (pts > 0)
+            Format(line, sizeof(line), "%s  [%s] %d/%d +%d\n",
+                siName, bar, hp, maxHp, pts);
+        else
+            Format(line, sizeof(line), "%s  [%s] %d/%d\n",
+                siName, bar, hp, maxHp);
         StrCat(msg, sizeof(msg), line);
         shown++;
     }
@@ -694,7 +1473,15 @@ void ShowWitchHP(int client, int witch)
     bar[10] = '\0';
 
     char msg[256];
-    Format(msg, sizeof(msg), "WITCH  女巫  [%s] %d/%d\n", bar, hp, maxHp);
+    // v1.7.20: Witch damage points on the HP line (consumed like SI's).
+    int pts = g_iDmgPts[witch];
+    g_iDmgPts[witch] = 0;
+    if (pts > 0)
+        Format(msg, sizeof(msg), "WITCH  女巫  [%s] %d/%d +%d\n",
+            bar, hp, maxHp, pts);
+    else
+        Format(msg, sizeof(msg), "WITCH  女巫  [%s] %d/%d\n",
+            bar, hp, maxHp);
 
     PrintCenterText(client, msg);
     KillHPHideTimer(client);
@@ -719,10 +1506,13 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
     bool melee  = IsMeleeWeapon(weaponEnt);
     bool isTank = (IsTankOrWitch(victim) == 1);
 
-    int points = g_cvBFPointsSI.IntValue;
-    if (isTank) points = g_cvBFPointsTank.IntValue;
-    else if (headshot) points += g_cvBFPointsHeadshot.IntValue;
+    // v1.7.2: per-class base points (difficulty + max HP), plus headshot /
+    // melee / full-HP bonuses. Tank scores its class base too and DOES get
+    // the bonuses (previously skipped by the else-if branch).
+    int points = PointsForSI(victim);
+    if (headshot) points += g_cvBFPointsHeadshot.IntValue;
     if (melee) points += g_cvBFPointsMelee.IntValue;
+    if (g_fSIHurtAt[victim] == 0.0) points += g_cvBFFullHP.IntValue;
 
     // ── Sound (independent cooldown, does NOT block HUD/chat) ──
 
@@ -762,14 +1552,13 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
         PrintToChatAll(chatMsg);
     }
 
-    // ── Kill display (v1.6.4) ──
-    // Center banner (☠ skulls + points) on PrintCenterText — cleared after
-    // si_hud_killcard_time (center text has no shadow box, " " clears it).
-    // Kill card on PrintHintText (lower-center, shadow box = the BF1-style
-    // background) — NEVER actively cleared: the engine's hint is single-slot
-    // and every message resets its fixed ~4s timer, so an active "clear"
-    // (PrintHintText " ") is itself a 4s empty hint and its box lingers
-    // (v1.4.1 finding). Natural fade-out removes text + box together.
+    // ── Kill display (v1.7.1) ──
+    // ONE PrintCenterText message, two lines (BF5-style):
+    //   line 1: banner — ☠☠☠ skull row + type + rolling score (BuildBFBanner)
+    //   line 2: card   — [weapon] ☠ SI name (gold ☠ = headshot) (BuildKillCard)
+    // Shown si_hud_killcard_time then cleared with " " — the center channel
+    // has no shadow box, no priming bug, and clears instantly. The hint
+    // channel was abandoned in v1.7.1 (dead end on L4D2, see changelog).
 
     if (g_cvKillHintEnable.BoolValue)
     {
@@ -778,18 +1567,23 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
             isTank ? "坦克击杀" : headshot ? "爆头击杀" : melee ? "近战击杀" : "击杀",
             siName);
 
-        KillHPHideTimer(attacker);
-        delete g_hHurtVictims[attacker];
-        PrintCenterText(attacker, banner);
-        g_hHPHideTimer[attacker] = CreateTimer(g_cvBannerTime.FloatValue, Timer_HideHP,
-            GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
-
+        char msg[256];
         if (g_cvKillCardEnable.BoolValue)
         {
             char card[192];
             BuildKillCard(card, sizeof(card), weaponDisplay, siName, headshot);
-            QueueKillCard(attacker, card);
+            Format(msg, sizeof(msg), "%s\n%s", banner, card);
         }
+        else
+        {
+            strcopy(msg, sizeof(msg), banner);
+        }
+
+        KillHPHideTimer(attacker);
+        delete g_hHurtVictims[attacker];
+        PrintCenterText(attacker, msg);
+        g_hHPHideTimer[attacker] = CreateTimer(g_cvKillCardTime.FloatValue, Timer_HideHP,
+            GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
     }
 }
 
@@ -818,6 +1612,12 @@ void SurvivorKilledWitch(int attacker, Event event)
     char suffix[16];
     if (headshot) suffix = "  爆头";
 
+    // v1.7.2: Witch scores its base + headshot/melee bonuses (BF style).
+    // No full-HP bonus: player_hurt never fires for NPC Witch entities.
+    int points = g_cvBFPointsWitch.IntValue;
+    if (headshot) points += g_cvBFPointsHeadshot.IntValue;
+    if (IsMeleeWeapon(weaponEnt)) points += g_cvBFPointsMelee.IntValue;
+
     if (g_cvChatEnable.BoolValue)
     {
         char chatMsg[256];
@@ -827,26 +1627,31 @@ void SurvivorKilledWitch(int attacker, Event event)
         PrintToChatAll(chatMsg);
     }
 
-    // [v1.6.4] Same two-channel layout as SurvivorKilledSI.
+    // [v1.7.1] Same merged two-line layout as SurvivorKilledSI.
 
     if (g_cvKillHintEnable.BoolValue)
     {
         char banner[192];
-        BuildBFBanner(banner, sizeof(banner), attacker, g_cvBFPointsWitch.IntValue,
+        BuildBFBanner(banner, sizeof(banner), attacker, points,
             "女巫击杀", "WITCH 女巫");
 
-        KillHPHideTimer(attacker);
-        delete g_hHurtVictims[attacker];
-        PrintCenterText(attacker, banner);
-        g_hHPHideTimer[attacker] = CreateTimer(g_cvBannerTime.FloatValue, Timer_HideHP,
-            GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
-
+        char msg[256];
         if (g_cvKillCardEnable.BoolValue)
         {
             char card[192];
             BuildKillCard(card, sizeof(card), weaponDisplay, "WITCH 女巫", headshot);
-            QueueKillCard(attacker, card);
+            Format(msg, sizeof(msg), "%s\n%s", banner, card);
         }
+        else
+        {
+            strcopy(msg, sizeof(msg), banner);
+        }
+
+        KillHPHideTimer(attacker);
+        delete g_hHurtVictims[attacker];
+        PrintCenterText(attacker, msg);
+        g_hHPHideTimer[attacker] = CreateTimer(g_cvKillCardTime.FloatValue, Timer_HideHP,
+            GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
     }
 }
 
@@ -909,64 +1714,49 @@ void SISystemDeath(int victim, Event event)
 void BuildKillCard(char[] buffer, int maxlen,
                    const char[] weapon, const char[] siName, bool headshot)
 {
+    // v1.7.1: "(head shot)" suffix dropped — a headshot is now a ★ (U+2605,
+    // the closest BMP glyph to a gold star; center text has NO color codes,
+    // verified with the hud test plugin — \x07FFD700 was not parsed).
+    // The headshot point bonus is already in the banner (bf_points_headshot).
     if (headshot)
-        Format(buffer, maxlen, "[%s] ☠ %s(head shot)", weapon, siName);
+        Format(buffer, maxlen, "[%s] ★ %s", weapon, siName);
     else
         Format(buffer, maxlen, "[%s] ☠ %s", weapon, siName);
 }
 
 // ============================================================================
-// QueueKillCard — prime the hint channel, show the real card next frame.
-// The engine's hint is single-slot: every new message replaces the current
-// one and resets its fixed ~4s display timer (rapid kills refresh instantly).
-// The first hint on a freshly-purged channel renders broken (priming bug),
-// so prime with an invisible " " and show the card one frame later. Card
-// text is buffered per client so a same-frame second kill just overwrites
-// the pending card.
-// v1.7.0: NO ACTIVE CLEAR. The "" purge was the root cause of the garble —
-// it destroyed the hint display list and left the channel in its initial
-// state, so the next CJK hint (the card) always rendered garbled regardless
-// of the prime. The card now fades out naturally when the engine's fixed
-// ~4s hint timer expires; text and shadow box are one element and fade
-// together, so nothing lingers on screen.
+// Kill card — merged into the center message (v1.7.1); see BuildKillCard.
+// The PrintHintText machinery (prime/RequestFrame/queued flag) was removed
+// entirely — the hint channel is a dead end on L4D2 (see changelog).
 // ============================================================================
 
-void QueueKillCard(int client, const char[] card)
-{
-    strcopy(g_sKillCardText[client], sizeof(g_sKillCardText[]), card);
-    PrintHintText(client, " ");   // prime: invisible, activates the channel
-    if (!g_bKillCardQueued[client])
-    {
-        g_bKillCardQueued[client] = true;
-        RequestFrame(Frame_ShowKillCard, GetClientUserId(client));
-    }
-}
-
-void Frame_ShowKillCard(any userId)
-{
-    int client = GetClientOfUserId(userId);
-    g_bKillCardQueued[client] = false;
-    if (client < 1 || !IsClientInGame(client) || GetClientTeam(client) != 2)
-        return;
-    PrintHintText(client, g_sKillCardText[client]);
-}
 
 // ============================================================================
 // BF-style kill banner — "☠☠☠" skull row (one skull per kill in the streak
 // window, BF5-style side-by-side) + type line with points
 // ============================================================================
 
-void BuildBFBanner(char[] buffer, int maxlen, int client, int points,
-                   const char[] type, const char[] siName)
+// v1.7.2: one streak stack point for ALL kill sources (SI / Witch / common)
+// — common infected also build the streak and the award settle.
+// v1.7.4: SI and common counts are SEPARATE (icons are counted per type),
+// but they share one window timer, one rolling score, one settle.
+void StackStreakKill(int client, int points, bool isCommon)
 {
-    // Streak: kills inside the window stack skulls; window gap resets
+    // Streak: kills inside the window stack icons; window gap resets BOTH
     float now = GetGameTime();
     if (now - g_fLastStreakKillTime[client] > g_cvBFWindow.FloatValue)
     {
         g_iKillStreak[client] = 0;
-        g_iStreakScore[client] = 0;          // v1.6.7: rolling score resets with the streak
+        g_iCommonStreak[client] = 0;     // v1.7.4: separate count, shared window
+        g_iStreakScore[client] = 0;      // v1.6.7: rolling score resets with the streak
     }
-    g_iKillStreak[client]++;
+    if (isCommon)
+        g_iCommonStreak[client]++;
+    else
+    {
+        g_iKillStreak[client]++;
+        g_iSIKills[client]++;              // v1.7.7: scoreboard SI kill count
+    }
     g_fLastStreakKillTime[client] = now;
 
     // v1.6.7: BF1-style rolling score counter — the banner shows the
@@ -975,19 +1765,50 @@ void BuildBFBanner(char[] buffer, int maxlen, int client, int points,
     // round_end. This is the "animated score counter" feedback BF1 is known
     // for — the number visibly grows with every kill in the window.
     g_iStreakScore[client] += points;
+    g_iTotalScore[client] += points;      // v1.7.6: scoreboard accumulation
 
-    // v1.6.6: schedule the streak settle — when the window closes with
-    // streak >= 2, the killer hears the BF1 award sound for their tier.
+    // v1.6.6: schedule the streak settle — when the window closes the
+    // killer hears the BF1 award sound for their score tier.
     ScheduleStreakSettle(client);
+}
 
-    char skulls[24];
-    skulls[0] = '\0';
-    int n = g_iKillStreak[client];
-    if (n > 6) n = 6;                    // cap the row
-    for (int k = 0; k < n; k++)
-        StrCat(skulls, sizeof(skulls), "☠");   // BMP U+2620 — renders (emoji pitfall)
+// v1.7.4: one icon row, SI skulls (☠) and common daggers (†) as separate
+// segments — "3 commons + 1 SI" shows "☠ †††", NOT 4 skulls. Up to
+// si_hud_icons_max icons in the row; over that shows "+N".
+void BuildStreakIcons(char[] buffer, int maxlen, int client)
+{
+    int si = g_iKillStreak[client];
+    int cm = g_iCommonStreak[client];
+    int total = si + cm;
+    int cap = g_cvIconsMax.IntValue;
+    if (cap < 1) cap = 1;
 
-    Format(buffer, maxlen, "%s\n%s · %s  +%d", skulls, type, siName, g_iStreakScore[client]);
+    buffer[0] = '\0';
+    int shown = 0;
+    for (int k = 0; k < si && shown < cap; k++, shown++)
+        StrCat(buffer, maxlen, "☠");           // BMP U+2620 — renders
+    if (cm > 0 && shown < cap)
+        StrCat(buffer, maxlen, " ");           // segment gap: skulls | daggers
+    for (int k = 0; k < cm && shown < cap; k++, shown++)
+        StrCat(buffer, maxlen, "†");           // U+2020 dagger (user choice)
+
+    if (total > cap)
+    {
+        char over[16];
+        Format(over, sizeof(over), " +%d", total - cap);
+        StrCat(buffer, maxlen, over);
+    }
+}
+
+void BuildBFBanner(char[] buffer, int maxlen, int client, int points,
+                   const char[] type, const char[] siName)
+{
+    StackStreakKill(client, points, false);
+
+    char icons[80];
+    BuildStreakIcons(icons, sizeof(icons), client);
+
+    Format(buffer, maxlen, "%s\n%s · %s  +%d", icons, type, siName, g_iStreakScore[client]);
 }
 
 // ============================================================================
@@ -1024,27 +1845,101 @@ Action Timer_StreakSettle(Handle timer, int userId)
         return Plugin_Stop;
     }
 
-    int streak = g_iKillStreak[client];
+    int siCount = g_iKillStreak[client];       // v1.7.5: separate counts for the settle card
+    int commonCount = g_iCommonStreak[client];
+    int streak = siCount + commonCount;        // combined for the multi-kill bonus
+    int score = g_iStreakScore[client];   // v1.7.2: capture before reset — settle display
     g_iKillStreak[client] = 0;            // settle: reset for the next run
+    g_iCommonStreak[client] = 0;          // v1.7.4
     g_iStreakScore[client] = 0;           // v1.6.7: rolling score resets on settle
     g_fLastStreakKillTime[client] = 0.0;
-    if (streak < 2)
+    LogMessage("[streak] %N settle kills=%d score=%d", client, streak, score);   // debug
+    if (score <= 0)
         return Plugin_Stop;
 
+    // v1.7.4: award tiers trigger on the settled SCORE, not the kill count
+    // (commons score 5-10, so zombie spam cannot climb tiers cheaply; a
+    // single Tank/Witch kill at 500+ lands in tier 4).
     char sound[PLATFORM_MAX_PATH];
     ConVar cv;
-    if (streak >= 15)      cv = g_cvStreakSnd15;
-    else if (streak >= 12) cv = g_cvStreakSnd12;
-    else if (streak >= 9)  cv = g_cvStreakSnd9;
-    else if (streak >= 6)  cv = g_cvStreakSnd6;
-    else if (streak >= 4)  cv = g_cvStreakSnd4;
-    else                   cv = g_cvStreakSnd2;
+    if (score >= g_cvStreakScoreL15.IntValue)      cv = g_cvStreakSnd15;
+    else if (score >= g_cvStreakScoreL12.IntValue) cv = g_cvStreakSnd12;
+    else if (score >= g_cvStreakScoreL9.IntValue)  cv = g_cvStreakSnd9;
+    else if (score >= g_cvStreakScoreL6.IntValue)  cv = g_cvStreakSnd6;
+    else if (score >= g_cvStreakScoreL4.IntValue)  cv = g_cvStreakSnd4;
+    else if (score >= g_cvStreakScoreL2.IntValue)  cv = g_cvStreakSnd2;
+    else return Plugin_Stop;                       // below the lowest tier → silent
     cv.GetString(sound, sizeof(sound));
     if (sound[0] == '\0')
         return Plugin_Stop;
 
     PlayStreakSound(client, sound);
+
+    // v1.7.2: settle display — BF1-style streak score record. BF1 awards a
+    // bonus on multi-kills (Double +30 / Triple +50 / Multi +100); show the
+    // accumulated kill score + that bonus while the award sound plays.
+    int bonus;
+    if (streak >= 6)      bonus = g_cvStreakBonus6.IntValue;
+    else if (streak >= 4) bonus = g_cvStreakBonus4.IntValue;
+    else if (streak >= 2) bonus = g_cvStreakBonus2.IntValue;
+    else                  bonus = 0;
+    ShowStreakSettle(client, siCount, commonCount, score, bonus);
     return Plugin_Stop;
+}
+
+// v1.7.5 (user): settle record is a text tally —
+//   "† 小僵尸 ×3、☠ 特感 ×2、+430分"
+// Commons first (user order), zero-count entries omitted, score = kills + bonus.
+// v1.7.16 (user): shown in the killer's OWN chat box — chat lines persist,
+// so the tally stays visible for the whole award sound (the old 2s center
+// card vanished before the longer sounds ended).
+void ShowStreakSettle(int client, int siCount, int commonCount,
+                      int score, int bonus)
+{
+    int total = score + bonus;
+
+    // Center "hit" area (v1.7.19, user): the settle also flashes there for
+    // 2s. The center/HUD font HAS the icons (☠ † ×) — chat does not, so
+    // the two channels use different text: icons here, plain text in chat.
+    char cpart[128];
+    cpart[0] = '\0';
+    if (commonCount > 0)
+        Format(cpart, sizeof(cpart), "† 小僵尸 ×%d", commonCount);
+    if (siCount > 0)
+    {
+        char tmp[64];
+        Format(tmp, sizeof(tmp), "%s☠ 特感 ×%d",
+            cpart[0] != '\0' ? "、" : "", siCount);
+        StrCat(cpart, sizeof(cpart), tmp);
+    }
+    char cmsg[160];
+    if (cpart[0] != '\0')
+        Format(cmsg, sizeof(cmsg), "%s、+%d分", cpart, total);
+    else
+        Format(cmsg, sizeof(cmsg), "+%d分", total);
+    KillHPHideTimer(client);
+    PrintCenterText(client, cmsg);
+    g_hHPHideTimer[client] = CreateTimer(2.0, Timer_HideHP,
+        GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+
+    // Chat (Verdana-safe: no ☠/† — renders as "?"; × (U+00D7) also wrong
+    // per user — ASCII "x" only).
+    char parts[128];
+    parts[0] = '\0';
+    if (commonCount > 0)
+        Format(parts, sizeof(parts), "小僵尸 x%d", commonCount);
+    if (siCount > 0)
+    {
+        char tmp[64];
+        Format(tmp, sizeof(tmp), "%s特感 x%d",
+            parts[0] != '\0' ? "、" : "", siCount);
+        StrCat(parts, sizeof(parts), tmp);
+    }
+
+    if (parts[0] != '\0')
+        PrintToChat(client, "\x04[得分]\x01 连杀结算：%s、\x03+%d分\x01", parts, total);
+    else
+        PrintToChat(client, "\x04[得分]\x01 连杀结算：\x03+%d分\x01", total);
 }
 
 void PlayStreakSound(int client, const char[] sound)
@@ -1053,16 +1948,10 @@ void PlayStreakSound(int client, const char[] sound)
     if (vol <= 0.0)
         return;
 
-    char name[PLATFORM_MAX_PATH];
-    strcopy(name, sizeof(name), sound);
-    int len = strlen(name);
-    if (len > 4 && name[len - 4] == '.')
-        name[len - 4] = '\0';
-
-    // Same UI channel as kill sounds (SNDCHAN_STATIC) — never competes with
-    // game audio; only the killer hears it (EmitSoundToClient).
-    EmitSoundToClient(client, name, 0, SNDCHAN_STATIC, SNDLEVEL_NORMAL,
-        SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
+    // v1.7.1 FIX: full path (with .mp3) — bare names resolve to .wav only.
+    // SOUND_FROM_PLAYER = non-spatialized UI sound, same as bf_killfeedback.
+    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_STATIC,
+        SNDLEVEL_NORMAL, SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
 }
 
 void KillStreakTimer(int client)
@@ -1085,18 +1974,18 @@ void PrecacheCvarSound(ConVar cv)
     if (path[0] == '\0')
         return;
 
+    // v1.7.1 FIX: keep the FULL file name (with .mp3). The engine does NOT
+    // resolve a bare name to an mp3 — it looks for the .wav only, so stripping
+    // the extension silently failed precache (and playback). Verified working
+    // path (bf_killfeedback v4.2.0): PrecacheSound with the full path.
     char dl[PLATFORM_MAX_PATH];
     Format(dl, sizeof(dl), "sound/%s", path);
     AddFileToDownloadsTable(dl);
 
-    // Strip extension — engine internal lookup uses bare sound name
-    char name[PLATFORM_MAX_PATH];
-    strcopy(name, sizeof(name), path);
-    int len = strlen(name);
-    if (len > 4 && name[len-4] == '.')
-        name[len-4] = '\0';
-
-    PrecacheSound(name, true);
+    if (PrecacheSound(path, true))
+        LogMessage("[SI HUD] Precached: %s", path);
+    else
+        LogError("[SI HUD] FAILED to precache: %s — check file exists in sound/", path);
 }
 
 bool SoundCooldownOK(int client)
@@ -1124,19 +2013,31 @@ void PlayClientSound(int client, const char[] sound)
     if (vol <= 0.0)
         return;
 
-    char name[PLATFORM_MAX_PATH];
-    strcopy(name, sizeof(name), sound);
-    int len = strlen(name);
-    if (len > 4 && name[len - 4] == '.')
-        name[len - 4] = '\0';
-
-    EmitSoundToClient(client, name, 0, SNDCHAN_STATIC, SNDLEVEL_NORMAL,
-        SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
+    // v1.7.1 FIX: full path (with .mp3) — bare names resolve to .wav only.
+    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_STATIC,
+        SNDLEVEL_NORMAL, SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
 }
 
 // ============================================================================
 // SI name lookup (by m_zombieClass)
 // ============================================================================
+
+// v1.7.2: base points by zombie class (difficulty + max HP ladder).
+int PointsForSI(int client)
+{
+    int zombieClass = GetEntProp(client, Prop_Send, "m_zombieClass");
+    switch (zombieClass)
+    {
+        case 1: return g_cvBFPointsSmoker.IntValue;
+        case 2: return g_cvBFPointsBoomer.IntValue;
+        case 4: return g_cvBFPointsSpitter.IntValue;
+        case 5: return g_cvBFPointsJockey.IntValue;
+        case 6: return g_cvBFPointsCharger.IntValue;
+        case 8: return g_cvBFPointsTank.IntValue;
+        case 3: return g_cvBFPointsHunter.IntValue;
+        default: return g_cvBFPointsHunter.IntValue;
+    }
+}
 
 void GetSIName(int client, char[] buffer, int maxlen)
 {

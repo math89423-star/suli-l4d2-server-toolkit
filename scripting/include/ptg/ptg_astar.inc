@@ -544,6 +544,12 @@ stock void AStar_SnapCenter(int idx, float out[3])
         g_hAStarSnapCenters = new ArrayList(3);
     while (g_hAStarSnapCenters.Length <= idx)
     {
+        // v4.7 guard: stale cache (node index rebuilt without a Guide_Cleanup)
+        // would read past g_hAStarCenters and GetArray returns zeros — snapped
+        // (0,0,0) coordinates then produce beams through the world. Fall back
+        // to the raw nav-center instead of fabricating garbage.
+        if (g_hAStarSnapCenters.Length >= g_hAStarCenters.Length)
+            break;
         float c[3];
         g_hAStarCenters.GetArray(g_hAStarSnapCenters.Length, c, 3);
 
@@ -571,7 +577,10 @@ stock void AStar_SnapCenter(int idx, float out[3])
         }
         g_hAStarSnapCenters.PushArray(c, 3);
     }
-    g_hAStarSnapCenters.GetArray(idx, out, 3);
+    if (idx < g_hAStarSnapCenters.Length)
+        g_hAStarSnapCenters.GetArray(idx, out, 3);
+    else
+        g_hAStarCenters.GetArray(idx, out, 3); // stale cache — use raw center
 }
 
 stock float AStar_EdgeCostVisible(int fromIndex, int toIndex, ConnectionType conType)
@@ -1002,6 +1011,9 @@ stock bool AStar_ReconstructPath_ValidateFrame(ArrayList outCells, int maxEdges)
             // Each strategy tries independently; first success wins.
 
             // Strategy A: Lift cell2 Z incrementally (8,16,24,32,48)
+            // v4.7 FIX: the lifted coordinate only proves the beam clears the
+            // obstacle — written back raw it floats ±8..48u in the air. Snap
+            // to the real ground and re-verify before accepting.
             if (!repaired)
             {
                 float zOffsets[5] = {8.0, 16.0, 24.0, 32.0, 48.0};
@@ -1014,8 +1026,12 @@ stock bool AStar_ReconstructPath_ValidateFrame(ArrayList outCells, int maxEdges)
                     if (twopos_traversable(c1.center, lifted))
                     {
                         c2.center = lifted;
-                        outCells.SetArray(i, c2, sizeof(Cell));
-                        repaired = true;
+                        GroundSnapPosition(c2.center);
+                        if (twopos_traversable(c1.center, c2.center))
+                        {
+                            outCells.SetArray(i, c2, sizeof(Cell));
+                            repaired = true;
+                        }
                     }
                 }
             }
@@ -1033,13 +1049,18 @@ stock bool AStar_ReconstructPath_ValidateFrame(ArrayList outCells, int maxEdges)
                     if (twopos_traversable(c1.center, lowered))
                     {
                         c2.center = lowered;
-                        outCells.SetArray(i, c2, sizeof(Cell));
-                        repaired = true;
+                        GroundSnapPosition(c2.center);
+                        if (twopos_traversable(c1.center, c2.center))
+                        {
+                            outCells.SetArray(i, c2, sizeof(Cell));
+                            repaired = true;
+                        }
                     }
                 }
             }
 
             // Strategy C: Lift both ends (+8 each)
+            // v4.7: snap both ends to real ground before accepting.
             if (!repaired)
             {
                 float l1[3], l2[3];
@@ -1048,9 +1069,14 @@ stock bool AStar_ReconstructPath_ValidateFrame(ArrayList outCells, int maxEdges)
                 if (twopos_traversable(l1, l2))
                 {
                     c1.center = l1; c2.center = l2;
-                    outCells.SetArray(i - 1, c1, sizeof(Cell));
-                    outCells.SetArray(i, c2, sizeof(Cell));
-                    repaired = true;
+                    GroundSnapPosition(c1.center);
+                    GroundSnapPosition(c2.center);
+                    if (twopos_traversable(c1.center, c2.center))
+                    {
+                        outCells.SetArray(i - 1, c1, sizeof(Cell));
+                        outCells.SetArray(i, c2, sizeof(Cell));
+                        repaired = true;
+                    }
                 }
             }
 
@@ -1082,9 +1108,16 @@ stock bool AStar_ReconstructPath_ValidateFrame(ArrayList outCells, int maxEdges)
                         {
                             s[2] -= 28.0; e[2] -= 28.0;
                             c1.center = s; c2.center = e;
-                            outCells.SetArray(i - 1, c1, sizeof(Cell));
-                            outCells.SetArray(i, c2, sizeof(Cell));
-                            repaired = true;
+                            // v4.7: offset proves clearance, but the written
+                            // cells must rest on real surfaces.
+                            GroundSnapPosition(c1.center);
+                            GroundSnapPosition(c2.center);
+                            if (twopos_traversable(c1.center, c2.center))
+                            {
+                                outCells.SetArray(i - 1, c1, sizeof(Cell));
+                                outCells.SetArray(i, c2, sizeof(Cell));
+                                repaired = true;
+                            }
                         }
                     }
                 }
@@ -1093,6 +1126,8 @@ stock bool AStar_ReconstructPath_ValidateFrame(ArrayList outCells, int maxEdges)
             // Strategy E: Insert midpoint from overlapping nav area geometry.
             // Uses the center of the two nav areas as an intermediate waypoint
             // that the player can pass through.
+            // v4.7 FIX: the raw midpoint (nav-area center +16) floats mid-air —
+            // snap it to the ground first, then verify both legs.
             if (!repaired && c1.navArea != Address_Null && c2.navArea != Address_Null)
             {
                 float mid[3], centerA[3], centerB[3];
@@ -1101,6 +1136,7 @@ stock bool AStar_ReconstructPath_ValidateFrame(ArrayList outCells, int maxEdges)
                 mid[0] = (centerA[0] + centerB[0]) / 2.0;
                 mid[1] = (centerA[1] + centerB[1]) / 2.0;
                 mid[2] = (centerA[2] > centerB[2] ? centerA[2] : centerB[2]) + 16.0;
+                GroundSnapPosition(mid);
                 if (twopos_traversable(c1.center, mid) && twopos_traversable(mid, c2.center))
                 {
                     c2.center = mid;
