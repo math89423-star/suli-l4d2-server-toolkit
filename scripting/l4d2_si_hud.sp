@@ -11,6 +11,54 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.27:
+ *   - SCORE SHOP (!shop / !buy): spend the CURRENT score (g_iWallet) —
+ *     瓦斯罐 800, 煤气罐 800, 汽油桶 2000, 止痛药 2000, 肾上腺素 2000,
+ *     电击器 3000, 医疗包 3000, 激光瞄准 3500 (个人效果), M60 5000,
+ *     榴弹发射器 8000. Prices/limits compile-time in g_ShopTable; per-map
+ *     purchase limits; items drop in front of the buyer (trace + glow);
+ *     heavy weapon models precached on map start.
+ *   - TWO score tracks (BF style, user spec): g_iTotalScore = HISTORICAL
+ *     (scoreboard shows this only; NO LONGER resets on map end — 跨图累计),
+ *     g_iWallet = CURRENT (spendable; also survives map end — 跨图攒大件).
+ *     Both reset on disconnect; server restart clears memory (no persistence).
+ *   - Complements loot_drop v1.7.0 (user loot table: common 1% vomitjar/
+ *     pipe bomb 50/50; SI 7% across 5 independent rolls; Tank 必掉
+ *     medkit+M60/GL+3 throwables; Witch 4选1).
+ *
+ * Changelog v1.7.26:
+ *   - Scoreboard name back to GREEN (user): \x07RRGGBB renders as literal
+ *     text "38B6FF" in L4D2 chat — only \x01-\x05 color codes work. The
+ *     space separation and green numbers stay.
+ *
+ * Changelog v1.7.25:
+ *   - SI/Witch kill cards show the killer's FULL kill score (user "还有
+ *     特感呢"): own damage share on that target + kill points
+ *     ("[MAGNUM] ☠ HUNTER +117" = 100 kill + 17 dmg).
+ *   - Damage-point buffer refactored to per-killer grid
+ *     g_iDmgPtsKiller[killer][entity]: every display (SI HP line, Witch HP
+ *     line, common kill line, SI/Witch kill cards) now shows ONLY the
+ *     killer's own share — multi-killer fights no longer inflate numbers.
+ *   - Scoreboard style (user): numbers GREEN, labels default color, name
+ *     BLUE (\x0738B6FF — \x07RGB works in chat), spaces between labels
+ *     and numbers ("1748 分 特 6 死 0 友伤 0 被黑 0").
+ *
+ * Changelog v1.7.24:
+ *   - FIXED the "kill line shows +5" bug (root cause from v1.7.23 debug
+ *     logs): the L4D2 infected_death event HAS NO entity field — GetInt
+ *     "entityid" returns 0 (hurt carries ent=126 pts=13, death carries
+ *     ent=0). The kill line now looks the dmg pts up via the killer's
+ *     last-hit common entity (g_iLastCommonEnt): a kill always belongs to
+ *     the last common the killer hit (one-shot = same entity hurt→death).
+ *     Shotgun multi-kills: only the LAST kill is exact (acceptable).
+ *
+ * Changelog v1.7.23:
+ *   - Damage points ÷10 (user): both coeff cvars 1.0 → 0.1 — a 50hp common
+ *     scores 5 dmg pts (not 50), so headshot kills (10) no longer look
+ *     trivial next to raw damage. 10 damage = 1 point for all targets.
+ *   - DEBUG LogMessage on common hit/kill (entityid/pts/dmgPts) — hunting
+ *     the "kill line still shows +5" report (dmgPts not surfacing).
+ *
  * Changelog v1.7.22:
  *   - BF-style hit feedback for commons (user): EVERY damage tick shows
  *     its score — "† 小僵尸 +52" (dmg pts only) on every hit, no kill
@@ -370,7 +418,7 @@
 #include <sdktools>
 #include <sdkhooks>
 
-#define PLUGIN_VERSION "1.7.22"
+#define PLUGIN_VERSION "1.7.27"
 
 // ============================================================================
 // ConVar handles
@@ -425,6 +473,7 @@ ConVar g_cvStreakScoreL15;
 ConVar g_cvScoreboardEnable;
 ConVar g_cvScoreboardTop;
 ConVar g_cvScoreboardInterval;
+ConVar g_cvShopEnable;         // v1.7.27
 ConVar g_cvSoundSI;
 ConVar g_cvSoundHeadshot;
 ConVar g_cvSoundTank;
@@ -456,7 +505,8 @@ int       g_iKillStreak[MAXPLAYERS + 1];              // BF banner: kills in cur
 int       g_iStreakScore[MAXPLAYERS + 1];             // BF banner: rolling score in current streak (v1.6.7)
 float     g_fLastStreakKillTime[MAXPLAYERS + 1];      // BF banner: last streak-kill time
 int       g_iCommonStreak[MAXPLAYERS + 1];            // v1.7.4: common streak count (separate icons from SI skulls, shared window)
-int       g_iTotalScore[MAXPLAYERS + 1];              // v1.7.6: session total score (scoreboard; resets per round)
+int       g_iTotalScore[MAXPLAYERS + 1];              // v1.7.6: 历史积分 (scoreboard; 跨图累计不清零, 断线清零)
+int       g_iWallet[MAXPLAYERS + 1];                  // v1.7.27: 当前积分 (商店钱包; 跨图不清零攒大件)
 int       g_iSIKills[MAXPLAYERS + 1];                 // v1.7.7: session SI/Witch/Tank kills
 int       g_iDeaths[MAXPLAYERS + 1];                  // v1.7.7: survivor deaths
 int       g_iFFDamage[MAXPLAYERS + 1];                // v1.7.7: friendly-fire damage dealt
@@ -465,11 +515,55 @@ bool      g_bMapEndBroadcasted;                        // v1.7.9: map-end scoreb
 float     g_fSIHurtAt[MAXPLAYERS + 1];                // v1.7.2: last hurt time per SI (0.0 = untouched → full-HP kill bonus)
 ArrayList g_hHurtVictims[MAXPLAYERS + 1];             // per-client victims hit this frame (AoE batch)
 bool      g_bFrameQueued[MAXPLAYERS + 1];             // per-client: RequestFrame already pending
-// v1.7.20: damage points shown in the hit-area HP display — indexed by
-// ENTITY index (covers SI client indexes AND the NPC Witch entity, both
-// ≤ MaxEdicts). Accumulated per hurt event, consumed (zeroed) by the
-// per-frame HP display. Totals only, no streak/chat — see changelog.
-int       g_iDmgPts[2048];
+// v1.7.25: per-killer damage points, keyed [killer][victim-entity]
+// (entity covers SI client indexes + Witch NPC entity + common entity).
+// Every consumer (SI HP line / Witch HP line / kill cards / common kill
+// line) reads ONLY the killer's own share — multi-killer fights no longer
+// inflate anyone's number. Accumulated per hurt event, consumed (zeroed)
+// by whichever display reads it. Totals only, no streak/chat.
+int       g_iDmgPtsKiller[MAXPLAYERS + 1][2048];
+// v1.7.24: the L4D2 infected_death event HAS NO entity field (GetInt
+// "entityid" → 0, proven by debug logs) — so the common kill line cannot
+// look up the dead body's dmg pts. Instead: remember the LAST common the
+// killer hit — the kill always belongs to that entity (one-shot kills are
+// hurt-then-death on the same entity). Verified via [common-hit]/[common-kill]
+// debug logs: hit carries ent=126 pts=13, death carries ent=0 → this fixes
+// the lookup. Shotgun multi-kills: only the LAST kill is exact.
+int       g_iLastCommonEnt[MAXPLAYERS + 1];
+
+// ============================================================================
+// v1.7.27: score shop (!shop) — 消费"当前积分"(g_iWallet) 兑换补给/武器
+// 积分双轨（BF 同款）：g_iTotalScore = 历史积分（排行榜，跨图累计不清零）；
+// g_iWallet = 当前积分（钱包，消费用，跨图不清零攒大件）。
+// 价格/限购写死在此表（改价格需重编译）；掉落（loot_drop v1.7.0）出小件。
+// ============================================================================
+
+#define SHOP_SLOTS      10
+
+enum struct ShopItem
+{
+    char name[32];      // 显示名
+    char classname[64]; // 实体 classname
+    int  price;         // 价格（当前积分）
+    int  limit;         // 每图限购次数
+}
+
+// 商品表（价格用户定稿 2026-08-01：瓦斯罐/煤气罐 800, 汽油桶 2000,
+// 药丸/肾上腺素 2000, 电击器/医疗包 3000, 激光 3500, M60 5000, 榴弹 8000）
+ShopItem g_ShopTable[SHOP_SLOTS] = {
+    { "瓦斯罐",      "weapon_propanetank",             800,  2 },
+    { "煤气罐",      "weapon_oxygentank",              800,  2 },
+    { "汽油桶",      "weapon_gascan",                 2000,  2 },
+    { "止痛药",      "weapon_pain_pills",             2000,  2 },
+    { "肾上腺素",    "weapon_adrenaline",             2000,  2 },
+    { "电击器",      "weapon_defibrillator",          3000,  2 },
+    { "医疗包",      "weapon_first_aid_kit",          3000,  2 },
+    { "激光瞄准",    "weapon_upgradepack_laser_sight", 3500,  1 },
+    { "M60 轻机枪",  "weapon_rifle_m60",              5000,  1 },
+    { "榴弹发射器",  "weapon_grenade_launcher",       8000,  1 }
+};
+
+int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
 
 // ============================================================================
 // Plugin Info
@@ -586,10 +680,10 @@ public void OnPluginStart()
     // Witch fires no player_hurt); commons excluded (no player_hurt).
     g_cvDamageEnable = CreateConVar("si_hud_bf_damage_enable", "1",
         "Damage points: earn score for damaging SI (incl. Tank).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvDamageCoeff = CreateConVar("si_hud_bf_damage_coeff", "1.0",
-        "Damage points coefficient: points = dmg_health × weapon mult × this (1.0 = 1 damage = 1 point; only the listed weapons deviate from 1.0).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDamageCoeffCommon = CreateConVar("si_hud_bf_damage_coeff_common", "1.0",
-        "Common infected damage points coefficient (infected_hurt): amount × weapon mult × this. NOTE: commons are unlimited — at 1.0, mowing zombie hordes out-scores SI kills (melee 1.75 × 50hp = 87/一刀 vs 击杀 5 分); drop to ~0.1 if the board floods.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDamageCoeff = CreateConVar("si_hud_bf_damage_coeff", "0.1",
+        "Damage points coefficient: points = dmg_health × weapon mult × this (0.1 = 10 damage = 1 point — user: 血量分全部/10, a 50hp common scores 5, not 50).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDamageCoeffCommon = CreateConVar("si_hud_bf_damage_coeff_common", "0.1",
+        "Common infected damage points coefficient (infected_hurt): amount × weapon mult × this (0.1, same as SI — a 50hp common = 5 dmg pts; kill pts 5/10 stay unchanged).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
     g_cvDmgMultAR = CreateConVar("si_hud_bf_damage_mult_ar", "1.0",
         "Damage mult: assault rifles (rifle/ak47/desert/sg552).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
     g_cvDmgMultSMG = CreateConVar("si_hud_bf_damage_mult_smg", "1.5",
@@ -630,6 +724,10 @@ public void OnPluginStart()
         "Scoreboard shows this many top entries, then a divider and your own score.", FCVAR_NOTIFY, true, 1.0, true, 24.0);
     g_cvScoreboardInterval = CreateConVar("si_hud_scoreboard_interval", "45.0",
         "Auto-broadcast the scoreboard to every survivor every N seconds (0=off).", FCVAR_NOTIFY, true, 0.0, true, 600.0);
+
+    // v1.7.27: score shop — !shop / !buy (prices are compile-time in g_ShopTable)
+    g_cvShopEnable = CreateConVar("si_hud_shop_enable", "1",
+        "Enable the score shop (!shop / !buy).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     // ── Kill sounds (all empty = off by default) ────────
 
@@ -701,6 +799,10 @@ public void OnPluginStart()
     RegConsoleCmd("sm_rank", Cmd_Scoreboard, "Show the scoreboard (top + your rank).");
     RegConsoleCmd("sm_score", Cmd_Scoreboard, "Show the scoreboard (top + your rank).");
     RegConsoleCmd("sm_top", Cmd_Scoreboard, "Show the scoreboard (top + your rank).");
+
+    // v1.7.27: score shop — !shop / !buy
+    RegConsoleCmd("sm_shop", Cmd_Shop, "Open the score shop (spend score on supplies/weapons).");
+    RegConsoleCmd("sm_buy", Cmd_Shop, "Open the score shop (spend score on supplies/weapons).");
 
     // v1.7.6: periodic per-player broadcast (45s default; 0=off via cvar
     // check inside the callback; interval change needs plugin reload)
@@ -819,14 +921,18 @@ void ShowScoreboardTo(int client)
     {
         int c = clients[k];
         GetClientName(c, name, sizeof(name));
-        // v1.7.15: green player name; strip control chars from the name so
-        // a crafted name cannot inject color codes / newlines into chat.
+        // v1.7.15: strip control chars from the name so a crafted name
+        // cannot inject color codes / newlines into chat.
+        // v1.7.25 (user): name GREEN, numbers GREEN, labels default color,
+        // spaces between labels and numbers ("1748 分 特 6 …").
+        // v1.7.26: \x07RRGGBB does NOT work in L4D2 chat (renders the raw
+        // "38B6FF" text) — only \x01-\x05 are safe. Blue was a no-go.
         for (int i = 0; name[i] != '\0'; i++)
         {
             if (name[i] < 0x20)
                 name[i] = '?';
         }
-        PrintToChat(client, "\x04[得分榜]\x01 \x05#%d\x01 \x03%s\x01：\x03%d分\x01 特%d 死%d 友伤%d 被黑%d",
+        PrintToChat(client, "\x04[得分榜]\x01 \x05#%d\x01 \x03%s\x01：\x03%d\x01 分 特 \x03%d\x01 死 \x03%d\x01 友伤 \x03%d\x01 被黑 \x03%d\x01",
             k + 1, name, scores[k],
             g_iSIKills[c], g_iDeaths[c], g_iFFDamage[c], g_iBlacked[c]);
     }
@@ -840,11 +946,11 @@ void ShowScoreboardTo(int client)
         if (clients[k] == client) { myRank = k; break; }
     }
     if (myRank >= 0)
-        PrintToChat(client, "\x04[得分榜]\x01 你的战绩：\x03%d分\x01 特%d 死%d 友伤%d 被黑%d（第 \x05%d\x01 名）",
+        PrintToChat(client, "\x04[得分榜]\x01 你的战绩：\x03%d\x01 分 特 \x03%d\x01 死 \x03%d\x01 友伤 \x03%d\x01 被黑 \x03%d\x01（第 \x05%d\x01 名）",
             scores[myRank], g_iSIKills[client], g_iDeaths[client],
             g_iFFDamage[client], g_iBlacked[client], myRank + 1);
     else
-        PrintToChat(client, "\x04[得分榜]\x01 你的战绩：0分");
+        PrintToChat(client, "\x04[得分榜]\x01 你的战绩：0 分");
 }
 
 // ============================================================================
@@ -868,6 +974,13 @@ public void OnMapStart()
     PrecacheCvarSound(g_cvStreakSnd9);
     PrecacheCvarSound(g_cvStreakSnd12);
     PrecacheCvarSound(g_cvStreakSnd15);
+
+    // v1.7.27: shop heavy weapons — precache models (non-campaign maps don't
+    // precache M60 / grenade launcher; without this the items spawn invisible)
+    PrecacheModel("models/w_models/weapons/w_m60.mdl");
+    PrecacheModel("models/v_models/v_m60.mdl");
+    PrecacheModel("models/w_models/weapons/w_grenade_launcher.mdl");
+    PrecacheModel("models/v_models/v_grenade_launcher.mdl");
 
     // HP display is now on-hit only (player_hurt → RefreshHPForClient → 0.5s hide).
     // Persistent timer is no longer started — SI HP only shows when you damage them.
@@ -893,20 +1006,27 @@ public void OnMapEnd()
         g_iKillStreak[i] = 0;
         g_iCommonStreak[i] = 0;            // v1.7.4
         g_iStreakScore[i] = 0;
-        g_iTotalScore[i] = 0;              // v1.7.6: scoreboard resets per round
+        // v1.7.27: 历史积分(g_iTotalScore) 和 当前积分(g_iWallet) 均跨图保留
+        //（用户：每一个 map 结束积分不清零；排行榜=历史积分，商店=钱包）
         g_iSIKills[i] = 0;                 // v1.7.7
         g_iDeaths[i] = 0;
         g_iFFDamage[i] = 0;
         g_iBlacked[i] = 0;
         g_fLastStreakKillTime[i] = 0.0;
         g_fSIHurtAt[i] = 0.0;              // v1.7.2: full-HP bonus state
+        g_iLastCommonEnt[i] = 0;           // v1.7.24
     }
-    // v1.7.20: damage-point display buffer is entity-indexed — clear the
-    // WHOLE array (SI client indexes + the Witch entity range) so a victim
-    // that died mid-frame (its pts were never displayed) cannot leak into
-    // the next round's display.
-    for (int i = 0; i < 2048; i++)
-        g_iDmgPts[i] = 0;
+    // v1.7.25: clear the per-killer damage-point buffer — the WHOLE grid
+    // (killers × entity range, SI client idx + Witch/common entities) so
+    // pts from a victim that died mid-frame (never displayed) cannot leak
+    // into the next round's display.
+    for (int i = 0; i <= MaxClients; i++)
+        for (int j = 0; j < 2048; j++)
+            g_iDmgPtsKiller[i][j] = 0;
+    // v1.7.27: shop purchase counters reset per map (score also resets above)
+    for (int i = 1; i <= MaxClients; i++)
+        for (int j = 0; j < SHOP_SLOTS; j++)
+            g_iShopBought[i][j] = 0;
     g_bMapEndBroadcasted = false;          // v1.7.9: fresh map, fresh flag
 }
 
@@ -956,7 +1076,8 @@ public void OnClientDisconnect(int client)
     g_iKillStreak[client] = 0;
     g_iCommonStreak[client] = 0;           // v1.7.4
     g_iStreakScore[client] = 0;
-    g_iTotalScore[client] = 0;             // v1.7.6
+    g_iTotalScore[client] = 0;             // v1.7.6 (历史积分断线清零，防槽位泄漏)
+    g_iWallet[client] = 0;                 // v1.7.27 (钱包断线清零)
     g_iSIKills[client] = 0;                // v1.7.7
     g_iDeaths[client] = 0;
     g_iFFDamage[client] = 0;
@@ -1048,11 +1169,12 @@ public Action Event_PlayerHurt(Event event, const char[] name, bool dontBroadcas
             if (pts > 0)
             {
                 g_iTotalScore[dmgAttacker] += pts;
-                // v1.7.20: display copy for the hit-area HP line — only
-                // accumulated when the HP display is on (else nothing
-                // consumes it and it would go stale).
+                g_iWallet[dmgAttacker] += pts;      // v1.7.27
+                // v1.7.25: display copy, per-killer — only accumulated
+                // when the HP display is on (else nothing consumes it and
+                // it would go stale).
                 if (g_cvHPEnable.BoolValue)
-                    g_iDmgPts[hurtVictim] += pts;
+                    g_iDmgPtsKiller[dmgAttacker][hurtVictim] += pts;
             }
         }
     }
@@ -1157,7 +1279,7 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
         if (attacker >= 1 && attacker <= MaxClients
             && IsClientInGame(attacker) && GetClientTeam(attacker) == 2)
         {
-            SurvivorKilledWitch(attacker, event);
+            SurvivorKilledWitch(attacker, event, entityid);
         }
         return Plugin_Continue;
     }
@@ -1208,6 +1330,7 @@ public Action Event_InfectedHurt(Event event, const char[] name, bool dontBroadc
     if (pts > 0)
     {
         g_iTotalScore[attacker] += pts;
+        g_iWallet[attacker] += pts;             // v1.7.27
         // v1.7.22: BF-style hit feedback — EVERY hit shows its damage-score
         // even without a kill (user: "只要造成伤害了，就有得分反馈"; BF1/BFV
         // pop the damage score near the crosshair on every hit). Commons
@@ -1231,7 +1354,10 @@ public Action Event_InfectedHurt(Event event, const char[] name, bool dontBroadc
         // line, not by the HP display.
         int entity = event.GetInt("entityid");
         if (entity >= 1 && entity < 2048)
-            g_iDmgPts[entity] += pts;
+        {
+            g_iDmgPtsKiller[attacker][entity] += pts;   // v1.7.25: per-killer
+            g_iLastCommonEnt[attacker] = entity;        // v1.7.24: kill-line lookup
+        }
     }
     return Plugin_Continue;
 }
@@ -1270,9 +1396,11 @@ public Action WitchTakeDamage(int victim, int &attacker, int &inflictor,
     if (pts > 0)
     {
         g_iTotalScore[attacker] += pts;
-        // v1.7.20: display copy for ShowWitchHP (victim = witch ENTITY idx)
+        g_iWallet[attacker] += pts;             // v1.7.27
+        // v1.7.25: display copy for ShowWitchHP / witch kill card
+        // (victim = witch ENTITY idx)
         if (g_cvHPEnable.BoolValue)
-            g_iDmgPts[victim] += pts;
+            g_iDmgPtsKiller[attacker][victim] += pts;
     }
     return Plugin_Continue;
 }
@@ -1311,12 +1439,15 @@ public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroad
         // v1.7.21 (user): the line shows the FULL kill score — this target's
         // damage points (dmg × weapon mult, e.g. magnum 50hp = 87) PLUS the
         // fixed kill points (5/10): "† 小僵尸 +92" per "50×1.75 + 5".
-        int entity = event.GetInt("entityid");
+        // v1.7.24: infected_death has NO entity field → look the pts up via
+        // the killer's last-hit common entity instead.
+        int ent = g_iLastCommonEnt[attacker];
         int dmgPts = 0;
-        if (entity >= 1 && entity < 2048)
+        if (ent >= 1 && ent < 2048)
         {
-            dmgPts = g_iDmgPts[entity];
-            g_iDmgPts[entity] = 0;   // consumed with the kill
+            dmgPts = g_iDmgPtsKiller[attacker][ent];   // v1.7.25: per-killer
+            g_iDmgPtsKiller[attacker][ent] = 0;        // consumed with the kill
+            g_iLastCommonEnt[attacker] = 0;
         }
         int showPts = points + dmgPts;
 
@@ -1414,10 +1545,10 @@ void Frame_ShowHurtVictims(any userId)
         bar[10] = '\0';
 
         char line[128];
-        // v1.7.20: append this victim's accumulated damage points (consumed
-        // here — per-frame copy, so a later display never double-counts).
-        int pts = g_iDmgPts[victim];
-        g_iDmgPts[victim] = 0;
+        // v1.7.25: append THIS killer's share of damage points on this
+        // victim (consumed here — per-frame copy, no double-count).
+        int pts = g_iDmgPtsKiller[client][victim];
+        g_iDmgPtsKiller[client][victim] = 0;
         if (pts > 0)
             Format(line, sizeof(line), "%s  [%s] %d/%d +%d\n",
                 siName, bar, hp, maxHp, pts);
@@ -1473,9 +1604,9 @@ void ShowWitchHP(int client, int witch)
     bar[10] = '\0';
 
     char msg[256];
-    // v1.7.20: Witch damage points on the HP line (consumed like SI's).
-    int pts = g_iDmgPts[witch];
-    g_iDmgPts[witch] = 0;
+    // v1.7.25: Witch damage points on the HP line — killer's own share.
+    int pts = g_iDmgPtsKiller[client][witch];
+    g_iDmgPtsKiller[client][witch] = 0;
     if (pts > 0)
         Format(msg, sizeof(msg), "WITCH  女巫  [%s] %d/%d +%d\n",
             bar, hp, maxHp, pts);
@@ -1572,6 +1703,17 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
         {
             char card[192];
             BuildKillCard(card, sizeof(card), weaponDisplay, siName, headshot);
+            // v1.7.25 (user): the SI kill card shows THIS killer's full
+            // kill score — their damage share on this target + kill points
+            // (e.g. magnum 100hp → 17 dmg pts + 100 kill = "+117").
+            int dmgPts = g_iDmgPtsKiller[attacker][victim];
+            g_iDmgPtsKiller[attacker][victim] = 0;
+            if (dmgPts > 0)
+            {
+                char tmp[32];
+                Format(tmp, sizeof(tmp), " +%d", points + dmgPts);
+                StrCat(card, sizeof(card), tmp);
+            }
             Format(msg, sizeof(msg), "%s\n%s", banner, card);
         }
         else
@@ -1591,7 +1733,7 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
 // Kill feedback: survivor killed Witch
 // ============================================================================
 
-void SurvivorKilledWitch(int attacker, Event event)
+void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
 {
     bool headshot = event.GetBool("headshot");
 
@@ -1640,6 +1782,15 @@ void SurvivorKilledWitch(int attacker, Event event)
         {
             char card[192];
             BuildKillCard(card, sizeof(card), weaponDisplay, "WITCH 女巫", headshot);
+            // v1.7.25: same as the SI card — killer's damage share + kill pts.
+            int dmgPts = g_iDmgPtsKiller[attacker][witchEnt];
+            g_iDmgPtsKiller[attacker][witchEnt] = 0;
+            if (dmgPts > 0)
+            {
+                char tmp[32];
+                Format(tmp, sizeof(tmp), " +%d", points + dmgPts);
+                StrCat(card, sizeof(card), tmp);
+            }
             Format(msg, sizeof(msg), "%s\n%s", banner, card);
         }
         else
@@ -1765,7 +1916,8 @@ void StackStreakKill(int client, int points, bool isCommon)
     // round_end. This is the "animated score counter" feedback BF1 is known
     // for — the number visibly grows with every kill in the window.
     g_iStreakScore[client] += points;
-    g_iTotalScore[client] += points;      // v1.7.6: scoreboard accumulation
+    g_iTotalScore[client] += points;      // v1.7.6: scoreboard accumulation (历史积分)
+    g_iWallet[client] += points;          // v1.7.27: 当前积分（钱包）
 
     // v1.6.6: schedule the streak settle — when the window closes the
     // killer hears the BF1 award sound for their score tier.
@@ -2141,4 +2293,150 @@ void KillHPHideTimer(int client)
         KillTimer(g_hHPHideTimer[client]);
         g_hHPHideTimer[client] = null;
     }
+}
+
+// ============================================================================
+// v1.7.27: score shop — !shop / !buy
+// 消费"当前积分"(g_iWallet) 兑换补给/武器；每图限购（OnMapEnd 清零）；
+// 价格/限购在 g_ShopTable（编译期）。历史积分(g_iTotalScore) 只显示不消费。
+// 分工：掉落（loot_drop v1.7.0）出小件 + Tank 必掉武器；商店补确定性购买。
+// ============================================================================
+
+public bool ShopTraceFilter(int entity, int contentsMask, any data)
+{
+    return entity != data;
+}
+
+// spawn 单个商品（trace 落地面 + glow + 重武器弹药）
+int ShopSpawn(const char[] cls, float pos[3])
+{
+    int ent = CreateEntityByName(cls);
+    if (ent == -1) return -1;
+
+    float from[3], to[3];
+    from = pos;
+    from[2] += 60.0;
+    Handle tr = TR_TraceRayFilterEx(from, view_as<float>({ 90.0, 0.0, 0.0 }),
+        MASK_SOLID, RayType_Infinite, ShopTraceFilter, ent);
+    if (TR_DidHit(tr))
+    {
+        TR_GetEndPosition(to, tr);
+        to[2] += 5.0;
+    }
+    else
+    {
+        to = from;
+    }
+    delete tr;
+
+    DispatchSpawn(ent);
+    TeleportEntity(ent, to, NULL_VECTOR, NULL_VECTOR);
+
+    if (StrEqual(cls, "weapon_grenade_launcher"))
+        SetEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo", 30);
+    else if (StrEqual(cls, "weapon_rifle_m60"))
+        SetEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo", 150);
+
+    SetEntProp(ent, Prop_Send, "m_iGlowType", 3);
+    SetEntProp(ent, Prop_Send, "m_nGlowRange", 800);
+    SetEntProp(ent, Prop_Send, "m_glowColorOverride", 50 | (255 << 8) | (50 << 16) | (255 << 24));
+
+    return ent;
+}
+
+void ShopBuy(int client, int slot)
+{
+    if (slot < 0 || slot >= SHOP_SLOTS) return;
+    if (!IsClientInGame(client) || GetClientTeam(client) != 2) return;
+
+    int price = g_ShopTable[slot].price;
+    if (g_iWallet[client] < price)
+    {
+        PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 需要 \x03%d\x01 当前积分，你只有 \x03%d\x01",
+            g_ShopTable[slot].name, price, g_iWallet[client]);
+        return;
+    }
+    if (g_iShopBought[client][slot] >= g_ShopTable[slot].limit)
+    {
+        PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 本图已购满（%d/%d）",
+            g_ShopTable[slot].name, g_iShopBought[client][slot], g_ShopTable[slot].limit);
+        return;
+    }
+
+    g_iWallet[client] -= price;
+    g_iShopBought[client][slot]++;
+
+    // 落点：玩家面前 70 单位（购买时刻的方向）
+    float pos[3], ang[3], fwd[3];
+    GetClientEyePosition(client, pos);
+    GetClientEyeAngles(client, ang);
+    GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+    pos[0] += fwd[0] * 70.0;
+    pos[1] += fwd[1] * 70.0;
+    pos[2] -= 20.0;
+
+    ShopSpawn(g_ShopTable[slot].classname, pos);
+
+    PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 当前积分，剩余 \x03%d\x01），物品已放在你面前",
+        g_ShopTable[slot].name, price, g_iWallet[client]);
+}
+
+void OpenShopMenu(int client)
+{
+    Menu menu = new Menu(ShopMenuHandler);
+    menu.SetTitle("[商店] 当前积分 %d\n[排行榜] 历史积分 %d\n ", g_iWallet[client], g_iTotalScore[client]);
+
+    char info[4];
+    char line[96];
+    for (int i = 0; i < SHOP_SLOTS; i++)
+    {
+        int price = g_ShopTable[i].price;
+        int left = g_ShopTable[i].limit - g_iShopBought[client][i];
+        if (left <= 0)
+            Format(line, sizeof(line), "%s (%d分) [已购满]", g_ShopTable[i].name, price);
+        else if (g_iWallet[client] < price)
+            Format(line, sizeof(line), "%s (%d分) [积分不足]", g_ShopTable[i].name, price);
+        else
+            Format(line, sizeof(line), "%s (%d分) [可购 x%d]", g_ShopTable[i].name, price, left);
+
+        IntToString(i, info, sizeof(info));
+        menu.AddItem(info, line);
+    }
+    menu.ExitButton = true;
+    menu.Display(client, 20);
+}
+
+public int ShopMenuHandler(Menu menu, MenuAction action, int client, int item)
+{
+    if (action == MenuAction_Select)
+    {
+        char info[4];
+        menu.GetItem(item, info, sizeof(info));
+        ShopBuy(client, StringToInt(info));
+        if (IsClientInGame(client))
+            OpenShopMenu(client);   // 刷新余额/状态
+    }
+    else if (action == MenuAction_End)
+    {
+        delete menu;
+    }
+    return 0;
+}
+
+public Action Cmd_Shop(int client, int args)
+{
+    if (client < 1 || !IsClientInGame(client))
+        return Plugin_Handled;
+    if (!g_cvEnable.BoolValue || !g_cvShopEnable.BoolValue)
+    {
+        PrintToChat(client, "\x04[商店]\x01 商店未开启");
+        return Plugin_Handled;
+    }
+    if (GetClientTeam(client) != 2)
+    {
+        PrintToChat(client, "\x04[商店]\x01 只有幸存者可以使用商店");
+        return Plugin_Handled;
+    }
+    OpenShopMenu(client);
+    return Plugin_Handled;
 }
