@@ -11,6 +11,10 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.41:
+ *   - 战役首图（地图名含 m1）→ 可用积分/复活币一律清零（user：m1 首图
+ *     开始应该都是 0；补上同前缀重开 c2m5→c2m1 的漏洞）。
+ *
  * Changelog v1.7.40:
  *   - FIX 切战役后可用积分仍保留 (user 实测): reload/重启后 g_sPrevCampaign
  *     为空 → 战役切换判定失效（strlen==0 跳过清零）→ 上战役的钱被持久化
@@ -504,7 +508,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.40"
+#define PLUGIN_VERSION "1.7.41"
 
 // ============================================================================
 // ConVar handles
@@ -1262,7 +1266,10 @@ public void OnMapStart()
     GetCurrentMap(map, sizeof(map));
     char prefix[16];
     GetMapPrefix(map, prefix, sizeof(prefix));
-    if (strlen(g_sPrevCampaign) > 0 && !StrEqual(prefix, g_sPrevCampaign))
+    // v1.7.41 (user): 战役首图（地图名含 m1，官图 cXm1 + 三方图 m1 命名）
+    // → 一律清零（新战役起点；补上同前缀重开 c2m5→c2m1 的前缀判定漏洞）
+    bool isFirstMap = (StrContains(map, "m1") != -1);
+    if (isFirstMap || (strlen(g_sPrevCampaign) > 0 && !StrEqual(prefix, g_sPrevCampaign)))
     {
         for (int i = 1; i <= MaxClients; i++)
         {
