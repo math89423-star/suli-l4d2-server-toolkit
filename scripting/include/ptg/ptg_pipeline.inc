@@ -124,6 +124,7 @@ void Guide_Cleanup()
     // Clean A* node index for current map
     delete g_hAStarNodes;
     delete g_hAStarCenters;
+    delete g_hAStarSnapCenters; // v4.6: lazily-snapped search coordinates
     delete g_hAStarAreaToIndex;
     delete g_hSpatialHash;
     delete g_hPortalCache;

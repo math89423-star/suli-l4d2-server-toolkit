@@ -180,6 +180,9 @@ public void OnPluginStart()
     g_hCvarZCostFactor = CreateConVar("l4d_path_to_goal_z_cost_factor", "4.0",
     "Vertical cost multiplier in A* edge weights. Higher values strongly prefer level paths over climbing.",FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
+    g_hCvarGeomPenalty = CreateConVar("l4d_path_to_goal_geom_penalty", "1",
+    "Penalize A* edges whose straight-line path is blocked by world geometry (walls/floors). Nav connections are logical, not physical — without this the guide path contains many beams that fail hull validation and get beaconed. 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
     // ── v4.5 Accuracy + Legacy ConVars ──
     g_hCvarAccuracy = CreateConVar("l4d_path_to_goal_accuracy", "1",
     "Master switch for v4.5 accuracy improvements (expanded trace filter, deeper ground snap, GetZ portal Z). 0=legacy, 1=improved.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -733,6 +736,10 @@ void MapStarted()
     g_bPathDirty = false;
     g_iNavAreaCount = -1;           // v4.6: lazy-build counting starts fresh per map
     g_bLazyBuildRequested = false;
+    // v4.6: blocked-edge feedback table dies with the map — nav areas change
+    delete g_hBlockedEdges;
+    g_hBlockedEdges = null;
+    g_iGeomIter = 0;
 
     // Re-create check timer on every map load (OnPluginStart only fires once;
     // OnMapEnd kills it, so we must recreate here after each map change)

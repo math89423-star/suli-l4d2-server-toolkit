@@ -17,8 +17,15 @@ ConVar g_hCvarAnnounce;
 
 // 状态镜像（0.2s 轮询），用于区分 revive_success 三种来源：挂边拉起 / 电击复活 / 救助倒地
 // L4D2 只有 revive_success 一个复活事件（无 defibrillated 事件），需靠事件前状态区分
+// 注意：m_isDead prop 在玩家实体上不存在（GetEntProp 会抛异常），死亡判定用 IsPlayerAlive()
 bool g_bHanging[MAXPLAYERS+1];  // m_isHangingFromLedge — 挂边中
-bool g_bDead[MAXPLAYERS+1];     // m_isDead — 已死亡（电击复活前必为 true）
+bool g_bDead[MAXPLAYERS+1];     // !IsPlayerAlive — 已死亡（电击复活前必为 true）
+
+// 打包/递药执行者记录（player_use 事件记录，heal_success/pills_used 完成时查表）
+// 本版本事件无执行者字段：heal_success 全字段为 0，pills_used 的 user 也为 0
+int g_iMedkitHealer[MAXPLAYERS+1];  // [被打包者] = 打包者 client
+int g_iPillGiver[MAXPLAYERS+1];     // [吃药者] = 递药者 client
+int g_iPillGiverTime[MAXPLAYERS+1]; // 递药记录时间戳（5s 有效期，防 use 后没给药的残留）
 
 public Plugin myinfo =
 {
@@ -57,10 +64,12 @@ public void OnPluginStart()
 
     AutoExecConfig(true, "l4d2_rescue_heal");
 
-    HookEvent("revive_success",  Event_ReviveSuccess);
-    HookEvent("heal_success",    Event_HealSuccess);
-    HookEvent("pills_used",      Event_PillsUsed);
-    HookEvent("round_start",     Event_RoundStart);
+    HookEvent("revive_success",   Event_ReviveSuccess);
+    HookEvent("heal_success",     Event_HealSuccess);
+    HookEvent("heal_interrupted", Event_HealInterrupted);
+    HookEvent("pills_used",       Event_PillsUsed);
+    HookEvent("player_use",       Event_PlayerUse);
+    HookEvent("round_start",      Event_RoundStart);
 
     CreateTimer(0.2, Timer_StateCheck, _, TIMER_REPEAT);
 }
@@ -69,6 +78,8 @@ public void OnClientDisconnect(int client)
 {
     g_bHanging[client] = false;
     g_bDead[client] = false;
+    g_iMedkitHealer[client] = 0;
+    g_iPillGiver[client] = 0;
 }
 
 void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -77,10 +88,12 @@ void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
     {
         g_bHanging[i] = false;
         g_bDead[i] = false;
+        g_iMedkitHealer[i] = 0;
+        g_iPillGiver[i] = 0;
     }
 }
 
-// 轮询状态镜像：挂边中 m_isHangingFromLedge=1；已死亡 m_isDead=1（死亡躯体保留期间持续为 1）
+// 轮询状态镜像：挂边中 m_isHangingFromLedge=1；死亡用 IsPlayerAlive（m_isDead prop 不存在）
 public Action Timer_StateCheck(Handle timer)
 {
     for (int i = 1; i <= MaxClients; i++)
@@ -88,7 +101,7 @@ public Action Timer_StateCheck(Handle timer)
         if (IsClientInGame(i) && GetClientTeam(i) == 2)
         {
             g_bHanging[i] = view_as<bool>(GetEntProp(i, Prop_Send, "m_isHangingFromLedge"));
-            g_bDead[i]    = view_as<bool>(GetEntProp(i, Prop_Send, "m_isDead"));
+            g_bDead[i] = !IsPlayerAlive(i);
         }
         else
         {
@@ -103,17 +116,30 @@ public Action Timer_StateCheck(Handle timer)
 // 挂边中 → 挂边拉起；已死亡 → 电击复活；否则 → 救助倒地
 void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
 {
-    int subject = GetClientOfUserId(event.GetInt("subject"));
+    // 实测（2026-07-31）：本版本 revive_success 的救人者字段是 "userid"，"rescuer" 恒为 0
+    int rawSubject = event.GetInt("subject");
+    int rawRescuer = event.GetInt("userid");
+    int subject = GetClientOfUserId(rawSubject);
+    int rescuer = GetClientOfUserId(rawRescuer);
+
+    LogMessage("[RescueHeal] ReviveSuccess RAW: subject=%d userid=%d | resolved=%d/%d hang=%d dead=%d",
+        rawSubject, rawRescuer, subject, rescuer,
+        g_bHanging[subject >= 1 && subject <= MaxClients ? subject : 0],
+        g_bDead[subject >= 1 && subject <= MaxClients ? subject : 0]);
+
     if (subject < 1 || subject > MaxClients)
         return;
 
-    int rescuer = GetClientOfUserId(event.GetInt("rescuer"));
     if (subject == rescuer)  // 自己爬起来不算
         return;
 
-    // 状态镜像 + 事件时刻实时 prop 双重判定（prop 时机在事件前后不确定）
+    LogMessage("[RescueHeal] ReviveSuccess: subject=%d rescuer=%d hang=%d dead=%d",
+        subject, rescuer,
+        g_bHanging[subject], g_bDead[subject]);
+
+    // 挂边镜像 + 事件时刻实时 prop 双重判定（prop 时机在事件前后不确定）；死亡只看镜像（无 prop 可读）
     bool ledge = g_bHanging[subject] || view_as<bool>(GetEntProp(subject, Prop_Send, "m_isHangingFromLedge"));
-    bool defib = g_bDead[subject]    || view_as<bool>(GetEntProp(subject, Prop_Send, "m_isDead"));
+    bool defib = g_bDead[subject];
     g_bHanging[subject] = false;
     g_bDead[subject] = false;
 
@@ -127,41 +153,94 @@ void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
 
 void Event_HealSuccess(Event event, const char[] name, bool dontBroadcast)
 {
+    // 本版本 heal_success 无打包者字段，打包者由 player_use 记录
     int subject = GetClientOfUserId(event.GetInt("subject"));
-    int rescuer = GetClientOfUserId(event.GetInt("rescuer"));
-    if (subject == rescuer) return;  // 自己打包不算
+    if (subject < 1 || subject > MaxClients) return;
+
+    int rescuer = g_iMedkitHealer[subject];
+    g_iMedkitHealer[subject] = 0;
+    if (rescuer < 1 || rescuer > MaxClients) return;
+    if (rescuer == subject) return;  // 自己打包不算
 
     Reward(rescuer, g_hCvarMedkit, "给队友打包");
 }
 
+void Event_HealInterrupted(Event event, const char[] name, bool dontBroadcast)
+{
+    int subject = GetClientOfUserId(event.GetInt("subject"));
+    if (subject >= 1 && subject <= MaxClients)
+        g_iMedkitHealer[subject] = 0;
+}
+
 void Event_PillsUsed(Event event, const char[] name, bool dontBroadcast)
 {
+    // 本版本 pills_used 无递药者字段，递药者由 player_use 记录（5s 内有效）
     int subject = GetClientOfUserId(event.GetInt("subject"));  // 吃药的人
-    int user    = GetClientOfUserId(event.GetInt("user"));     // 递药的人
-    if (subject == user) return;  // 自己吃药不算
+    if (subject < 1 || subject > MaxClients) return;
 
-    Reward(user, g_hCvarPills, "给队友递药");
+    int giver = g_iPillGiver[subject];
+    g_iPillGiver[subject] = 0;
+    if (giver < 1 || giver > MaxClients) return;
+    if (GetTime() - g_iPillGiverTime[subject] > 5) return;  // 记录过期（use 了但没给药）
+    if (giver == subject) return;  // 自己吃药不算
+
+    Reward(giver, g_hCvarPills, "给队友递药");
+}
+
+// player_use：打包/递药都是"用 E 对准队友"，按手里武器记录执行者
+void Event_PlayerUse(Event event, const char[] name, bool dontBroadcast)
+{
+    int player = GetClientOfUserId(event.GetInt("player"));
+    int target = event.GetInt("targetid");  // 玩家实体索引 == client index?
+    if (player < 1 || player > MaxClients || !IsClientInGame(player) || IsFakeClient(player)) return;
+    if (target < 1 || target > MaxClients || !IsClientInGame(target) || GetClientTeam(target) != 2) return;
+
+    char weapon[32];
+    GetClientWeapon(player, weapon, sizeof(weapon));
+    LogMessage("[RescueHeal] PlayerUse: %d(%N) -> target %d team %d weapon %s", player, player, target, GetClientTeam(target), weapon);
+
+    if (StrEqual(weapon, "weapon_first_aid_kit", false))
+    {
+        g_iMedkitHealer[target] = player;
+        LogMessage("[RescueHeal] PlayerUse: 记录打包者 %d -> %d", player, target);
+    }
+    else if (StrEqual(weapon, "weapon_pain_pills", false) || StrEqual(weapon, "weapon_adrenaline", false))
+    {
+        g_iPillGiver[target] = player;
+        g_iPillGiverTime[target] = GetTime();
+        LogMessage("[RescueHeal] PlayerUse: 记录递药者 %d -> %d", player, target);
+    }
 }
 
 void Reward(int client, ConVar cvar, const char[] what)
 {
-    if (!g_hCvarEnable.BoolValue) return;
-    if (client < 1 || client > MaxClients || !IsClientInGame(client)) return;
-    if (IsFakeClient(client)) return;
-    if (GetClientTeam(client) != 2) return;
-    if (!IsPlayerAlive(client)) return;
+    char cvarName[64];
+    cvar.GetName(cvarName, sizeof(cvarName));
+
+    if (!g_hCvarEnable.BoolValue) { LogMessage("[RescueHeal] Reward(%N) skip: disabled", client); return; }
+    if (client < 1 || client > MaxClients || !IsClientInGame(client)) { LogMessage("[RescueHeal] Reward skip: invalid client %d", client); return; }
+    if (IsFakeClient(client)) { LogMessage("[RescueHeal] Reward(%N) skip: bot", client); return; }
+    if (GetClientTeam(client) != 2) { LogMessage("[RescueHeal] Reward(%N) skip: team %d", client, GetClientTeam(client)); return; }
+    if (!IsPlayerAlive(client)) { LogMessage("[RescueHeal] Reward(%N) skip: dead", client); return; }
 
     int amount = cvar.IntValue;
-    if (amount <= 0) return;
+    if (amount <= 0) { LogMessage("[RescueHeal] Reward(%N) skip: %s amount=0", client, cvarName); return; }
 
     int maxHP = g_hCvarMax.IntValue;
     int curHP = GetClientHealth(client);
-    if (curHP >= maxHP) return;
+    if (curHP >= maxHP)
+    {
+        LogMessage("[RescueHeal] Reward(%N) skip: at max HP (%d/%d) %s", client, curHP, maxHP, cvarName);
+        if (g_hCvarAnnounce.BoolValue)
+            PrintToChat(client, "\x04[奖励]\x01 %s，但你已满血，奖励无法生效！", what);
+        return;
+    }
 
     int newHP = curHP + amount;
     if (newHP > maxHP) newHP = maxHP;
 
     SetEntProp(client, Prop_Send, "m_iHealth", newHP);
+    LogMessage("[RescueHeal] Reward(%N): %s +%d (curHP %d -> %d)", client, cvarName, newHP - curHP, curHP, newHP);
 
     if (g_hCvarAnnounce.BoolValue)
         PrintToChat(client, "\x04[奖励]\x01 %s，恢复 \x05+%d\x01 实血！", what, newHP - curHP);

@@ -1,14 +1,145 @@
 /**
- * [L4D2] SI HUD — Unified Special Infected HP + Kill Display  v1.4.1
+ * [L4D2] SI HUD — Unified Special Infected HP + Kill Display  v1.7.0
  *
  * Replaces:
  *   - l4d2_bf_killfeedback    (was kill sounds + center text + chat; now bf does sound only)
  *   - L4D_All_Infected_HUD_HP (persistent SI HP HUD)
  *   - l4d2_si_hp_hud          (per-SI HP bar on hit)
  *
- * Two display channels — no conflicts:
- *   - PrintCenterText  (upper-center):        kill confirm ☠ + SI HP on-hit display
+ * Three display channels — no conflicts:
+ *   - PrintCenterText  (upper-center):        kill banner ☠ (skulls + points) + SI HP on-hit
  *   - PrintToChatAll   (chat area):           colored kill feed
+ *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
+ *
+ * Changelog v1.7.0:
+ *   - REAL FIX (user retested v1.6.9: garble STILL there, ~10s straight):
+ *     the "" purge was the root cause all along. PrintHintText("") destroys
+ *     the client's hint display list and resets the channel to its initial
+ *     empty state; the next CJK hint sent on the channel — no matter how it
+ *     is preceded by a " " prime — renders garbled. (v1.6.8/1.6.9 only
+ *     removed same-frame collisions BETWEEN the purge and other messages,
+ *     which is why they changed nothing.) Proof from history: the card was
+ *     never garbled before v1.6.6 introduced the purge (v1.6.4/1.6.5 used
+ *     natural fade-out). Fix: REMOVE ALL ACTIVE CLEARING. The card now fades
+ *     out with the engine's fixed ~4s hint timer — text and shadow box are
+ *     one element and fade together, nothing lingers. si_hud_killcard_time
+ *     is DEPRECATED (the engine hint duration is fixed at ~4s and cannot be
+ *     shortened; the cvar is kept only so existing cfg files don't error).
+ *
+ * Changelog v1.6.9:
+ *   - FIX (v1.6.8 did NOT fix the user's garble): v1.6.8's guard only blocked
+ *     the "prime + purge same frame" race. The OTHER collision — a card being
+ *     displayed and purged in the SAME frame — was left open: Frame_ShowKillCard
+ *     runs at frame start and resets g_bKillCardQueued, so when an expiry
+ *     deadline lands in the card's display frame the timer still sends "" ,
+ *     and card + "" hit the client in one tick. Any same-tick display+purge
+ *     can corrupt the hint render state (same family as the v3.5.1 CJK-tear
+ *     fix — two PrintHintText messages in one frame resizing the box).
+ *     Fix: a perpetual RequestFrame chain keeps a per-frame counter; the card
+ *     records the frame it was displayed in, and Timer_HideKillCard skips the
+ *     clear when it expires in that same frame (the newer card's own timer
+ *     clears it). This is order-independent — no reliance on event-vs-timer
+ *     sequencing inside a frame. Also fixed the si_hud_version ConVar never
+ *     updating (CreateConVar doesn't overwrite existing cvars — the runtime
+ *     value still said 1.6.5; plugin Version field was already correct).
+ *
+ * Changelog v1.6.8:
+ *   - FIX (user feedback): kill card text shows GARBLED (乱码) when
+ *     si_hud_killcard_time is reduced. Root cause: a frame race between the
+ *     hide timer and the card prime. Timer_HideKillCard fires at END of the
+ *     frame its deadline falls in and sends PrintHintText("") which PURGES
+ *     the client's whole hint list. If a kill lands in that same frame, the
+ *     kill's " " prime was already sent mid-frame — the wire order becomes
+ *     " " → "" → card, the purge deletes the prime, and the card becomes the
+ *     FIRST hint on an idle channel → CJK renders garbled (priming bug).
+ *     Smaller killcard_time → kills collide with expiry frames more often.
+ *     Fix: Timer_HideKillCard now skips the clear while g_bKillCardQueued is
+ *     set (a newer kill's prime is in flight — its own hide timer will clear
+ *     the card). The prime survives, so the card always replaces a live hint.
+ *
+ * Changelog v1.6.7:
+ *   - ADD: BF1-style rolling score counter — the kill banner now shows the
+ *     ACCUMULATED streak score (100 → 250 → 400 …) instead of the single
+ *     kill's points, so the number visibly grows with every kill inside the
+ *     window (BF1's "animated score counter" feel). Resets when the streak
+ *     settles (with the award sound), on round_end, map end and disconnect.
+ *
+ * Changelog v1.6.6:
+ *   - FIX (user feedback): kill card lingered ~4s despite the v1.6.5 clear.
+ *     Root cause: the KeyHintText count=0 clear is IGNORED by the L4D2 client
+ *     (card waited out the engine's fixed ~4s hint timer). Replacement:
+ *     CHudHintDisplay::AddHint treats an EMPTY-STRING hint as "clear the whole
+ *     display list" (PurgeAndDeleteElements) — so ClearHintBox now sends
+ *     PrintHintText(""). Note " " (space) does NOT work — a space is a
+ *     non-empty hint that lingers 4s (v1.4.1 finding). Card now hides after
+ *     si_hud_killcard_time (2.0s) for real.
+ *   - ADD: BF1 streak award sounds (Step 1 of the score system). When a kill
+ *     streak settles (window si_hud_bf_window ends with streak >= 2), the
+ *     killer hears the BF1 award sound for their streak tier:
+ *       streak 2-3   → bf_streak_spotting.mp3   (UI_SpottingIcon_PickUp)
+ *       streak 4-5   → bf_streak_purchase.mp3   (UI_PurchaseSuccess)
+ *       streak 6-8   → bf_streak_war_bonds.mp3  (UI_Award_WarBonds)
+ *       streak 9-11  → bf_streak_dogtag.mp3     (UI_Award_DogTag)
+ *       streak 12-14 → bf_streak_medal.mp3      (UI_Award_Medal)
+ *       streak 15+   → bf_streak_rankup.mp3     (UI_Award_RankUp)
+ *     Per-client one-shot settle timer; window-gap re-checks on fire. Streak
+ *     resets on settle and on round_end. Sounds distributed via
+ *     AddFileToDownloadsTable + PrecacheSound (same channel as v4.4.0 mode,
+ *     no sound.cache needed). New cvars si_hud_streak_sound_enable/_volume/
+ *     _l2/_l4/_l6/_l9/_l12/_l15 (empty path = tier silent).
+ *
+ * Changelog v1.6.5:
+ *   - TIMING (user feedback): kill card hides after si_hud_killcard_time
+ *     (2.0s) and the center banner after si_hud_banner_time (1.0s).
+ *   - Card clear via KeyHintText count=0 (protocol-level, EXPERIMENTAL):
+ *     HintText and KeyHintText share the client's hint display list
+ *     (CHudHintDisplay), so sending an empty KeyHintText removes the card
+ *     AND its shadow box immediately — no 4s engine hint timer, no empty
+ *     box. If this proves ineffective on this build, the card simply falls
+ *     back to natural fade-out (harmless, just stays ~4s).
+ *   - New cvar si_hud_banner_time (default 1.0) — center banner duration.
+ *
+ * Changelog v1.6.4:
+ *   - REWORK (user feedback): kill card back on PrintHintText — the hint's
+ *     dark shadow box IS the BF1-style card background the user wants
+ *     (lower-center, shadowed box). Never actively clear it: v1.4.1 proved
+ *     PrintHintText(" ") leaves an EMPTY BOX on screen — the "clear" message
+ *     is itself a 4s single-slot hint whose empty text keeps the box alive.
+ *     Natural fade-out is the only clean end: text + box fade together
+ *     (same element). The ☠ skull banner stays on PrintCenterText.
+ *   - Kill card is single-slot REPLACE on the engine side: every new hint
+ *     resets the fixed 4s display timer, so rapid kills refresh instantly
+ *     (no queue lag). First-hint priming bug handled per card: prime " "
+ *     (invisible) then show the real card next frame (v1.6.0 pattern).
+ *   - Removed: killcard clear timer / KillKillHintTimer (no active clear).
+ *   - BuildKillDisplay → BuildKillCard (card line only; streak skulls and
+ *     points live in the center banner via BuildBFBanner).
+ *
+ * Changelog v1.6.0:
+ *   - ADD: BF1-style kill card on PrintHintText (lower-center) — big type
+ *     word (KILL / HEADSHOT / MELEE / TANK / WITCH) + SI name + points.
+ *     The hint's dark shadow box doubles as the card background (that's the
+ *     BF1 look); we NEVER actively clear it (v1.4.1: even " " leaves the box
+ *     for seconds) — natural fade-out only. First-hint priming bug handled
+ *     by sending an invisible space prime, then the real card next frame.
+ *   - The ☠ skull banner on PrintCenterText (upper-center) is kept as-is.
+ *
+ * Changelog v1.6.1:
+ *   - REWORK kill card format (user feedback): single line
+ *     "[weapon] ☠ SI name" (headshot: "[weapon] ☠ SI name(head shot)")
+ *     — dropped the big type word + points line.
+ *   - ADD auto-clear: card hides after si_hud_killcard_time (default 2.5s)
+ *     via PrintHintText(" ") — text vanishes immediately; the shadow box
+ *     lingers until its natural fade (engine limitation, v1.4.1).
+ *
+ * Changelog v1.6.2:
+ *   - FIX: shadow box lingering after card text cleared — PrintHintText
+ *     CANNOT be cleanly cleared on this engine (v1.4.1 finding: even " "
+ *     leaves the dark box until natural fade). Migrated the kill card onto
+ *     the PrintCenterText channel, merged with the ☠ skull banner as ONE
+ *     multi-line message (skull row on the upper line, card on the lower
+ *     line). PrintCenterText has no shadow box and clears instantly with
+ *     " " (already proven v1.4.1). Kill card timer reuses Timer_HideHP.
  *
  * Changelog v1.4.1:
  *   - FIX: kill confirm reverted from PrintHintText to PrintCenterText.
@@ -17,6 +148,13 @@
  *     after several seconds. PrintCenterText has no shadow → clean clear.
  *   - FIX: SoundCooldownOK no longer blocks HUD/chat display. Sound cooldown
  *     now only gates the EmitSoundToClient call, not the entire kill handler.
+ *
+ * Changelog v1.5.0:
+ *   - BF-style kill banner replaces the plain "☠ 特感名" kill confirm:
+ *     line 1 = ☠ skull row, one skull per kill inside the streak window
+ *     (BF5-style side-by-side, capped at 6); line 2 = kill type · SI name
+ *     + points. Points: SI 100 / headshot +50 / melee +50 / Tank 500 /
+ *     Witch 500, all cvar-tunable. Same gate: si_hud_kill_hint_enable.
  *
  * Changelog v1.3.2:
  *   - FIX: Frame_ShowHurtVictims no longer clears PrintCenterText when all victims
@@ -46,7 +184,7 @@
 #include <sdktools>
 #include <sdkhooks>
 
-#define PLUGIN_VERSION "1.4.1"
+#define PLUGIN_VERSION "1.7.0"
 
 // ============================================================================
 // ConVar handles
@@ -58,6 +196,15 @@ ConVar g_cvHPInterval;
 ConVar g_cvHPShowWitch;
 ConVar g_cvChatEnable;
 ConVar g_cvKillHintEnable;
+ConVar g_cvKillCardEnable;
+ConVar g_cvKillCardTime;
+ConVar g_cvBannerTime;
+ConVar g_cvBFWindow;
+ConVar g_cvBFPointsSI;
+ConVar g_cvBFPointsHeadshot;
+ConVar g_cvBFPointsMelee;
+ConVar g_cvBFPointsTank;
+ConVar g_cvBFPointsWitch;
 ConVar g_cvSoundSI;
 ConVar g_cvSoundHeadshot;
 ConVar g_cvSoundTank;
@@ -67,15 +214,31 @@ ConVar g_cvSoundCommonHS;
 ConVar g_cvSoundVolume;
 ConVar g_cvSoundCooldown;
 
+// ── BF1 streak award sounds (v1.6.6) ───────────────────────
+
+ConVar g_cvStreakEnable;
+ConVar g_cvStreakVol;
+ConVar g_cvStreakSnd2;
+ConVar g_cvStreakSnd4;
+ConVar g_cvStreakSnd6;
+ConVar g_cvStreakSnd9;
+ConVar g_cvStreakSnd12;
+ConVar g_cvStreakSnd15;
+
 // ============================================================================
 // Global state
 // ============================================================================
 
-Handle    g_hHPHideTimer[MAXPLAYERS + 1];             // per-client HP hide timer
-Handle    g_hKillHintTimer[MAXPLAYERS + 1];          // per-client kill hint hide timer
+Handle    g_hHPHideTimer[MAXPLAYERS + 1];             // per-client HP/banner hide timer
+Handle    g_hStreakTimer[MAXPLAYERS + 1];            // per-client streak settle timer (v1.6.6)
 float     g_fLastKillSoundTime[MAXPLAYERS + 1];       // sound cooldown
+int       g_iKillStreak[MAXPLAYERS + 1];              // BF banner: kills in current streak
+int       g_iStreakScore[MAXPLAYERS + 1];             // BF banner: rolling score in current streak (v1.6.7)
+float     g_fLastStreakKillTime[MAXPLAYERS + 1];      // BF banner: last streak-kill time
 ArrayList g_hHurtVictims[MAXPLAYERS + 1];             // per-client victims hit this frame (AoE batch)
 bool      g_bFrameQueued[MAXPLAYERS + 1];             // per-client: RequestFrame already pending
+bool      g_bKillCardQueued[MAXPLAYERS + 1];          // per-client: kill card frame pending
+char      g_sKillCardText[MAXPLAYERS + 1][192];       // per-client: kill card text (shown next frame)
 
 // ============================================================================
 // Plugin Info
@@ -120,7 +283,32 @@ public void OnPluginStart()
         "PrintToChatAll kill feed.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     g_cvKillHintEnable = CreateConVar("si_hud_kill_hint_enable", "1",
-        "PrintHintText kill confirm for attacker (shadow box ☠).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+        "PrintCenterText kill banner for attacker (☠ skulls + type + points).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_cvKillCardEnable = CreateConVar("si_hud_killcard_enable", "1",
+        "Kill card on PrintHintText (lower-center shadow box): [weapon] ☠ SI name. Natural fade-out only (no active clear — v1.6.4).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_cvKillCardTime = CreateConVar("si_hud_killcard_time", "2.0",
+        "DEPRECATED (v1.7.0): the engine hint duration is fixed at ~4s and cannot be shortened. Kept so existing cfg files don't error; has no effect.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+
+    g_cvBannerTime = CreateConVar("si_hud_banner_time", "1.0",
+        "Center banner (skulls + points) display duration in seconds before PrintCenterText clear.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+
+    // ── BF-style kill banner (skulls + points) ─────────
+
+    g_cvBFWindow = CreateConVar("si_hud_bf_window", "4.0",
+        "Kill streak window (s): kills within this time stack side-by-side skulls.", FCVAR_NOTIFY, true, 1.0, true, 10.0);
+
+    g_cvBFPointsSI = CreateConVar("si_hud_bf_points_si", "100",
+        "BF banner points: SI kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsHeadshot = CreateConVar("si_hud_bf_points_headshot", "50",
+        "BF banner points: headshot bonus.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsMelee = CreateConVar("si_hud_bf_points_melee", "50",
+        "BF banner points: melee bonus.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsTank = CreateConVar("si_hud_bf_points_tank", "500",
+        "BF banner points: Tank kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvBFPointsWitch = CreateConVar("si_hud_bf_points_witch", "500",
+        "BF banner points: Witch kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
 
     // ── Kill sounds (all empty = off by default) ────────
 
@@ -148,6 +336,27 @@ public void OnPluginStart()
     g_cvSoundCooldown = CreateConVar("si_hud_sound_cooldown", "0.1",
         "Min seconds between kill sounds per client.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
+    // ── BF1 streak award sounds (v1.6.6) ────────────────
+
+    g_cvStreakEnable = CreateConVar("si_hud_streak_sound_enable", "1",
+        "Play the BF1 award sound when a kill streak settles (streak >= 2).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_cvStreakVol = CreateConVar("si_hud_streak_sound_volume", "0.9",
+        "Streak award sound volume, independent of si_hud_sound_volume.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_cvStreakSnd2 = CreateConVar("si_hud_streak_sound_l2", "battlefield/bf_streak_spotting.mp3",
+        "Streak 2-3 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
+    g_cvStreakSnd4 = CreateConVar("si_hud_streak_sound_l4", "battlefield/bf_streak_purchase.mp3",
+        "Streak 4-5 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
+    g_cvStreakSnd6 = CreateConVar("si_hud_streak_sound_l6", "battlefield/bf_streak_war_bonds.mp3",
+        "Streak 6-8 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
+    g_cvStreakSnd9 = CreateConVar("si_hud_streak_sound_l9", "battlefield/bf_streak_dogtag.mp3",
+        "Streak 9-11 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
+    g_cvStreakSnd12 = CreateConVar("si_hud_streak_sound_l12", "battlefield/bf_streak_medal.mp3",
+        "Streak 12-14 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
+    g_cvStreakSnd15 = CreateConVar("si_hud_streak_sound_l15", "battlefield/bf_streak_rankup.mp3",
+        "Streak 15+ award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
+
     AutoExecConfig(true, "l4d2_si_hud");
 
     // ── Events ──────────────────────────────────────────
@@ -155,6 +364,7 @@ public void OnPluginStart()
     HookEvent("player_hurt",    Event_PlayerHurt);
     HookEvent("player_death",   Event_PlayerDeath);
     HookEvent("infected_death", Event_InfectedDeath);
+    HookEvent("round_end",      Event_RoundEnd);
 }
 
 // ============================================================================
@@ -170,6 +380,12 @@ public void OnMapStart()
     PrecacheCvarSound(g_cvSoundWitch);
     PrecacheCvarSound(g_cvSoundMelee);
     PrecacheCvarSound(g_cvSoundCommonHS);
+    PrecacheCvarSound(g_cvStreakSnd2);
+    PrecacheCvarSound(g_cvStreakSnd4);
+    PrecacheCvarSound(g_cvStreakSnd6);
+    PrecacheCvarSound(g_cvStreakSnd9);
+    PrecacheCvarSound(g_cvStreakSnd12);
+    PrecacheCvarSound(g_cvStreakSnd15);
 
     // HP display is now on-hit only (player_hurt → RefreshHPForClient → 0.5s hide).
     // Persistent timer is no longer started — SI HP only shows when you damage them.
@@ -178,12 +394,33 @@ public void OnMapStart()
 public void OnMapEnd()
 {
     // HP hide timers are TIMER_FLAG_NO_MAPCHANGE — auto-cleaned on map end.
-    // Clean up per-client AoE batch state
+    // Clean up per-client AoE batch state and streak settle timers
     for (int i = 1; i <= MaxClients; i++)
     {
         g_bFrameQueued[i] = false;
         delete g_hHurtVictims[i];
+        KillStreakTimer(i);
+        g_iKillStreak[i] = 0;
+        g_iStreakScore[i] = 0;
+        g_fLastStreakKillTime[i] = 0.0;
     }
+}
+
+// ============================================================================
+// round_end — reset streak state (matches the documented "streak resets
+// per round" behavior; kills after the round ends must not settle an award)
+// ============================================================================
+
+public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        KillStreakTimer(i);
+        g_iKillStreak[i] = 0;
+        g_iStreakScore[i] = 0;
+        g_fLastStreakKillTime[i] = 0.0;
+    }
+    return Plugin_Continue;
 }
 
 // ============================================================================
@@ -193,9 +430,13 @@ public void OnMapEnd()
 public void OnClientDisconnect(int client)
 {
     g_fLastKillSoundTime[client] = 0.0;
+    g_iKillStreak[client] = 0;
+    g_iStreakScore[client] = 0;
+    g_fLastStreakKillTime[client] = 0.0;
     KillHPHideTimer(client);
-    g_hKillHintTimer[client] = null;
+    KillStreakTimer(client);
     g_bFrameQueued[client] = false;
+    g_bKillCardQueued[client] = false;
     delete g_hHurtVictims[client];
 }
 
@@ -478,6 +719,11 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
     bool melee  = IsMeleeWeapon(weaponEnt);
     bool isTank = (IsTankOrWitch(victim) == 1);
 
+    int points = g_cvBFPointsSI.IntValue;
+    if (isTank) points = g_cvBFPointsTank.IntValue;
+    else if (headshot) points += g_cvBFPointsHeadshot.IntValue;
+    if (melee) points += g_cvBFPointsMelee.IntValue;
+
     // ── Sound (independent cooldown, does NOT block HUD/chat) ──
 
     if (SoundCooldownOK(attacker))
@@ -516,25 +762,34 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
         PrintToChatAll(chatMsg);
     }
 
-    // ── Kill confirm via PrintCenterText (upper-center, NO shadow box) ──
-
-    // [v1.4.1] Reverted from PrintHintText back to PrintCenterText.
-    // PrintHintText shadow box cannot be truly cleared — even " " (space)
-    // keeps the background box visible, and the engine never removes it
-    // until natural fade-out (seconds). PrintCenterText has no shadow box,
-    // so PrintCenterText(" ") cleanly removes the message instantly.
+    // ── Kill display (v1.6.4) ──
+    // Center banner (☠ skulls + points) on PrintCenterText — cleared after
+    // si_hud_killcard_time (center text has no shadow box, " " clears it).
+    // Kill card on PrintHintText (lower-center, shadow box = the BF1-style
+    // background) — NEVER actively cleared: the engine's hint is single-slot
+    // and every message resets its fixed ~4s timer, so an active "clear"
+    // (PrintHintText " ") is itself a 4s empty hint and its box lingers
+    // (v1.4.1 finding). Natural fade-out removes text + box together.
 
     if (g_cvKillHintEnable.BoolValue)
     {
-        char killMsg[128];
-        Format(killMsg, sizeof(killMsg),
-            "☠ %s%s", siName, suffix);
+        char banner[192];
+        BuildBFBanner(banner, sizeof(banner), attacker, points,
+            isTank ? "坦克击杀" : headshot ? "爆头击杀" : melee ? "近战击杀" : "击杀",
+            siName);
+
         KillHPHideTimer(attacker);
-        KillKillHintTimer(attacker);
         delete g_hHurtVictims[attacker];
-        PrintCenterText(attacker, killMsg);
-        g_hHPHideTimer[attacker] = CreateTimer(2.5, Timer_HideHP,
+        PrintCenterText(attacker, banner);
+        g_hHPHideTimer[attacker] = CreateTimer(g_cvBannerTime.FloatValue, Timer_HideHP,
             GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
+
+        if (g_cvKillCardEnable.BoolValue)
+        {
+            char card[192];
+            BuildKillCard(card, sizeof(card), weaponDisplay, siName, headshot);
+            QueueKillCard(attacker, card);
+        }
     }
 }
 
@@ -572,19 +827,26 @@ void SurvivorKilledWitch(int attacker, Event event)
         PrintToChatAll(chatMsg);
     }
 
-    // [v1.4.1] Reverted to PrintCenterText — no shadow box to get stuck.
+    // [v1.6.4] Same two-channel layout as SurvivorKilledSI.
 
     if (g_cvKillHintEnable.BoolValue)
     {
-        char killMsg[128];
-        Format(killMsg, sizeof(killMsg),
-            "☠ WITCH 女巫%s", suffix);
+        char banner[192];
+        BuildBFBanner(banner, sizeof(banner), attacker, g_cvBFPointsWitch.IntValue,
+            "女巫击杀", "WITCH 女巫");
+
         KillHPHideTimer(attacker);
-        KillKillHintTimer(attacker);
         delete g_hHurtVictims[attacker];
-        PrintCenterText(attacker, killMsg);
-        g_hHPHideTimer[attacker] = CreateTimer(2.5, Timer_HideHP,
+        PrintCenterText(attacker, banner);
+        g_hHPHideTimer[attacker] = CreateTimer(g_cvBannerTime.FloatValue, Timer_HideHP,
             GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
+
+        if (g_cvKillCardEnable.BoolValue)
+        {
+            char card[192];
+            BuildKillCard(card, sizeof(card), weaponDisplay, "WITCH 女巫", headshot);
+            QueueKillCard(attacker, card);
+        }
     }
 }
 
@@ -628,13 +890,187 @@ void SISystemDeath(int victim, Event event)
             if (IsClientInGame(i) && GetClientTeam(i) == 2)
             {
                 KillHPHideTimer(i);
-                KillKillHintTimer(i);
                 delete g_hHurtVictims[i];
                 PrintCenterText(i, killMsg);
                 g_hHPHideTimer[i] = CreateTimer(2.5, Timer_HideHP,
                     GetClientUserId(i), TIMER_FLAG_NO_MAPCHANGE);
             }
         }
+    }
+}
+
+// ============================================================================
+// Kill card — PrintHintText (lower-center, shadow box = BF1-style
+// background), v1.6.4. Card line only: "[weapon] ☠ SI name" (+ "(head shot)").
+// Streak skulls and points live in the center banner (BuildBFBanner).
+// ☠ = U+2620 (3-byte BMP; the 4-byte 💀 does not render on Source).
+// ============================================================================
+
+void BuildKillCard(char[] buffer, int maxlen,
+                   const char[] weapon, const char[] siName, bool headshot)
+{
+    if (headshot)
+        Format(buffer, maxlen, "[%s] ☠ %s(head shot)", weapon, siName);
+    else
+        Format(buffer, maxlen, "[%s] ☠ %s", weapon, siName);
+}
+
+// ============================================================================
+// QueueKillCard — prime the hint channel, show the real card next frame.
+// The engine's hint is single-slot: every new message replaces the current
+// one and resets its fixed ~4s display timer (rapid kills refresh instantly).
+// The first hint on a freshly-purged channel renders broken (priming bug),
+// so prime with an invisible " " and show the card one frame later. Card
+// text is buffered per client so a same-frame second kill just overwrites
+// the pending card.
+// v1.7.0: NO ACTIVE CLEAR. The "" purge was the root cause of the garble —
+// it destroyed the hint display list and left the channel in its initial
+// state, so the next CJK hint (the card) always rendered garbled regardless
+// of the prime. The card now fades out naturally when the engine's fixed
+// ~4s hint timer expires; text and shadow box are one element and fade
+// together, so nothing lingers on screen.
+// ============================================================================
+
+void QueueKillCard(int client, const char[] card)
+{
+    strcopy(g_sKillCardText[client], sizeof(g_sKillCardText[]), card);
+    PrintHintText(client, " ");   // prime: invisible, activates the channel
+    if (!g_bKillCardQueued[client])
+    {
+        g_bKillCardQueued[client] = true;
+        RequestFrame(Frame_ShowKillCard, GetClientUserId(client));
+    }
+}
+
+void Frame_ShowKillCard(any userId)
+{
+    int client = GetClientOfUserId(userId);
+    g_bKillCardQueued[client] = false;
+    if (client < 1 || !IsClientInGame(client) || GetClientTeam(client) != 2)
+        return;
+    PrintHintText(client, g_sKillCardText[client]);
+}
+
+// ============================================================================
+// BF-style kill banner — "☠☠☠" skull row (one skull per kill in the streak
+// window, BF5-style side-by-side) + type line with points
+// ============================================================================
+
+void BuildBFBanner(char[] buffer, int maxlen, int client, int points,
+                   const char[] type, const char[] siName)
+{
+    // Streak: kills inside the window stack skulls; window gap resets
+    float now = GetGameTime();
+    if (now - g_fLastStreakKillTime[client] > g_cvBFWindow.FloatValue)
+    {
+        g_iKillStreak[client] = 0;
+        g_iStreakScore[client] = 0;          // v1.6.7: rolling score resets with the streak
+    }
+    g_iKillStreak[client]++;
+    g_fLastStreakKillTime[client] = now;
+
+    // v1.6.7: BF1-style rolling score counter — the banner shows the
+    // ACCUMULATED streak score (100 → 250 → 400 …), not the single kill's
+    // points. Resets when the streak settles (Timer_StreakSettle) or on
+    // round_end. This is the "animated score counter" feedback BF1 is known
+    // for — the number visibly grows with every kill in the window.
+    g_iStreakScore[client] += points;
+
+    // v1.6.6: schedule the streak settle — when the window closes with
+    // streak >= 2, the killer hears the BF1 award sound for their tier.
+    ScheduleStreakSettle(client);
+
+    char skulls[24];
+    skulls[0] = '\0';
+    int n = g_iKillStreak[client];
+    if (n > 6) n = 6;                    // cap the row
+    for (int k = 0; k < n; k++)
+        StrCat(skulls, sizeof(skulls), "☠");   // BMP U+2620 — renders (emoji pitfall)
+
+    Format(buffer, maxlen, "%s\n%s · %s  +%d", skulls, type, siName, g_iStreakScore[client]);
+}
+
+// ============================================================================
+// BF1 streak award sounds (v1.6.6)
+// ============================================================================
+
+void ScheduleStreakSettle(int client)
+{
+    if (!g_cvStreakEnable.BoolValue)
+        return;
+    KillStreakTimer(client);
+    g_hStreakTimer[client] = CreateTimer(g_cvBFWindow.FloatValue, Timer_StreakSettle,
+        GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+Action Timer_StreakSettle(Handle timer, int userId)
+{
+    int client = GetClientOfUserId(userId);
+    g_hStreakTimer[client] = null;
+    if (client < 1 || !IsClientInGame(client) || GetClientTeam(client) != 2)
+        return Plugin_Stop;
+
+    float now = GetGameTime();
+    // The window did not close yet (a kill landed near the fire time) — wait
+    // another full window. Negative now-last means a map change reset the
+    // game time: give up (OnMapEnd already reset streak state).
+    if (now < g_fLastStreakKillTime[client]
+        || now - g_fLastStreakKillTime[client] < g_cvBFWindow.FloatValue)
+    {
+        if (now < g_fLastStreakKillTime[client])
+            return Plugin_Stop;
+        g_hStreakTimer[client] = CreateTimer(g_cvBFWindow.FloatValue, Timer_StreakSettle,
+            GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+        return Plugin_Stop;
+    }
+
+    int streak = g_iKillStreak[client];
+    g_iKillStreak[client] = 0;            // settle: reset for the next run
+    g_iStreakScore[client] = 0;           // v1.6.7: rolling score resets on settle
+    g_fLastStreakKillTime[client] = 0.0;
+    if (streak < 2)
+        return Plugin_Stop;
+
+    char sound[PLATFORM_MAX_PATH];
+    ConVar cv;
+    if (streak >= 15)      cv = g_cvStreakSnd15;
+    else if (streak >= 12) cv = g_cvStreakSnd12;
+    else if (streak >= 9)  cv = g_cvStreakSnd9;
+    else if (streak >= 6)  cv = g_cvStreakSnd6;
+    else if (streak >= 4)  cv = g_cvStreakSnd4;
+    else                   cv = g_cvStreakSnd2;
+    cv.GetString(sound, sizeof(sound));
+    if (sound[0] == '\0')
+        return Plugin_Stop;
+
+    PlayStreakSound(client, sound);
+    return Plugin_Stop;
+}
+
+void PlayStreakSound(int client, const char[] sound)
+{
+    float vol = g_cvStreakVol.FloatValue;
+    if (vol <= 0.0)
+        return;
+
+    char name[PLATFORM_MAX_PATH];
+    strcopy(name, sizeof(name), sound);
+    int len = strlen(name);
+    if (len > 4 && name[len - 4] == '.')
+        name[len - 4] = '\0';
+
+    // Same UI channel as kill sounds (SNDCHAN_STATIC) — never competes with
+    // game audio; only the killer hears it (EmitSoundToClient).
+    EmitSoundToClient(client, name, 0, SNDCHAN_STATIC, SNDLEVEL_NORMAL,
+        SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
+}
+
+void KillStreakTimer(int client)
+{
+    if (g_hStreakTimer[client] != null)
+    {
+        KillTimer(g_hStreakTimer[client]);
+        g_hStreakTimer[client] = null;
     }
 }
 
@@ -805,15 +1241,3 @@ void KillHPHideTimer(int client)
         g_hHPHideTimer[client] = null;
     }
 }
-
-void KillKillHintTimer(int client)
-{
-    if (g_hKillHintTimer[client] != null)
-    {
-        KillTimer(g_hKillHintTimer[client]);
-        g_hKillHintTimer[client] = null;
-    }
-}
-
-// [v1.4.1] Timer_ShowKillHint / Timer_HideKillHint removed — kill confirm
-// now uses PrintCenterText via Timer_HideHP (no shadow-box priming needed).

@@ -169,7 +169,7 @@ bool g_bAStarPathFound;        // true when goal reached
 int g_iAStarBestIdx;           // best reachable node when goal unreachable (disconnected nav mesh)
 float g_fAStarBestG;           // gScore of best reachable node
 // int g_iAStarNodesThisFrame;    // unused
-#define ASTAR_NODES_PER_FRAME 200
+#define ASTAR_NODES_PER_FRAME 100 // v4.6: halved — each edge now does a snapped-space LOS trace
 
 // v4.0 HPA* globals (declared here for single-pass compiler)
 int g_iHPAClusterCount;
@@ -209,6 +209,14 @@ ConVar g_hCvarBeaconEnable;
 ConVar g_hCvarThetaStar, g_hCvarThetaLosMax;
 ConVar g_hCvarHpaEnable, g_hCvarHpaCellSize;
 ConVar g_hCvarFlowWeight, g_hCvarZCostFactor;
+ConVar g_hCvarGeomPenalty; // v4.6: penalize A* edges whose straight line is blocked by world geometry
+// v4.6: blocked-edge feedback — hull validation records beam pairs that fail,
+// A* re-runs with those nav edges heavily penalized. Iterated up to
+// GEOM_ITER_MAX times. Cleared per map (nav areas change with the map).
+StringMap g_hBlockedEdges;
+#define GEOM_ITER_MAX 3
+#define GEOM_ITER_EDGE_PENALTY 5.0
+int g_iGeomIter;
 ConVar g_hCvarAccuracy;
 bool g_bAccuracyEnabled = true; // v4.5: master switch for accuracy improvements (Fix 1/2/4/5/8)
 ConVar g_hCvarLegacyMode;
@@ -386,6 +394,7 @@ void GetCvars()
         if (g_hCvarFunnel3D != null) g_hCvarFunnel3D.SetBool(false);
         if (g_hCvarRepairEnable != null) g_hCvarRepairEnable.SetBool(false);
         if (g_hCvarBeaconEnable != null) g_hCvarBeaconEnable.SetBool(false);
+        if (g_hCvarGeomPenalty != null) g_hCvarGeomPenalty.SetBool(false);
     }
     }
 }

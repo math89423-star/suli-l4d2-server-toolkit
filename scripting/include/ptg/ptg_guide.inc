@@ -349,6 +349,18 @@ bool RequestGuide(int client, float duration = 5.0, bool backward = false, bool 
             if ((g_iForward+1)<g_GuideCells.Length)
             {
                 g_iForward += 1;
+                // v4.6 FIX: skip beams that failed hull validation and repair
+                // (blocked → beaconed). Drawing them puts the guide line
+                // through walls/floors — restart the beam at the dead-end cell
+                // instead, leaving a visible gap where the beacon pillar marks.
+                if (g_bBeamWalkable != null && (g_iForward - 1) < g_bBeamWalkable.Length
+                    && g_bBeamWalkable.Get(g_iForward - 1) == 0)
+                {
+                    g_GuideCells.GetArray(g_iForward, cell, sizeof(Cell));
+                    pos_forward = cell.center; // restart at the dead-end cell
+                    end = false;
+                    continue;
+                }
                 g_GuideCells.GetArray(g_iForward,cell,sizeof(Cell));
                 DrawBeam(client,pos_forward,cell.center,duration,color_forward);
                 pos_forward = cell.center;
@@ -359,6 +371,14 @@ bool RequestGuide(int client, float duration = 5.0, bool backward = false, bool 
             if (backward && g_iBackward>0)
             {
                 g_iBackward -= 1;
+                if (g_bBeamWalkable != null && g_iBackward < g_bBeamWalkable.Length
+                    && g_bBeamWalkable.Get(g_iBackward) == 0)
+                {
+                    g_GuideCells.GetArray(g_iBackward, cell, sizeof(Cell));
+                    pos_backward = cell.center; // restart at the dead-end cell
+                    end = false;
+                    continue;
+                }
                 g_GuideCells.GetArray(g_iBackward,cell,sizeof(Cell));
                 DrawBeam(client,cell.center,pos_backward,duration,color_backward);
                 pos_backward = cell.center;

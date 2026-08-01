@@ -522,6 +522,84 @@ stock float AStar_EdgeCost(int fromIndex, int toIndex, ConnectionType conType)
     return effectiveDist * GetConnectionCost(conType);
 }
 
+// v4.6 FIX: geometric visibility penalty. Nav connections are logical, not
+// physical — straight-line edges blocked by world geometry (walls/floors)
+// produce guide beams that fail hull validation (c1m1: 24/53 blocked) and get
+// beaconed, leaving the guide path fragmented. Penalize hidden edges so A*
+// prefers physically-clear routes. Uses the same LOS test as Theta* — cheap
+// enough for frame-budgeted search.
+#define GEOM_HIDDEN_COST_MULT 3.0
+
+// v4.6 FIX: lazily ground-snapped nav centers. A* searches in nav-center
+// space but the path is drawn with ground-snapped coordinates — the two
+// disagree, so search-space geometry checks judged edges that the drawn path
+// then punched straight through (c1m1 stayed ~45% blocked no matter what).
+// Snap on demand (cached, one trace per visited node) so A* judges the SAME
+// coordinates the player sees.
+ArrayList g_hAStarSnapCenters;
+
+stock void AStar_SnapCenter(int idx, float out[3])
+{
+    if (g_hAStarSnapCenters == null)
+        g_hAStarSnapCenters = new ArrayList(3);
+    while (g_hAStarSnapCenters.Length <= idx)
+    {
+        float c[3];
+        g_hAStarCenters.GetArray(g_hAStarSnapCenters.Length, c, 3);
+
+        float traceStart[3], traceEnd[3], traceHit[3];
+        traceStart = c;
+        traceStart[2] += 200.0;
+        traceEnd = c;
+        traceEnd[2] -= 800.0;
+        TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
+        if (TR_DidHit())
+        {
+            TR_GetEndPosition(traceHit);
+            c[2] = traceHit[2] + 2.0;
+        }
+        else
+        {
+            traceStart[2] = c[2] - 16.0;
+            traceEnd[2] = c[2] + 128.0;
+            TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
+            if (TR_DidHit())
+            {
+                TR_GetEndPosition(traceHit);
+                c[2] = traceHit[2] + 2.0;
+            }
+        }
+        g_hAStarSnapCenters.PushArray(c, 3);
+    }
+    g_hAStarSnapCenters.GetArray(idx, out, 3);
+}
+
+stock float AStar_EdgeCostVisible(int fromIndex, int toIndex, ConnectionType conType)
+{
+    float cost = AStar_EdgeCost(fromIndex, toIndex, conType);
+
+    // v4.6: blocked-edge feedback from hull validation — beams that failed
+    // validation (snapped coords, real geometry) record their nav-area pair
+    // here; re-runs route around them.
+    if (g_hBlockedEdges != null && g_hBlockedEdges.Size > 0)
+    {
+        char ekey[48];
+        Format(ekey, sizeof(ekey), "%d|%d", g_hAStarNodes.Get(fromIndex), g_hAStarNodes.Get(toIndex));
+        if (g_hBlockedEdges.ContainsKey(ekey))
+            cost *= GEOM_ITER_EDGE_PENALTY;
+    }
+
+    if (g_hCvarGeomPenalty != null && g_hCvarGeomPenalty.BoolValue)
+    {
+        float c1[3], c2[3];
+        AStar_SnapCenter(fromIndex, c1);
+        AStar_SnapCenter(toIndex, c2);
+        if (!twopos_traversable(c1, c2))
+            cost *= GEOM_HIDDEN_COST_MULT;
+    }
+    return cost;
+}
+
 // Initialize A* state. Call once before starting search.
 stock void AStar_Init()
 {
@@ -691,15 +769,29 @@ stock int AStar_SearchFrame(int maxNodes)
                 if (parentIdx >= 0 && parentIdx < g_hAStarNodes.Length)
                 {
                     float pCenter[3], nCenter[3];
-                    g_hAStarCenters.GetArray(parentIdx, pCenter, 3);
-                    g_hAStarCenters.GetArray(neighborIdx, nCenter, 3);
+                    // v4.6 FIX: judge LOS in SNAPPED space — the drawn path
+                    // lives there; nav-center LOS approved shortcuts that the
+                    // final beams then punched through walls.
+                    AStar_SnapCenter(parentIdx, pCenter);
+                    AStar_SnapCenter(neighborIdx, nCenter);
                     float losDist = GetVectorDistance(pCenter, nCenter, false);
                     float losMax = (g_hCvarThetaLosMax != null) ? g_hCvarThetaLosMax.FloatValue : 1500.0;
-                    if (losDist <= losMax && twopos_traversable(pCenter, nCenter))
+                    // v4.6 FIX: Theta* shortcuts must not bypass blocked edges —
+                    // directG uses the raw cost, which skipped the blocked-edge
+                    // table and routed right back through walls validation found.
+                    bool thetaEdgeBlocked = false;
+                    if (g_hBlockedEdges != null && g_hBlockedEdges.Size > 0)
+                    {
+                        char ekey[48];
+                        Format(ekey, sizeof(ekey), "%d|%d", g_hAStarNodes.Get(parentIdx), g_hAStarNodes.Get(neighborIdx));
+                        if (g_hBlockedEdges.ContainsKey(ekey))
+                            thetaEdgeBlocked = true;
+                    }
+                    if (losDist <= losMax && !thetaEdgeBlocked && twopos_traversable(pCenter, nCenter))
                     {
                         float parentGScore = g_hAStarGScore.Get(parentIdx);
                         float directG = parentGScore + AStar_EdgeCost(parentIdx, neighborIdx, CONNECTED_ADJACENT);
-                        float viaCurrentG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
+                        float viaCurrentG = currentG + AStar_EdgeCostVisible(currentIdx, neighborIdx, nc.connectiontype);
                         if (directG < viaCurrentG)
                         {
                             tentativeG = directG;
@@ -711,7 +803,7 @@ stock int AStar_SearchFrame(int maxNodes)
             }
             if (!thetaUsed)
             {
-                tentativeG = currentG + AStar_EdgeCost(currentIdx, neighborIdx, nc.connectiontype);
+                tentativeG = currentG + AStar_EdgeCostVisible(currentIdx, neighborIdx, nc.connectiontype);
                 cameFrom = currentIdx;
             }
 
@@ -843,7 +935,7 @@ stock void AStar_CellFromNode(int idx, Cell out)
     traceEnd[0] = out.center[0];
     traceEnd[1] = out.center[1];
     traceEnd[2] = out.center[2] - 800.0;   // v4.5: 300→800 down (steep slopes)
-    TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
+    TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
     if (TR_DidHit())
     {
         TR_GetEndPosition(traceHit);
@@ -853,7 +945,7 @@ stock void AStar_CellFromNode(int idx, Cell out)
     {
         traceStart[2] = out.center[2] - 16.0;
         traceEnd[2]   = out.center[2] + 128.0;
-        TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
+        TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
         if (TR_DidHit())
         {
             TR_GetEndPosition(traceHit);
@@ -2094,12 +2186,23 @@ stock bool Funnel3D_InsertZTransitions_Frame(ArrayList cells)
                 float groundCheck[3];
                 groundCheck = mid.center;
                 groundCheck[2] -= 500.0;
-                TR_TraceRayFilter(mid.center, groundCheck, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterStatic);
+                TR_TraceRayFilter(mid.center, groundCheck, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
                 if (TR_DidHit())
                 {
                     float groundPos[3];
                     TR_GetEndPosition(groundPos);
-                    mid.center[2] = groundPos[2] + 16.0;
+                    // v4.6 FIX: keep the snap inside the segment's own Z range.
+                    // The interpolated point can sit inside a floor slab, and a
+                    // 500u trace then grabs a ground on the WRONG floor — the
+                    // transition beam punches through ceilings/floors and fails
+                    // hull validation (profiled: blocked beams with dz≈200+ and
+                    // null navArea endpoints). +2 matches main-path cells.
+                    float zMin = (prev.center[2] < curr.center[2]) ? prev.center[2] : curr.center[2];
+                    float zMax = (prev.center[2] > curr.center[2]) ? prev.center[2] : curr.center[2];
+                    float snapped = groundPos[2] + 2.0;
+                    if (snapped < zMin - 20.0 || snapped > zMax + 20.0)
+                        snapped = mid.center[2]; // trace hit a different floor — keep interpolation
+                    mid.center[2] = snapped;
                 }
 
                 g_hFunnelResult.PushArray(mid, sizeof(Cell));

@@ -41,6 +41,35 @@ void Guide_ValidateWalkable_Frame(any unused)
             LogMessage("[PTG] Hull validation: %d/%d walkable — vault:%d stair:%d low:%d side:%d subdiv:%d — blocked:%d",
                 total - g_vBlocked, total, g_vVault, g_vStair, g_vLow, g_vSide, g_vSubdiv, g_vBlocked);
 
+            // v4.6 FIX: blocked-edge feedback loop. Hull validation runs on
+            // SNAPPED cell coordinates while A* searches in nav-center space —
+            // search-space geometry checks (Theta*, geom penalty) cannot see
+            // these walls, so only real validation can. Record every blocked
+            // beam's nav-area pair and rebuild with those edges penalized.
+            if (g_vBlocked > 0 && g_iGeomIter < GEOM_ITER_MAX)
+            {
+                if (g_hBlockedEdges == null) g_hBlockedEdges = new StringMap();
+                for (int b = 0; b < g_bBeamWalkable.Length; b++)
+                {
+                    if (g_bBeamWalkable.Get(b) == 1) continue;
+                    Cell bc1, bc2;
+                    g_GuideCells.GetArray(b, bc1, sizeof(Cell));
+                    g_GuideCells.GetArray(b + 1, bc2, sizeof(Cell));
+                    if (bc1.navArea == Address_Null || bc2.navArea == Address_Null) continue;
+                    char ekey[48];
+                    Format(ekey, sizeof(ekey), "%d|%d", view_as<int>(bc1.navArea), view_as<int>(bc2.navArea));
+                    g_hBlockedEdges.SetValue(ekey, 1);
+                    Format(ekey, sizeof(ekey), "%d|%d", view_as<int>(bc2.navArea), view_as<int>(bc1.navArea));
+                    g_hBlockedEdges.SetValue(ekey, 1);
+                }
+                g_iGeomIter++;
+                LogMessage("[PTG] Geometry iteration %d/%d: %d blocked beams recorded — rebuilding path",
+                    g_iGeomIter, GEOM_ITER_MAX, g_vBlocked);
+                Guide_Cleanup();
+                Guide_Prep();
+                return;
+            }
+
             // v4.0: Chain into STAGE_REPAIR after validation completes
             if (g_vBlocked > 0 && g_hCvarRepairEnable != null && g_hCvarRepairEnable.BoolValue)
             {
@@ -76,7 +105,13 @@ void Guide_ValidateWalkable_Frame(any unused)
         float distXY = GetVectorDistance(cell1.center, cell2.center, true);
 
         // Strategy 0: Ladder / elevator / vertical drop
-        if (dz > 80.0 && distXY < 40.0)
+        // v4.6 FIX: widen the vertical-transition pass. Floor-to-floor nav
+        // connections (stairwells, elevator shafts, drop-downs) are legitimate
+        // paths the player can take, but a straight hull trace between levels
+        // punches through the floor slab and fails. The old XY<40 only covered
+        // pure ladders — stairwells/atrium drops run 40..120 XY. Raise the dz
+        // bar to 100 so flat wall-clipping beams stay blocked.
+        if (dz > 100.0 && distXY < 120.0)
         {
             g_bBeamWalkable.Push(1);
             continue;
@@ -226,6 +261,358 @@ ArrayList g_hBeaconCells; // beacon positions for unreachable transitions
 
 int g_iRepairMapGen = -1; // map generation when repair started; abort if stale
 
+// v4.6 FIX: snap a position to the real walkable surface. Mirrors the ground
+// snap in AStar_CellFromNode — REPAIR's mutated coordinates (Z-stepped,
+// offset, subdivided, rerouted cells) were written back raw, leaving guide
+// lines floating in the air or clipped through floors/slopes.
+stock void GroundSnapPosition(float pos[3])
+{
+    float traceStart[3], traceEnd[3], traceHit[3];
+    traceStart = pos;
+    traceStart[2] += 200.0;
+    traceEnd = pos;
+    traceEnd[2] -= 800.0;
+    TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
+    if (TR_DidHit())
+    {
+        TR_GetEndPosition(traceHit);
+        pos[2] = traceHit[2] + 2.0; // +2 above floor surface
+    }
+    else
+    {
+        // Upward fallback for inverted surfaces
+        traceStart[2] = pos[2] - 16.0;
+        traceEnd[2]   = pos[2] + 128.0;
+        TR_TraceRayFilter(traceStart, traceEnd, MASK_PLAYERSOLID, RayType_EndPoint, TraceFilterWalkableStrict);
+        if (TR_DidHit())
+        {
+            TR_GetEndPosition(traceHit);
+            pos[2] = traceHit[2] + 2.0;
+        }
+    }
+}
+
+// ======================================================================
+// v4.6 FIX: REPAIR Strategy 4+ — multi-hop local A* reroute.
+// The old Strategy 4 tried a SINGLE adjacent nav area as a bypass waypoint
+// (cell1 → alt → cell2) and failed on most blocked beams. This collects a
+// reachable window around cell1 via BFS, runs a local A* to cell2 (with the
+// same geometric visibility penalty as the main search), converts the node
+// path to ground-snapped cells, hull-validates every new segment, and splices
+// the reroute into g_GuideCells. Falls back to the old single-hop probe when
+// the window is too small.
+// ======================================================================
+#define REROUTE_BFS_DEPTH 14
+#define REROUTE_MAX_NODES 2000
+#define REROUTE_MAX_POP 3000
+
+ArrayList g_hRrNodes;        // local idx → area int
+ArrayList g_hRrCenters;      // local idx → float[3]
+StringMap g_hRrAreaToIdx;    // "areaInt" → local idx
+ArrayList g_hRrQueue;        // BFS queue of int[2] {areaInt, depth}
+ArrayList g_hRrOpen, g_hRrClosed, g_hRrG, g_hRrCameFrom;
+
+// Collect a BFS window around startArea (depth ≤ REROUTE_BFS_DEPTH, skipping
+// blocked areas). Returns true if goalArea is inside the window.
+stock bool Reroute_Collect(Address startArea, Address goalArea)
+{
+    if (startArea == Address_Null || goalArea == Address_Null) return false;
+
+    delete g_hRrNodes;
+    g_hRrNodes = new ArrayList(1);
+    delete g_hRrCenters;
+    g_hRrCenters = new ArrayList(3);
+    delete g_hRrAreaToIdx;
+    g_hRrAreaToIdx = new StringMap();
+    delete g_hRrQueue;
+    g_hRrQueue = new ArrayList(2);
+
+    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+
+    bool foundGoal = false;
+    int goalInt = view_as<int>(goalArea);
+
+    // Seed with start
+    char key[16];
+    IntToString(view_as<int>(startArea), key, sizeof(key));
+    g_hRrAreaToIdx.SetValue(key, 0);
+    float sc[3];
+    L4D_GetNavAreaCenter(startArea, sc);
+    sc[2] += 16.0;
+    g_hRrNodes.Push(view_as<int>(startArea));
+    g_hRrCenters.PushArray(sc, 3);
+
+    int queueIdx = 0;
+    int pair[2];
+    pair[0] = view_as<int>(startArea);
+    pair[1] = 0;
+    g_hRrQueue.PushArray(pair, 2);
+
+    while (queueIdx < g_hRrQueue.Length && g_hRrNodes.Length < REROUTE_MAX_NODES)
+    {
+        int cur[2];
+        g_hRrQueue.GetArray(queueIdx, cur, 2);
+        queueIdx++;
+        if (cur[1] >= REROUTE_BFS_DEPTH) continue;
+
+        ConAdj.Clear();
+        int connCount = GetNavConnections(view_as<Address>(cur[0]), ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
+        NavConnection nc;
+        for (int n = 0; n < connCount; n++)
+        {
+            ConAdj.GetArray(n, nc, sizeof(NavConnection));
+            if (nc.navArea == Address_Null) continue;
+            int aInt = view_as<int>(nc.navArea);
+            if (aInt == cur[0]) continue;
+            if (blocked_available && L4D_NavArea_IsBlocked(nc.navArea, TEAM_SURVIVOR, true)) continue;
+
+            IntToString(aInt, key, sizeof(key));
+            if (g_hRrAreaToIdx.ContainsKey(key)) continue;
+
+            int localIdx = g_hRrNodes.Length;
+            g_hRrAreaToIdx.SetValue(key, localIdx);
+            float c[3];
+            L4D_GetNavAreaCenter(nc.navArea, c);
+            c[2] += 16.0;
+            g_hRrNodes.Push(aInt);
+            g_hRrCenters.PushArray(c, 3);
+
+            pair[0] = aInt;
+            pair[1] = cur[1] + 1;
+            g_hRrQueue.PushArray(pair, 2);
+
+            if (aInt == goalInt) foundGoal = true;
+        }
+    }
+    delete g_hRrQueue;
+    g_hRrQueue = null;
+    return foundGoal;
+}
+
+// Local A* over the collected window. Returns node index path in g_hRrPath
+// (local indices, start → goal) or null.
+ArrayList g_hRrPath;
+
+stock float Reroute_Heuristic(int localIdx, int goalLocal)
+{
+    float c1[3], c2[3];
+    g_hRrCenters.GetArray(localIdx, c1, 3);
+    g_hRrCenters.GetArray(goalLocal, c2, 3);
+    return GetVectorDistance(c1, c2, true) + FloatAbs(c2[2] - c1[2]) * 4.0;
+}
+
+stock bool Reroute_AStar(int startLocal, int goalLocal)
+{
+    if (g_hRrNodes == null || g_hRrNodes.Length < 2) return false;
+
+    delete g_hRrOpen;
+    g_hRrOpen = new ArrayList(sizeof(HeapEntry));
+    delete g_hRrClosed;
+    g_hRrClosed = new ArrayList(1);
+    delete g_hRrG;
+    g_hRrG = new ArrayList(1);
+    delete g_hRrCameFrom;
+    g_hRrCameFrom = new ArrayList(1);
+    for (int i = 0; i < g_hRrNodes.Length; i++)
+    {
+        g_hRrClosed.Push(0);
+        g_hRrG.Push(99999999.0);
+        g_hRrCameFrom.Push(-1);
+    }
+    g_hRrG.Set(startLocal, 0.0);
+    float startF = Reroute_Heuristic(startLocal, goalLocal);
+    Heap_Push(g_hRrOpen, startLocal, startF, 0.0);
+
+    if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+    if (AdjNN == null) AdjNN = new ArrayList();
+
+    int pops = 0;
+    bool found = false;
+    HeapEntry entry;
+    while (g_hRrOpen.Length > 0 && pops < REROUTE_MAX_POP)
+    {
+        if (!Heap_Pop(g_hRrOpen, entry)) break;
+        pops++;
+        int cur = entry.nodeIndex;
+        if (g_hRrClosed.Get(cur) == 1) continue;
+        float curG = g_hRrG.Get(cur);
+        if (FloatAbs(entry.gScore - curG) > 0.1) continue;
+
+        if (cur == goalLocal)
+        {
+            g_hRrClosed.Set(cur, 1);
+            found = true;
+            break;
+        }
+        g_hRrClosed.Set(cur, 1);
+
+        // Expand
+        int areaInt = g_hRrNodes.Get(cur);
+        ConAdj.Clear();
+        int connCount = GetNavConnections(view_as<Address>(areaInt), ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
+        NavConnection nc;
+        for (int n = 0; n < connCount; n++)
+        {
+            ConAdj.GetArray(n, nc, sizeof(NavConnection));
+            if (nc.navArea == Address_Null) continue;
+            if (blocked_available && L4D_NavArea_IsBlocked(nc.navArea, TEAM_SURVIVOR, true)) continue;
+
+            char key[16];
+            IntToString(view_as<int>(nc.navArea), key, sizeof(key));
+            int nLocal = -1;
+            if (!g_hRrAreaToIdx.GetValue(key, nLocal)) continue;
+            if (g_hRrClosed.Get(nLocal) == 1) continue;
+
+            // Edge cost with geometric visibility penalty (same as main search)
+            float c1[3], c2[3];
+            g_hRrCenters.GetArray(cur, c1, 3);
+            g_hRrCenters.GetArray(nLocal, c2, 3);
+            float dx = c2[0] - c1[0], dy = c2[1] - c1[1], dz = c2[2] - c1[2];
+            float cost = SquareRoot(dx * dx + dy * dy) + FloatAbs(dz) * 4.0;
+            if (g_hCvarGeomPenalty != null && g_hCvarGeomPenalty.BoolValue
+                && !twopos_traversable(c1, c2))
+                cost *= GEOM_HIDDEN_COST_MULT;
+
+            float tentative = curG + cost;
+            float oldG = g_hRrG.Get(nLocal);
+            if (tentative < oldG)
+            {
+                g_hRrG.Set(nLocal, tentative);
+                g_hRrCameFrom.Set(nLocal, cur);
+                float h = Reroute_Heuristic(nLocal, goalLocal);
+                Heap_Push(g_hRrOpen, nLocal, tentative + h, tentative);
+            }
+        }
+    }
+    if (!found) return false;
+
+    // Reconstruct local path
+    delete g_hRrPath;
+    g_hRrPath = new ArrayList();
+    int idx = goalLocal;
+    int guard = 0;
+    while (idx >= 0 && guard < REROUTE_MAX_NODES)
+    {
+        g_hRrPath.Push(idx);
+        idx = g_hRrCameFrom.Get(idx);
+        guard++;
+    }
+    // Reverse in place
+    for (int i = 0, j = g_hRrPath.Length - 1; i < j; i++, j--)
+    {
+        int tmp = g_hRrPath.Get(i);
+        g_hRrPath.Set(i, g_hRrPath.Get(j));
+        g_hRrPath.Set(j, tmp);
+    }
+    return g_hRrPath.Length >= 2;
+}
+
+// Try a multi-hop reroute between cell1 and cell2. On success, splices the
+// new waypoints into g_GuideCells at g_ri+1 and returns true.
+stock bool Repair_TryLocalReroute(Cell cell1, Cell cell2)
+{
+    if (cell1.navArea == Address_Null || cell2.navArea == Address_Null) return false;
+
+    if (!Reroute_Collect(cell1.navArea, cell2.navArea)) return false;
+    if (g_hRrNodes == null || g_hRrNodes.Length < 2) return false;
+
+    char key[16];
+    int startLocal = 0; // start seeded at local 0
+    IntToString(view_as<int>(cell2.navArea), key, sizeof(key));
+    int goalLocal = -1;
+    if (!g_hRrAreaToIdx.GetValue(key, goalLocal)) return false;
+
+    if (!Reroute_AStar(startLocal, goalLocal)) return false;
+    if (g_hRrPath == null || g_hRrPath.Length < 2) return false;
+
+    // Convert node path → ground-snapped mid cells (skip the endpoints:
+    // cell1 and cell2 keep their current coordinates)
+    ArrayList midCells = new ArrayList(sizeof(Cell));
+    float startFlow = cell1.flow, endFlow = cell2.flow;
+    int totalNodes = g_hRrPath.Length;
+    for (int p = 1; p < totalNodes - 1; p++)
+    {
+        int nLocal = g_hRrPath.Get(p);
+        Cell mc;
+        mc.navArea = view_as<Address>(g_hRrNodes.Get(nLocal));
+        g_hRrCenters.GetArray(nLocal, mc.center, 3);
+        GroundSnapPosition(mc.center);
+        mc.flow = startFlow + (endFlow - startFlow) * (float(p) / float(totalNodes - 1));
+        midCells.PushArray(mc, sizeof(Cell));
+    }
+
+    // Hull-validate every new segment (same standard as the main validate pass)
+    float midMins[3] = {-14.0, -14.0, 0.0};
+    float midMaxs[3] = { 14.0,  14.0, 44.0};
+    bool ok = true;
+    if (midCells.Length == 0)
+    {
+        // No mid cells — direct reroute must itself be traversable
+        Cell firstC, lastC;
+        g_hRrCenters.GetArray(g_hRrPath.Get(0), firstC.center, 3);
+        GroundSnapPosition(firstC.center);
+        g_hRrCenters.GetArray(g_hRrPath.Get(totalNodes - 1), lastC.center, 3);
+        GroundSnapPosition(lastC.center);
+        float s[3], e[3];
+        s = cell1.center; s[2] += 28.0;
+        e = cell2.center; e[2] += 28.0;
+        ok = TryHull(s, e, midMins, midMaxs);
+    }
+    else
+    {
+        // cell1 → mid[0]
+        float s[3], e[3];
+        s = cell1.center; s[2] += 28.0;
+        Cell mc;
+        midCells.GetArray(0, mc, sizeof(Cell));
+        e = mc.center; e[2] += 28.0;
+        if (!TryHull(s, e, midMins, midMaxs)) ok = false;
+
+        // mid[j] → mid[j+1]
+        for (int j = 0; ok && j < midCells.Length - 1; j++)
+        {
+            Cell a, b;
+            midCells.GetArray(j, a, sizeof(Cell));
+            midCells.GetArray(j + 1, b, sizeof(Cell));
+            s = a.center; s[2] += 28.0;
+            e = b.center; e[2] += 28.0;
+            if (!TryHull(s, e, midMins, midMaxs)) ok = false;
+        }
+
+        // mid[last] → cell2
+        if (ok)
+        {
+            Cell lastC;
+            midCells.GetArray(midCells.Length - 1, lastC, sizeof(Cell));
+            s = lastC.center; s[2] += 28.0;
+            e = cell2.center; e[2] += 28.0;
+            if (!TryHull(s, e, midMins, midMaxs)) ok = false;
+        }
+    }
+
+    if (!ok)
+    {
+        delete midCells;
+        return false;
+    }
+
+    // Splice mid cells into g_GuideCells at g_ri+1, keep beam walkable in sync
+    int insertIdx = g_ri + 1;
+    for (int j = 0; j < midCells.Length; j++)
+    {
+        Cell mc;
+        midCells.GetArray(j, mc, sizeof(Cell));
+        g_GuideCells.ShiftUp(insertIdx);
+        g_GuideCells.SetArray(insertIdx, mc, sizeof(Cell));
+        g_bBeamWalkable.ShiftUp(insertIdx - 1);
+        g_bBeamWalkable.Set(insertIdx - 1, 1);
+        g_bBeamWalkable.Set(insertIdx, 1);
+        insertIdx++;
+    }
+    delete midCells;
+    return true;
+}
+
 void Guide_RepairBlocked()
 {
     if (!g_hCvarRepairEnable.BoolValue) return;
@@ -301,10 +688,17 @@ void Guide_RepairBlocked_Frame(any unused)
                 if (twopos_traversable(cell1.center, test))
                 {
                     cell2.center = test;
-                    g_GuideCells.SetArray(g_ri + 1, cell2, sizeof(Cell));
-                    g_bBeamWalkable.Set(g_ri, 1);
-                    repaired = true;
-                    g_rFixed++;
+                    // v4.6 FIX: the lifted coordinate only proves the beam
+                    // clears the obstacle — snap back to the real ground and
+                    // re-verify, or the written cell floats ±48..144u in air.
+                    GroundSnapPosition(cell2.center);
+                    if (twopos_traversable(cell1.center, cell2.center))
+                    {
+                        g_GuideCells.SetArray(g_ri + 1, cell2, sizeof(Cell));
+                        g_bBeamWalkable.Set(g_ri, 1);
+                        repaired = true;
+                        g_rFixed++;
+                    }
                 }
                 // Also try lifting cell1
                 if (!repaired)
@@ -314,10 +708,14 @@ void Guide_RepairBlocked_Frame(any unused)
                     if (twopos_traversable(test, cell2.center))
                     {
                         cell1.center = test;
-                        g_GuideCells.SetArray(g_ri, cell1, sizeof(Cell));
-                        g_bBeamWalkable.Set(g_ri, 1);
-                        repaired = true;
-                        g_rFixed++;
+                        GroundSnapPosition(cell1.center);
+                        if (twopos_traversable(cell1.center, cell2.center))
+                        {
+                            g_GuideCells.SetArray(g_ri, cell1, sizeof(Cell));
+                            g_bBeamWalkable.Set(g_ri, 1);
+                            repaired = true;
+                            g_rFixed++;
+                        }
                     }
                 }
             }
@@ -359,11 +757,19 @@ void Guide_RepairBlocked_Frame(any unused)
                         cell1.center[2] -= 28.0;
                         cell2.center = e1;
                         cell2.center[2] -= 28.0;
-                        g_GuideCells.SetArray(g_ri, cell1, sizeof(Cell));
-                        g_GuideCells.SetArray(g_ri + 1, cell2, sizeof(Cell));
-                        g_bBeamWalkable.Set(g_ri, 1);
-                        repaired = true;
-                        g_rFixed++;
+                        // v4.6 FIX: the +28 hull lift proves clearance, but the
+                        // written cells must rest on real surfaces — snap both
+                        // endpoints down and re-verify before accepting.
+                        GroundSnapPosition(cell1.center);
+                        GroundSnapPosition(cell2.center);
+                        if (twopos_traversable(cell1.center, cell2.center))
+                        {
+                            g_GuideCells.SetArray(g_ri, cell1, sizeof(Cell));
+                            g_GuideCells.SetArray(g_ri + 1, cell2, sizeof(Cell));
+                            g_bBeamWalkable.Set(g_ri, 1);
+                            repaired = true;
+                            g_rFixed++;
+                        }
                     }
                 }
             }
@@ -407,20 +813,38 @@ void Guide_RepairBlocked_Frame(any unused)
                     midCell.center[0] = segs[1][0];
                     midCell.center[1] = segs[1][1];
                     midCell.center[2] = segs[1][2] - 28.0;
-
-                    // Insert new cell between g_ri and g_ri+1
-                    g_GuideCells.ShiftUp(g_ri + 1);
-                    g_GuideCells.SetArray(g_ri + 1, midCell, sizeof(Cell));
-                    g_bBeamWalkable.ShiftUp(g_ri);
-                    g_bBeamWalkable.Set(g_ri, 1);
-                    g_bBeamWalkable.Set(g_ri + 1, 1);
-                    repaired = true;
-                    g_rFixed++;
+                    // v4.6 FIX: the midpoint is a linear Z interpolation between
+                    // the two endpoints — on stairs/slopes it hovers above the
+                    // surface. Snap to ground and re-verify both new beams.
+                    GroundSnapPosition(midCell.center);
+                    if (twopos_traversable(cell1.center, midCell.center)
+                        && twopos_traversable(midCell.center, cell2.center))
+                    {
+                        // Insert new cell between g_ri and g_ri+1
+                        g_GuideCells.ShiftUp(g_ri + 1);
+                        g_GuideCells.SetArray(g_ri + 1, midCell, sizeof(Cell));
+                        g_bBeamWalkable.ShiftUp(g_ri);
+                        g_bBeamWalkable.Set(g_ri, 1);
+                        g_bBeamWalkable.Set(g_ri + 1, 1);
+                        repaired = true;
+                        g_rFixed++;
+                    }
                 }
             }
         }
 
         // Strategy 4: Local A* reroute using nav area adjacency
+        // v4.6 FIX: multi-hop window search first — the old single-hop probe
+        // below only tried ONE adjacent area and failed on most blocked beams.
+        if (!repaired && cell1.navArea != Address_Null && cell2.navArea != Address_Null)
+        {
+            if (Repair_TryLocalReroute(cell1, cell2))
+            {
+                repaired = true;
+                g_rFixed++;
+            }
+        }
+        // Strategy 4b: single-hop probe (legacy fallback when reroute window fails)
         if (!repaired && cell1.navArea != Address_Null && cell2.navArea != Address_Null)
         {
             if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
@@ -463,13 +887,21 @@ void Guide_RepairBlocked_Frame(any unused)
                 altCell.navArea = bestArea;
                 altCell.center = bestPos;
                 altCell.flow = (cell1.flow + cell2.flow) / 2.0;
-                g_GuideCells.ShiftUp(g_ri + 1);
-                g_GuideCells.SetArray(g_ri + 1, altCell, sizeof(Cell));
-                g_bBeamWalkable.ShiftUp(g_ri);
-                g_bBeamWalkable.Set(g_ri, 1);
-                g_bBeamWalkable.Set(g_ri + 1, 1);
-                repaired = true;
-                g_rFixed++;
+                // v4.6 FIX: nav-area centers sit at the area's average height
+                // (floors/slopes/ledges) — snap the reroute waypoint to the
+                // real ground and re-verify both new beams.
+                GroundSnapPosition(altCell.center);
+                if (twopos_traversable(cell1.center, altCell.center)
+                    && twopos_traversable(altCell.center, cell2.center))
+                {
+                    g_GuideCells.ShiftUp(g_ri + 1);
+                    g_GuideCells.SetArray(g_ri + 1, altCell, sizeof(Cell));
+                    g_bBeamWalkable.ShiftUp(g_ri);
+                    g_bBeamWalkable.Set(g_ri, 1);
+                    g_bBeamWalkable.Set(g_ri + 1, 1);
+                    repaired = true;
+                    g_rFixed++;
+                }
             }
         }
 

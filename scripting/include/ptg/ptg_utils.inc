@@ -145,8 +145,13 @@ bool TraceFilterWalkable(int entity, int contentsMask)
             return (doorState == 0 || doorState == 3); // closed or closing
         }
 
-        // prop_physics / prop_physics_multiplayer — blocks if solid
-        if (strncmp(class, "prop_physics", 12) == 0) return true;
+        // v4.6 FIX: prop_physics / prop_physics_multiplayer no longer block.
+        // Players can push/shove these (boxes, chairs, furniture) — treating
+        // them as walls misjudged ~45% of beams as blocked on c1m1 (hull
+        // validation + LOS all use this filter). Snap traces use the STRICT
+        // variant (TraceFilterWalkableStrict) so cells still rest on real
+        // ground, not on top of a physics prop.
+        if (strncmp(class, "prop_physics", 12) == 0) return false;
 
         // prop_dynamic_override — sometimes used as a barrier
         if (strncmp(class, "prop_dynamic_override", 21) == 0) return true;
@@ -167,12 +172,9 @@ bool TraceFilterWalkable(int entity, int contentsMask)
             return (doorState == 0 || doorState == 3); // closed or closing
         }
 
-        // func_breakable / func_breakable_surf — only block if not yet broken
-        if (strncmp(class, "func_breakable", 14) == 0)
-        {
-            int health = GetEntProp(entity, Prop_Data, "m_iHealth");
-            return (health > 0); // broken if health <= 0
-        }
+        // v4.6 FIX: func_breakable no longer blocks (player can smash through
+        // tables/chairs/windows). Same reasoning as prop_physics above.
+        if (strncmp(class, "func_breakable", 14) == 0) return false;
 
         // func_simpleladder — always pass-through
         if (strncmp(class, "func_simpleladder", 17) == 0) return false;
@@ -180,8 +182,8 @@ bool TraceFilterWalkable(int entity, int contentsMask)
         // func_wall / func_wall_toggle — invisible walls (map boundaries)
         if (strncmp(class, "func_wall", 9) == 0) return true;
 
-        // func_physbox — physics brush, blocks until destroyed/moved
-        if (strncmp(class, "func_physbox", 12) == 0) return true;
+        // v4.6 FIX: func_physbox — shoveable like prop_physics
+        if (strncmp(class, "func_physbox", 12) == 0) return false;
 
         return false;
     }
@@ -193,6 +195,68 @@ bool TraceFilterWalkable(int entity, int contentsMask)
         return false; // triggers that pass entity_solid() are intentional barriers
 
     // Default: block unknown solid entities (safe — unknown → assume obstacle)
+    return true;
+}
+
+// v4.6: STRICT variant — the pre-fix behavior (physics props and breakables
+// block). Used ONLY by ground-snap traces (AStar_CellFromNode,
+// AStar_SnapCenter, GroundSnapPosition): snapping must rest on true world
+// surfaces, not on top of a physics prop or an unbroken table.
+bool TraceFilterWalkableStrict(int entity, int contentsMask)
+{
+    if (entity == 0) return true;
+    if (entity > 0 && entity <= MaxClients) return false;
+
+    if (!entity_solid(entity)) return false;
+
+    static char class[64];
+    GetEntityClassname(entity, class, sizeof(class));
+
+    if (class[0] == 'p')
+    {
+        if (strncmp(class, "prop_static", 11) == 0) return true;
+
+        if (strncmp(class, "prop_door", 9) == 0)
+        {
+            int doorState = GetEntProp(entity, Prop_Send, "m_eDoorState");
+            return (doorState == 0 || doorState == 3);
+        }
+
+        if (strncmp(class, "prop_physics", 12) == 0) return true;
+
+        if (strncmp(class, "prop_dynamic_override", 21) == 0) return true;
+
+        return false;
+    }
+
+    if (class[0] == 'f')
+    {
+        if (strncmp(class, "func_brush", 10) == 0) return true;
+
+        if (strncmp(class, "func_door", 9) == 0)
+        {
+            int doorState = GetEntProp(entity, Prop_Send, "m_eDoorState");
+            return (doorState == 0 || doorState == 3);
+        }
+
+        if (strncmp(class, "func_breakable", 14) == 0)
+        {
+            int health = GetEntProp(entity, Prop_Data, "m_iHealth");
+            return (health > 0);
+        }
+
+        if (strncmp(class, "func_simpleladder", 17) == 0) return false;
+
+        if (strncmp(class, "func_wall", 9) == 0) return true;
+
+        if (strncmp(class, "func_physbox", 12) == 0) return true;
+
+        return false;
+    }
+
+    if (strncmp(class, "trigger_", 8) == 0)
+        return false;
+
     return true;
 }
 

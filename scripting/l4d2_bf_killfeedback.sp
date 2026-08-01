@@ -1,21 +1,77 @@
 /**
- * [L4D2] Battlefield Kill Feedback  v4.1.0
+ * [L4D2] Battlefield Kill Feedback  v4.4.0
  *
  * SOUND-ONLY: Battlefield-style kill sounds per kill type.
- * Uses game sound scripts (game_sounds_battlefield.txt) instead of
- * PrecacheSound, which is unreliable on Linux dedicated servers.
  *
- * v4.1.0 — sound script rewrite:
- *   - PrecacheSound removed entirely (engine auto-precaches sound scripts)
- *   - Cvars now accept game sound script entry names (e.g. "BfKill.SI_Kill")
- *   - EmitSoundToClient uses script entry name — no file extension or path
- *   - File downloads still handled in OnMapStart via AddFileToDownloadsTable
+ * v4.4.0 — CS:GO kill sounds for common infected (2026-08-01):
+ *   - Common-infected kills now play CS:GO original sounds (extracted
+ *     from the game files): every common kill plays
+ *     "battlefield/csgo_kill_common.mp3" (player/headshot2.wav),
+ *     headshots play "battlefield/csgo_kill_headshot.mp3"
+ *     (player/headshot1.wav) instead (previously OFF).
+ *   - BF sounds keep SI/Tank/Witch/melee duty; CS:GO sounds own commons.
+ *   - New cvar bf_kill_sound_common (plain kill); bf_kill_sound_common_hs
+ *     (headshot) default "battlefield/csgo_kill_headshot.mp3".
+ *   - SOUND_FILES gains both mp3s (download table + precache). Legacy
+ *     common_headshot.mp3 entry kept so admins can switch cvars back
+ *     without a map change.
  *
- * v4.0.x — PrecacheSound-based (BROKEN on Linux ds)
+ * v4.3.2 — VPK distribution ABANDONED (2026-07-31):
+ *   - maps/bf_sounds.vpk CRASHED the server on every boot: the engine scans
+ *     every maps\*.vpk as a map container at startup; a non-map vpk segfaults
+ *     srcds into a restart loop (hibernating -> SIGSEGV -> 10s restart).
+ *     First crash at 22:58:32 after the first restart with the vpk present.
+ *   - addons/ path (v4.3.0) was already proven dead: clients ignore
+ *     download-table entries under addons/ (0 requests in nginx log).
+ *   - Conclusion: NO server-side sound.cache distribution works on this
+ *     setup. Custom sounds need a client-side cache entry — either loose
+ *     sound/sound.cache in the client's left4dead2/sound/ or the client
+ *     building one with snd_buildsoundcachefordirectory.
+ *
+ * v4.3.1 — distribute via maps/ path instead of addons/ (2026-07-31,
+ *           SUPERSEDED by v4.3.2 — maps/ vpk crashes the server):
+ *   - PROVEN FAILURE of v4.3.0: clients IGNORE download-table entries under
+ *     addons/ (nginx log: 0 requests for addons/bf_sounds.vpk even though the
+ *     mp3 entries in the same table downloaded fine). addons/ is not a
+ *     legal client download path.
+ *   - Fix: AddFileToDownloadsTable("maps/bf_sounds.vpk") — this is the
+ *     third-party-map distribution channel (clients download maps/xxx.vpk and
+ *     relocate them into local addons/, which the engine mounts at launch,
+ *     merging its sound.cache into the sound dictionary).
+ *
+ * v4.3.0 — distribute bf_sounds.vpk instead of loose sound.cache (2026-07-31,
+ *           SUPERSEDED by v4.3.1 — addons/ path rejected by clients):
+ *   - PROVEN FAILURE of v4.2.1: every map vpk ships its own sound/sound.cache,
+ *     so clients consider the file "already present" and NEVER download the
+ *     loose one (nginx access log: 0 requests for sound/sound.cache all day).
+ *   - Package sound/sound.cache into bf_sounds.vpk and distribute.
+ *   - bf_sounds.vpk built with: mkdir bfvpk/sound && vpk -c bfvpk bf_sounds.vpk.
+ *
+ * v4.2.1 — ship sound/sound.cache (2026-07-31, SUPERSEDED by v4.3.0):
+ *   - CONFIRMED in game: custom sounds only play once the CLIENT has a
+ *     sound.cache entry (official Valve mechanism — the client builds it
+ *     with snd_buildsoundcachefordirectory; the server must distribute it).
+ *   - AddFileToDownloadsTable("sound/sound.cache") — clients never download
+ *     it (map vpk shadowing). Kept for history; NOT the mechanism in use.
+ *
+ * v4.2.0 — back to PrecacheSound + file paths (2026-07-31):
+ *   - Sound-script approach (v4.1.x) abandoned: PrecacheScriptSound is
+ *     BROKEN on this L4D2 Linux build (returns false even for engine
+ *     scripts like "Player.Jump"), and clients would need the script file.
+ *   - PrecacheSound("battlefield/si_kill.mp3", true) verified working on
+ *     this server WITHOUT sound.cache.
+ *   - Cvars hold plain file paths (relative to sound/), e.g. "battlefield/si_kill.mp3".
+ *   - EmitSoundToClient sends the full path; the client plays the mp3
+ *     downloaded via HTTP fastdl (AddFileToDownloadsTable in OnMapStart).
+ *   - Distribution: AddFileToDownloadsTable for the 6 mp3s in
+ *     sound/battlefield/, served via sv_downloadurl (nginx /l4d2_fastdl/).
+ *
+ * v4.1.x — sound script rewrite (ABANDONED, see above)
+ * v4.0.x — PrecacheSound-based
  * v3.x   — HUD + chat + sound (deprecated, split to l4d2_si_hud)
  *
- * Pure server-side.  No client files needed.
- * Requires: game_sounds_battlefield.txt in left4dead2/scripts/
+ * Clients need: the mp3s under sound/battlefield/ (HTTP fastdl) — and the
+ * sound.cache dictionary via addons/bf_sounds.vpk (auto-downloaded once).
  */
 
 #pragma semicolon 1
@@ -24,10 +80,10 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "4.1.0"
+#define PLUGIN_VERSION "4.4.0"
 
 // ============================================================================
-// ConVars — store sound SCRIPT entry names, not file paths
+// ConVars — hold file paths relative to sound/ (WITH extension)
 // ============================================================================
 
 ConVar g_cvEnabled;
@@ -36,6 +92,7 @@ ConVar g_cvSoundSIHeadshot;
 ConVar g_cvSoundTankKill;
 ConVar g_cvSoundWitchKill;
 ConVar g_cvSoundMeleeKill;
+ConVar g_cvSoundCommon;
 ConVar g_cvSoundCommonHS;
 ConVar g_cvVolume;
 ConVar g_cvCooldown;
@@ -56,7 +113,9 @@ static const char SOUND_FILES[][] = {
     "battlefield/tank_kill.mp3",
     "battlefield/witch_kill.mp3",
     "battlefield/melee_kill.mp3",
-    "battlefield/common_headshot.mp3"
+    "battlefield/common_headshot.mp3",   // legacy BF common sound (cvar-switchable)
+    "battlefield/csgo_kill_common.mp3",  // CS:GO headshot2.wav — plain common kill (v4.4.0)
+    "battlefield/csgo_kill_headshot.mp3" // CS:GO headshot1.wav — common headshot kill (v4.4.0)
 };
 
 // ============================================================================
@@ -67,7 +126,7 @@ public Plugin myinfo =
 {
     name        = "[L4D2] Battlefield Kill Feedback (sound only)",
     author      = "Claude (for suli's server)",
-    description = "BF kill sounds via game sound scripts — HUD/chat handled by l4d2_si_hud",
+    description = "BF kill sounds — HUD/chat handled by l4d2_si_hud",
     version     = PLUGIN_VERSION,
     url         = ""
 };
@@ -84,20 +143,20 @@ public void OnPluginStart()
     g_cvEnabled = CreateConVar("bf_kill_enabled", "1",
         "Enable/disable kill sounds.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    // Cvars now hold GAME SOUND SCRIPT entry names (e.g. "BfKill.SI_Kill"),
-    // NOT file paths. The engine resolves them via game_sounds_battlefield.txt.
-    g_cvSoundSIKill = CreateConVar("bf_kill_sound_si", "BfKill.SI_Kill",
-        "SI kill sound (game sound script name).", FCVAR_NOTIFY);
-    g_cvSoundSIHeadshot = CreateConVar("bf_kill_sound_headshot", "BfKill.SI_Headshot",
-        "SI headshot sound (game sound script name).", FCVAR_NOTIFY);
-    g_cvSoundTankKill = CreateConVar("bf_kill_sound_tank", "BfKill.Tank",
-        "Tank kill sound (game sound script name).", FCVAR_NOTIFY);
-    g_cvSoundWitchKill = CreateConVar("bf_kill_sound_witch", "BfKill.Witch",
-        "Witch kill sound (game sound script name).", FCVAR_NOTIFY);
-    g_cvSoundMeleeKill = CreateConVar("bf_kill_sound_melee", "BfKill.Melee",
-        "Melee kill sound (game sound script name).", FCVAR_NOTIFY);
-    g_cvSoundCommonHS = CreateConVar("bf_kill_sound_common_hs", "",
-        "Common headshot sound (game sound script name, empty=off).", FCVAR_NOTIFY);
+    g_cvSoundSIKill = CreateConVar("bf_kill_sound_si", "battlefield/si_kill.mp3",
+        "SI kill sound (file path relative to sound/).", FCVAR_NOTIFY);
+    g_cvSoundSIHeadshot = CreateConVar("bf_kill_sound_headshot", "battlefield/si_headshot_kill.mp3",
+        "SI headshot sound (file path relative to sound/).", FCVAR_NOTIFY);
+    g_cvSoundTankKill = CreateConVar("bf_kill_sound_tank", "battlefield/tank_kill.mp3",
+        "Tank kill sound (file path relative to sound/).", FCVAR_NOTIFY);
+    g_cvSoundWitchKill = CreateConVar("bf_kill_sound_witch", "battlefield/witch_kill.mp3",
+        "Witch kill sound (file path relative to sound/).", FCVAR_NOTIFY);
+    g_cvSoundMeleeKill = CreateConVar("bf_kill_sound_melee", "battlefield/melee_kill.mp3",
+        "Melee kill sound (file path relative to sound/).", FCVAR_NOTIFY);
+    g_cvSoundCommon = CreateConVar("bf_kill_sound_common", "battlefield/csgo_kill_common.mp3",
+        "Common infected kill sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
+    g_cvSoundCommonHS = CreateConVar("bf_kill_sound_common_hs", "battlefield/csgo_kill_headshot.mp3",
+        "Common infected headshot sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
 
     g_cvVolume = CreateConVar("bf_kill_volume", "0.8",
         "Sound volume.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -106,24 +165,41 @@ public void OnPluginStart()
 
     AutoExecConfig(true, "l4d2_bf_killfeedback");
 
+    // VPK distribution ABANDONED (2026-07-31 v4.3.2): addons/ path is ignored
+    // by clients (0 requests), and maps/ path CRASHES the server at startup —
+    // the engine scans maps/*.vpk as map containers; a non-map vpk there
+    // segfaults srcds on every boot (crash loop). See l4d2-bf-killfeedback
+    // memory. Custom sounds therefore require a client-side cache entry
+    // (loose sound/sound.cache) — no server-side distribution works.
+
     HookEvent("player_death",   Event_PlayerDeath);
     HookEvent("infected_death", Event_InfectedDeath);
 }
 
 // ============================================================================
-// OnMapStart — only download files. NO PrecacheSound needed.
-// Sound scripts in scripts/game_sounds_battlefield.txt are auto-precached
-// by the engine at server start.
+// OnMapStart — distribute mp3s + precache them.
+// PrecacheSound with a full file path is verified working on this Linux
+// build without sound.cache (sound scripts are NOT used; PrecacheScriptSound
+// is broken on this build).
 // ============================================================================
 
 public void OnMapStart()
 {
     if (!g_cvEnabled.BoolValue) return;
+
+    // VPK distribution abandoned — see OnPluginStart note (v4.3.2).
+    // No server-side sound.cache distribution works on this setup.
+
     for (int i = 0; i < sizeof(SOUND_FILES); i++)
     {
         char dl[PLATFORM_MAX_PATH];
         Format(dl, sizeof(dl), "sound/%s", SOUND_FILES[i]);
         AddFileToDownloadsTable(dl);
+
+        if (PrecacheSound(SOUND_FILES[i], true))
+            LogMessage("[BF] Precached: %s", SOUND_FILES[i]);
+        else
+            LogError("[BF] FAILED to precache: %s — check file exists in sound/", SOUND_FILES[i]);
     }
 }
 
@@ -208,15 +284,18 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
 public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroadcast)
 {
     if (!g_cvEnabled.BoolValue) return Plugin_Continue;
-    if (!event.GetBool("headshot")) return Plugin_Continue;
     int attacker = GetClientOfUserId(event.GetInt("attacker"));
     if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker)) return Plugin_Continue;
     if (GetClientTeam(attacker) != 2) return Plugin_Continue;
-
-    char sound[PLATFORM_MAX_PATH];
-    g_cvSoundCommonHS.GetString(sound, sizeof(sound));
-    if (sound[0] == '\0') return Plugin_Continue;
     if (GetGameTime() - g_fLastKillTime[attacker] < g_cvCooldown.FloatValue) return Plugin_Continue;
+
+    // Headshot -> headshot sound, plain kill -> plain sound (CS2 style).
+    char sound[PLATFORM_MAX_PATH];
+    if (event.GetBool("headshot"))
+        g_cvSoundCommonHS.GetString(sound, sizeof(sound));
+    else
+        g_cvSoundCommon.GetString(sound, sizeof(sound));
+    if (sound[0] == '\0') return Plugin_Continue;
 
     g_fLastKillTime[attacker] = GetGameTime();
     PlayClientSound(attacker, sound);
@@ -235,15 +314,15 @@ void PickSound(char[] buffer, int maxlen, ConVar primary, ConVar fallback)
 
 void PlayClientSound(int client, const char[] sound)
 {
-    // sound is a game sound SCRIPT entry name (e.g. "BfKill.SI_Kill"),
-    // NOT a file path. No extension stripping needed — the engine
-    // resolves it via the sound script to the actual wave file.
+    // sound is a file path relative to sound/ (e.g. "battlefield/si_kill.mp3").
     if (sound[0] == '\0') return;
     float vol = g_cvVolume.FloatValue;
     if (vol <= 0.0) return;
 
-    EmitSoundToClient(client, sound, 0, SNDCHAN_STATIC, SNDLEVEL_NORMAL,
-        SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
+    // SOUND_FROM_PLAYER (-2) = non-spatialized UI sound; SNDCHAN_STATIC = menu
+    // channel, does not compete with game audio channels.
+    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_STATIC,
+        SNDLEVEL_NORMAL, SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
 }
 
 bool IsTank(int client)
