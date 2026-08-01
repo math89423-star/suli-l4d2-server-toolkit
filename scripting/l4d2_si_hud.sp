@@ -11,6 +11,9 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.36:
+ *   - 全部商品不限购（user）——只有复活币受持有上限 5 约束。
+ *
  * Changelog v1.7.35:
  *   - FIX 团灭重开可用积分未重置 (user 实测): 存档/回滚补上钱包——
  *     团灭重开时可用积分回到本图开局值（本图内赚的作废，上图攒的保留；
@@ -486,7 +489,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.35"
+#define PLUGIN_VERSION "1.7.36"
 
 // ============================================================================
 // ConVar handles
@@ -638,17 +641,18 @@ enum struct ShopItem
 
 // 商品表（价格用户定稿 2026-08-01 修订：电击器/医疗包 4000, 复活币 12000 无限购）
 ShopItem g_ShopTable[SHOP_SLOTS] = {
-    // v1.7.33: 瓦斯罐/煤气罐去掉限购（用户）——limit 0 = 无限购
+    // v1.7.36 (user): 全部商品不限购（limit 0）——只有复活币受持有上限
+    // (si_hud_respawn_coin_max 5) 约束
     { "瓦斯罐",      "weapon_propanetank",             800,  0 },
     { "煤气罐",      "weapon_oxygentank",              800,  0 },
-    { "汽油桶",      "weapon_gascan",                 2000,  2 },
-    { "止痛药",      "weapon_pain_pills",             2000,  2 },
-    { "肾上腺素",    "weapon_adrenaline",             2000,  2 },
-    { "电击器",      "weapon_defibrillator",          4000,  2 },
-    { "医疗包",      "weapon_first_aid_kit",          4000,  2 },
-    { "激光瞄准",    "weapon_upgradepack_laser_sight", 3500,  1 },
-    { "M60 轻机枪",  "weapon_rifle_m60",              5000,  1 },
-    { "榴弹发射器",  "weapon_grenade_launcher",       8000,  1 },
+    { "汽油桶",      "weapon_gascan",                 2000,  0 },
+    { "止痛药",      "weapon_pain_pills",             2000,  0 },
+    { "肾上腺素",    "weapon_adrenaline",             2000,  0 },
+    { "电击器",      "weapon_defibrillator",          4000,  0 },
+    { "医疗包",      "weapon_first_aid_kit",          4000,  0 },
+    { "激光瞄准",    "weapon_upgradepack_laser_sight", 3500,  0 },
+    { "M60 轻机枪",  "weapon_rifle_m60",              5000,  0 },
+    { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0 },
     { "复活币",      "",                              12000,  0 }
 };
 
