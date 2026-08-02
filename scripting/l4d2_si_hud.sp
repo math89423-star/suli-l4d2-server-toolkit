@@ -681,7 +681,7 @@
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 #include <float>         // v1.7.80: 火炮 Sqrt/Cos/Sin
 
-#define PLUGIN_VERSION "1.7.93"
+#define PLUGIN_VERSION "1.7.99"
 
 // ============================================================================
 // ConVar handles
@@ -752,35 +752,29 @@ ConVar g_cvArtTargetTime;
 #define ART_CEIL_LOW         600.0    // 天花板 < 600 且上方非开阔 → 无效（拒绝确认）
 #define ART_CEIL_MID         900.0    // 天花板 ≥ 900 → 中等规模
 #define ART_GRAVITY          800.0    // 引擎重力 u/s²（落时 t=sqrt(2h/g)）
-#define ART_MAX_CANS         32       // 单次空袭罐数上限（防 cvar 误配）
+#define ART_MAX_TOTAL        600      // v1.7.95: 单次空袭罐数硬上限（防 cvar 误配超载）
+#define ART_CANS_MIN_PER_SEC 2        // v1.7.96: 每秒落罐数随机范围（用户拍板 2-3）
+#define ART_CANS_MAX_PER_SEC 3
 #define ART_CAN_PROPANE_PCT  70       // 罐型混合：70% 瓦斯罐 + 30% 煤气罐
 #define ART_TICK_INT         0.05     // 瞄准心跳间隔（标记更新 + 右键/超时/死亡检测）
 
 bool      g_bArtAiming[MAXPLAYERS + 1];       // 瞄准指示中
 int       g_iArtSlot[MAXPLAYERS + 1];         // 商店槽位（取消退款用）
 int       g_iArtPrice[MAXPLAYERS + 1];        // 购买价格（取消退款用）
-int       g_iArtMagnum[MAXPLAYERS + 1];       // 服务器马格南 entref（0 = 用的是玩家自己的）
 int       g_iArtMarker[MAXPLAYERS + 1];       // env_sprite 标记 entref
 Handle    g_hArtAimTimer[MAXPLAYERS + 1];     // 瞄准心跳
 float     g_fArtAimEnd[MAXPLAYERS + 1];       // 超时 GameTime
-char      g_sArtPrevWeapon[MAXPLAYERS + 1][32]; // 原副武器 classname（恢复用）
-char      g_sArtPrevMelee[MAXPLAYERS + 1][64];  // v1.7.81: 原近战种类名（m_MeleeWeaponName，精确恢复）
-int       g_iArtPrevUpgrade[MAXPLAYERS + 1];  // v1.7.82: 原副武器升级位全量（激光/高爆/燃烧）
-int       g_iArtPrevClip[MAXPLAYERS + 1];     // v1.7.82: 原副武器弹匣 m_iClip1（-1 = 不恢复）
 ArrayList g_hArtCans;                         // 活跃罐子 entref（换图/卸载兜底清理）
 int       g_iBeamLaser;                       // precache 的 beam 模型索引（OnMapStart）
 int       g_iBeamHalo;
 float     g_fArtNextBuyTime;                  // v1.7.80: 下次可购买 GameTime（轰炸中+冷却=禁止全体购买）
-ConVar g_cvArtCountOut;
-ConVar g_cvArtCountMid;
-ConVar g_cvArtCountSmall;
+ConVar g_cvArtDuration;      // v1.7.95: 轰炸总时长（秒）
 ConVar g_cvArtRadiusOut;
 ConVar g_cvArtRadiusMid;
 ConVar g_cvArtRadiusSmall;
 ConVar g_cvArtHeightMin;
 ConVar g_cvArtHeightMax;
 ConVar g_cvArtDelay;
-ConVar g_cvArtStagger;
 ConVar g_cvArtBurn;
 ConVar g_cvArtCooldown;   // v1.7.80: 轰炸结束后的全局硬冷却（用户：10 秒）
 ConVar g_cvSoundSI;
@@ -874,27 +868,28 @@ enum struct ShopItem
     int  cat;           // v1.7.64: 菜单分类 0=武器 1=道具 2=医疗 3=其他
 }
 
-// 商品表（价格用户定稿 2026-08-01 修订：电击器/医疗包 4000, 复活币 12000 无限购）
+// 商品表（价格用户定稿 2026-08-02 修订：近战盲盒 1000/激光 1500/罐子 100/医疗包
+// 3000/电击器 3500/药 1000/肾上腺素 1000/烟花 1200/油桶 3500；复活币 12000 不变）
 ShopItem g_ShopTable[SHOP_SLOTS] = {
     // v1.7.36 (user): 全部商品不限购（limit 0）——只有复活币受持有上限
     // (si_hud_respawn_coin_max 5) 约束
-    { "瓦斯罐",      "weapon_propanetank",             800,  0,  1 },
-    { "煤气罐",      "weapon_oxygentank",              800,  0,  1 },
-    { "汽油桶",      "weapon_gascan",                 5000,  0,  1 },   // v1.7.72: 灌油关卡逃生价值，用户定稿 5000
-    { "止痛药",      "weapon_pain_pills",             2000,  0,  2 },
-    { "肾上腺素",    "weapon_adrenaline",             2000,  0,  2 },
-    { "电击器",      "weapon_defibrillator",          4000,  0,  2 },
-    { "医疗包",      "weapon_first_aid_kit",          4000,  0,  2 },
-    { "激光瞄准",    "weapon_upgradepack_laser_sight", 3500,  0,  0 },   // v1.7.79: 恢复正式价 3500
-    { "M60 轻机枪",  "weapon_rifle_m60",              5000,  0,  0 },
+    { "瓦斯罐",      "weapon_propanetank",             100,  0,  1 },   // v1.7.96: 用户定稿 100
+    { "煤气罐",      "weapon_oxygentank",              100,  0,  1 },   // v1.7.96: 用户定稿 100
+    { "汽油桶",      "weapon_gascan",                 3500,  0,  1 },   // v1.7.96: 用户定稿 3500（原 5000）
+    { "止痛药",      "weapon_pain_pills",             1000,  0,  2 },   // v1.7.96: 用户定稿 1000（原 2000）
+    { "肾上腺素",    "weapon_adrenaline",             1000,  0,  2 },   // v1.7.96: 用户定稿 1000（原 2000）
+    { "电击器",      "weapon_defibrillator",          3500,  0,  2 },   // v1.7.96: 用户定稿 3500（原 4000）
+    { "医疗包",      "weapon_first_aid_kit",          3000,  0,  2 },   // v1.7.96: 用户定稿 3000（原 4000）
+    { "激光瞄准",    "weapon_upgradepack_laser_sight", 1500,  0,  0 },   // v1.7.96: 用户定稿 1500（原 3500）
+    { "M60 轻机枪",  "weapon_rifle_m60",              5000,  0,  0 },   // v1.7.96: 用户定稿 5000
     { "电锯",        "weapon_chainsaw",               5000,  0,  0 },   // v1.7.44
-    { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0,  0 },
-    { "复活币",      "",                              12000,  0,  3 },
+    { "榴弹发射器",  "weapon_grenade_launcher",       6500,  0,  0 },   // v1.7.96: 用户定稿 6500（原 8000）
+    { "复活币",      "",                              9000,  0,  3 },   // v1.7.96: 用户定稿 9000（原 12000）
     { "透视特感",    "wallhack",                      6000,   0,  3 },   // v1.7.79: 恢复正式价 6000（全局蓝色高亮 3 分钟，可续费至 15 分钟）
-    { "近战盲盒",    "melee_box",                     3000,   0,  0 },   // v1.7.79: 恢复正式价 3000（随机一把非电锯近战）
-    { "烟花",        "weapon_fireworkcrate",          2500,   0,  1 },   // v1.7.72: 道具类（用户定稿 2500）
-    { "火炮支援1", "artillery",                     1,     0,  3 },   // v1.7.93: 用户定稿——正式命名火炮支援1，价格暂定 1 分（随时可调）
-    { "火炮支援II",  "ext_artillery2",                1,     0,  3 }     // v1.7.93: 榴弹炮弹雨（独立插件 l4d2_shop_artillery2 接管；TEMP-TEST 1 分，测完恢复 8000）
+    { "近战盲盒",    "melee_box",                     1000,   0,  0 },   // v1.7.96: 用户定稿 1000（原 3000）
+    { "烟花",        "weapon_fireworkcrate",          1200,   0,  1 },   // v1.7.96: 用户定稿 1200（原 2500）
+    { "天火轰炸", "artillery",                     5000,   0,  3 },  // v1.7.99: 正式命名+定价（原火炮支援1：瓦斯/煤气罐雨）
+    { "狂欢轰炸", "artillery2",                    6000,   0,  3 }   // v1.7.99: 正式命名+定价（原火炮支援2：油桶+烟花雨）
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -915,8 +910,6 @@ char g_MeleePool[MELEE_POOL_COUNT][16] = {
 #define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
 // v1.7.80: 火炮支援1（!shop 特殊商品）——BFV 式瞄准轰炸
 #define ARTILLERY_SLOT      15      // g_ShopTable 槽位（= 火炮支援1）
-// v1.7.93: 火炮支援II（!shop 特殊商品）——榴弹炮弹雨，独立插件接管
-#define ARTILLERY2_SLOT     16      // g_ShopTable 槽位（= 火炮支援II，classname ext_ 前缀）
 #define WALLHACK_DURATION   180.0   // v1.7.67: 3 分钟（用户定稿，原 300=5 分钟）
 #define WALLHACK_CAP        900.0   // v1.7.69: 可续费，单次效果累计上限 15 分钟（用户定稿）
 bool      g_bWallhack[MAXPLAYERS + 1];          // 透视生效中
@@ -959,47 +952,6 @@ public Plugin myinfo =
     url         = ""
 };
 
-// v1.7.93: 商店扩展 API——外部插件商品（classname "ext_" 前缀）通过
-// SH_OnShopItemBuy forward 接管购买，积分用 SH_GetWallet/SH_AddWallet 读写。
-// 用途: 火炮支援II 榴弹雨（l4d2_shop_artillery2.smx，独立插件维护）。
-// 扩展插件需在 AskPluginLoad2 里 RegPluginLibrary("l4d2_shop_ext")（可选），
-// forward/native 由 SM 自动绑定，无需显式加载依赖。
-// forward 返回值: Plugin_Handled = 接管（扣款已在上游完成）;
-// Plugin_Stop = 拒绝且已自行提示（si_hud 静默退款）; Plugin_Continue = 拒绝。
-forward Action SH_OnShopItemBuy(int client, int slot, const char[] classname, int price);
-native int  SH_GetWallet(int client);
-native void SH_AddWallet(int client, int amount);   // 负 = 扣分
-
-Handle g_hShopBuyForward;
-
-public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
-{
-    CreateNative("SH_GetWallet", Native_SH_GetWallet);
-    CreateNative("SH_AddWallet", Native_SH_AddWallet);
-    RegPluginLibrary("l4d2_si_hud");
-    return APLRes_Success;
-}
-
-public int Native_SH_GetWallet(Handle plugin, int numParams)
-{
-    return g_iWallet[GetNativeCell(1)];
-}
-
-public int Native_SH_AddWallet(Handle plugin, int numParams)
-{
-    int client = GetNativeCell(1);
-    if (client < 1 || client > MaxClients)
-        return 0;
-    int amount = GetNativeCell(2);
-    if (amount > 0 && g_iWallet[client] + amount < 0)
-        g_iWallet[client] = 0;
-    else
-        g_iWallet[client] += amount;
-    if (g_iWallet[client] < 0)
-        g_iWallet[client] = 0;
-    return g_iWallet[client];
-}
-
 // ============================================================================
 // OnPluginStart
 // ============================================================================
@@ -1008,10 +960,6 @@ public void OnPluginStart()
 {
     CreateConVar("si_hud_version", PLUGIN_VERSION,
         "SI HUD version", FCVAR_NOTIFY | FCVAR_DONTRECORD);
-
-    // v1.7.93: 外部商品购买 forward（reload 时旧句柄已在 OnPluginEnd 关闭）
-    g_hShopBuyForward = CreateGlobalForward("SH_OnShopItemBuy", ET_Event,
-        Param_Cell, Param_Cell, Param_String, Param_Cell);
 
     g_cvEnable = CreateConVar("si_hud_enable", "1",
         "Master switch (0=off, 1=on).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -1181,17 +1129,14 @@ public void OnPluginStart()
         "Enable the artillery strike shop item (0=off, purchase refunded).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     g_cvArtTargetTime = CreateConVar("si_hud_art_target_time", "15.0",
         "Seconds to designate the strike target with the magnum before auto-cancel+refund.", FCVAR_NOTIFY, true, 3.0, true, 60.0);
-    g_cvArtCountOut = CreateConVar("si_hud_art_count_out", "12",
-        "Cans dropped in open areas (no ceiling within 4096 units).", FCVAR_NOTIFY, true, 1.0, true, 32.0);
-    g_cvArtCountMid = CreateConVar("si_hud_art_count_mid", "8",
-        "Cans dropped indoors with ceiling >= 900 units.", FCVAR_NOTIFY, true, 1.0, true, 32.0);
-    g_cvArtCountSmall = CreateConVar("si_hud_art_count_small", "5",
-        "Cans dropped indoors with ceiling 600-900 units.", FCVAR_NOTIFY, true, 1.0, true, 32.0);
-    g_cvArtRadiusOut = CreateConVar("si_hud_art_radius_out", "500.0",
+    // v1.7.96: 持续轰炸——时长秒数 × 每秒随机 2-3 罐（用户拍板：30s ≈ 60-90 罐）
+    g_cvArtDuration = CreateConVar("si_hud_art_duration", "30.0",
+        "Total barrage duration in seconds (2-3 cans fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+    g_cvArtRadiusOut = CreateConVar("si_hud_art_radius_out", "750.0",
         "Spread radius (units) of the open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
-    g_cvArtRadiusMid = CreateConVar("si_hud_art_radius_mid", "350.0",
+    g_cvArtRadiusMid = CreateConVar("si_hud_art_radius_mid", "525.0",
         "Spread radius for ceiling >= 900.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
-    g_cvArtRadiusSmall = CreateConVar("si_hud_art_radius_small", "250.0",
+    g_cvArtRadiusSmall = CreateConVar("si_hud_art_radius_small", "375.0",
         "Spread radius for ceiling 600-900.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArtHeightMin = CreateConVar("si_hud_art_height_min", "1800.0",
         "Min drop height (units) for open areas.", FCVAR_NOTIFY, true, 400.0, true, 8000.0);
@@ -1200,8 +1145,6 @@ public void OnPluginStart()
     // v1.7.93: si_hud_art_damage 已删除——爆炸伤害由模型 propdata 决定（原版 200 falloff）
     g_cvArtDelay = CreateConVar("si_hud_art_delay", "0.5",
         "Seconds between confirm and the first can spawning.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvArtStagger = CreateConVar("si_hud_art_stagger", "1.0",
-        "Seconds between each can spawn (barrage cadence).", FCVAR_NOTIFY, true, 0.0, true, 2.0);
     g_cvArtBurn = CreateConVar("si_hud_art_burn", "2.0",
         "Secs the can keeps burning after landing (burns out, then detonates).", FCVAR_NOTIFY, true, 1.0, true, 60.0);
     g_cvArtCooldown = CreateConVar("si_hud_art_cooldown", "10.0",
@@ -1366,11 +1309,6 @@ public void OnPluginEnd()
     ScoreSave_All();
     WallhackEndAll();                        // v1.7.64: 卸载/reload 清理透视克隆
     Art_CleanupAll();                        // v1.7.80: 卸载/reload 清理火炮瞄准状态/残留罐子
-    if (g_hShopBuyForward != null)           // v1.7.93: 外部商品 forward 句柄
-    {
-        CloseHandle(g_hShopBuyForward);
-        g_hShopBuyForward = null;
-    }
 }
 
 void ScoreSave_Init()
@@ -1910,7 +1848,7 @@ public void OnClientPostAdminCheck(int client)
 
 public void OnClientDisconnect(int client)
 {
-    ArtEndDesignate(client, true, false);   // v1.7.80: 断线取消火炮瞄准（退款+不恢复武器，须在 ScoreSave 前）
+    ArtEndDesignate(client, true);          // v1.7.80: 断线取消火炮瞄准（退款，须在 ScoreSave 前）
     ScoreSave_Player(client);            // v1.7.34: 断线保存（必须在清零前）
     // v1.7.43: 记录断线 SteamID + 时间（换图重连识别用）
     if (GetClientAuthId(client, AuthId_Steam2, g_sDiscAuth[client], sizeof(g_sDiscAuth[]), false))
@@ -3639,9 +3577,11 @@ void ShopBuy(int client, int slot)
         return;
     }
 
-    // v1.7.80: 火炮支援1——进入瞄准指示（服务器马格南设计器，射击确认轰炸）。
+    // v1.7.80: 火炮支援1/2——进入瞄准指示（服务器马格南设计器，射击确认轰炸）。
     // 不 spawn 实体；扣款已在上游完成，取消/超时/死亡/断线由 ArtEndDesignate 退款。
-    if (StrEqual(g_ShopTable[slot].classname, "artillery"))
+    // v1.7.98: 支援2 = 油桶/烟花模型池，与支援1 共用瞄准/冷却/半径（仅模型与文案不同）
+    if (StrEqual(g_ShopTable[slot].classname, "artillery")
+        || StrEqual(g_ShopTable[slot].classname, "artillery2"))
     {
         // v1.7.82: 倒地/死亡状态拦截（用户边界审查）——倒地/死亡无法开火确认，
         // 买了也立即被心跳退款，直接拒绝更清晰
@@ -3649,7 +3589,8 @@ void ShopBuy(int client, int slot)
         {
             g_iWallet[client] += price;
             g_iShopBought[client][slot]--;
-            PrintToChat(client, "\x04[商店]\x01 倒地/死亡状态无法使用\x05火炮支援1\x01，积分已退回");
+            PrintToChat(client, "\x04[商店]\x01 倒地/死亡状态无法使用\x05%s\x01，积分已退回",
+                g_ShopTable[slot].name);
             return;
         }
         // v1.7.80: 全局硬冷却——轰炸中/结束后 si_hud_art_cooldown 秒内全体禁止购买（用户拍板）
@@ -3659,10 +3600,11 @@ void ShopBuy(int client, int slot)
             g_iWallet[client] += price;
             g_iShopBought[client][slot]--;
             if (wait > 0.0)
-                PrintToChat(client, "\x04[商店]\x01 \x05火炮支援1\x01 冷却中，\x03%d\x01 秒后可购买",
-                    RoundToCeil(wait));
+                PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 冷却中，\x03%d\x01 秒后可购买",
+                    g_ShopTable[slot].name, RoundToCeil(wait));
             else
-                PrintToChat(client, "\x04[商店]\x01 \x05火炮支援1\x01 不可用，积分已退回");
+                PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 不可用，积分已退回",
+                    g_ShopTable[slot].name);
             return;
         }
         if (g_bArtAiming[client])
@@ -3673,34 +3615,6 @@ void ShopBuy(int client, int slot)
             return;
         }
         ArtStartDesignate(client, slot, price);
-        return;
-    }
-
-    // v1.7.93: 外部插件商品（classname 以 "ext_" 开头，如 ext_artillery2）——
-    // Fire 全局 forward SH_OnShopItemBuy，由外部插件接管（扣款已在上游完成）。
-    // 返回值约定: Plugin_Handled = 接管成功（外部插件自行后续退款）;
-    // Plugin_Stop = 外部插件拒绝且已自行提示（静默退款）;
-    // Plugin_Continue = 拒绝/未安装（退款 + 通用不可用提示）。
-    if (StrContains(g_ShopTable[slot].classname, "ext_") == 0)
-    {
-        Action ret = Plugin_Continue;
-        if (g_hShopBuyForward != null)
-        {
-            Call_StartForward(g_hShopBuyForward);
-            Call_PushCell(client);
-            Call_PushCell(slot);
-            Call_PushString(g_ShopTable[slot].classname);
-            Call_PushCell(price);
-            Call_Finish(ret);
-        }
-        if (ret != Plugin_Handled)
-        {
-            g_iWallet[client] += price;
-            g_iShopBought[client][slot]--;
-            if (ret != Plugin_Stop)
-                PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 当前不可用，积分已退回",
-                    g_ShopTable[slot].name);
-        }
         return;
     }
 
@@ -3781,9 +3695,7 @@ void ShopCategoryMenu(int client, int cat)
         }
 
         if (i == ARTILLERY_SLOT && g_iWallet[client] >= price)   // v1.7.80: 火炮提示使用方式
-            Format(line, sizeof(line), "%s ·马格南射击轰炸", line);
-        else if (i == ARTILLERY2_SLOT && g_iWallet[client] >= price)   // v1.7.93: 榴弹雨提示使用方式
-            Format(line, sizeof(line), "%s ·马格南射击轰炸", line);
+            Format(line, sizeof(line), "%s ·左键射击轰炸", line);
 
         IntToString(i, info, sizeof(info));
         menu.AddItem(info, line);
@@ -4198,83 +4110,28 @@ void KillRespawnTimer(int client)
 // ============================================================================
 // v1.7.80: 火炮支援1（!shop 特殊商品「artillery」）——BFV 式目标指示轰炸
 //
-// 交互（BFV 召唤火炮复刻，用户拍板）：
-//   购买 → 扣款 → 切到服务器马格南（副武器已是马格南则不动）→ 准星瞄准处
-//   显示爆炸半径圆圈+光柱+光点（全队可见；天花板 <600 或瞄天空 → 变红无效）
-//   → 马格南开火 = 确认轰炸（weapon_fire 事件判定，射击点被火炮覆盖）→
-//   马格南立刻移除并恢复原副武器（激光升级位一并恢复）→ 右键 / 15s 超时 /
-//   死亡 / 断线 → 取消退款。
-// 轰炸：N 个着火的瓦斯罐(weapon_propanetank)/煤气罐(weapon_oxygentank) 从高空
-//   坠落（70/30 混合；汽油桶排除——gascan 点火以燃烧为主爆炸不可靠），错峰
-//   生成（si_hud_art_stagger）→ 落地时刻定时器强制引爆（attacker=购买者，
-//   期望击杀分归购买者，不强求）→ 原版爆炸伤害（全伤害，含队友，受友伤规则）。
-// 室内自适应：天花板 ≥900 → 吊顶下 150u 生成 6 罐/350 半径；600-900 → 3 罐/250；
-//   <600 或瞄天空 → 无效（红圈，确认被拒，留在瞄准模式）。
-// 天花板阈值 600/900/4096 与 70/30 罐型比例写死（行为规则，同价格写死哲学）。
+// 交互（v1.7.95 用户拍板简化）：购买 → 扣款 → 准星瞄准处显示爆炸半径圆圈+
+//   光柱+光点（全队可见；天花板 <600 或瞄天空 → 变红无效）→ 玩家当前武器
+//   任意开火（weapon_fire）= 确认轰炸 → 右键 / 15s 超时 / 死亡 / 断线 → 取消
+//   退款。不再切马格南（彻底消除切枪/恢复武器类问题）。
+// 轰炸（v1.7.96 按秒随机）：着火的 prop_physics + 罐模型（70% 瓦斯罐/30% 煤气
+//   罐，汽油桶排除）从高空坠落，si_hud_art_duration 秒内每秒随机 2-3 罐
+//   （默认 30s ≈ 60-90 罐）→ 落地时刻定时器强制引爆（v1.7.94: attacker=
+//   inflictor=罐子自身，召唤者/队友全吃伤害）→ 原版爆炸伤害（全伤害，含队友，
+//   受友伤规则）。
+// 室内自适应：天花板 ≥900 → 吊顶下 150u 生成，半径缩到 525；600-900 → 375；
+//   落罐密度不变（用户拍板 2-3 罐/秒）；<600 或瞄天空 → 无效（红圈，确认被拒，
+//   留在瞄准模式）。天花板阈值 600/900/4096 与 70/30 罐型比例写死。
 // 全局状态/常量声明在 ConVar 区（ShopBuy/OnMapStart 提前引用）。
 // ============================================================================
 
-// 进入瞄准指示：切服务器马格南 + 启动心跳 + 创建标记
+// 进入瞄准指示：创建标记 + 启动心跳（v1.7.95: 不再切换马格南——玩家当前武器
+// 任意开火即确认，右键取消；彻底消除切枪/恢复武器的问题）
 void ArtStartDesignate(int client, int slot, int price)
 {
     g_iArtSlot[client] = slot;
     g_iArtPrice[client] = price;
-    g_iArtMagnum[client] = 0;
-    g_sArtPrevWeapon[client][0] = '\0';
-    g_sArtPrevMelee[client][0] = '\0';
-    g_iArtPrevUpgrade[client] = 0;
-    g_iArtPrevClip[client] = -1;
     g_fArtAimEnd[client] = GetGameTime() + g_cvArtTargetTime.FloatValue;
-
-    // 副武器处理：已是马格南 → 不动（用户拍板）；否则保存原武器 → 切服务器
-    // 马格南（引擎播放武器拔出动画；原武器自动掉落 → 立即移除，恢复时按
-    // classname 重给 + 补激光位，避免地面遗留双武器）
-    // v1.7.81 FIX: 近战(weapon_melee)没有 m_upgradeBitVec 属性，GetEntProp 直接
-    // 抛异常中断（日志实锤 17:07:24 "Property not found (entity 639/weapon_melee)"）
-    // → 马格南未给 + g_bArtAiming 卡死。改为 HasEntProp 保护读属性。
-    // v1.7.82: 升级位全量保存（不只激光位）+ 弹匣 m_iClip1 保存（恢复时补回）。
-    int weapon = GetPlayerWeaponSlot(client, 1);
-    if (weapon > 0 && IsValidEntity(weapon))
-    {
-        char cls[32];
-        GetEntityClassname(weapon, cls, sizeof(cls));
-        if (!StrEqual(cls, "weapon_pistol_magnum"))
-        {
-            g_sArtPrevMelee[client][0] = '\0';
-            if (StrEqual(cls, "weapon_melee"))
-                Art_SaveMeleeName(client, weapon);   // v1.7.89: 多属性名兜底（见实现区）
-            if (HasEntProp(weapon, Prop_Send, "m_upgradeBitVec"))
-                g_iArtPrevUpgrade[client] = GetEntProp(weapon, Prop_Send, "m_upgradeBitVec");
-            if (HasEntProp(weapon, Prop_Send, "m_iClip1"))
-                g_iArtPrevClip[client] = GetEntProp(weapon, Prop_Send, "m_iClip1");
-            strcopy(g_sArtPrevWeapon[client], sizeof(g_sArtPrevWeapon[]), cls);
-            int ref = EntIndexToEntRef(weapon);
-            int newWep = GivePlayerItem(client, "weapon_pistol_magnum");
-            int dropped = EntRefToEntIndex(ref);
-            if (dropped > 0 && IsValidEntity(dropped))
-                AcceptEntityInput(dropped, "Kill");
-            if (newWep > 0)
-                g_iArtMagnum[client] = EntIndexToEntRef(newWep);
-            LogMessage("[artillery] start client=%N slot1=%s prevMelee='%s' upgrade=%d clip=%d magnum=%d",
-                client, cls, g_sArtPrevMelee[client], g_iArtPrevUpgrade[client],
-                g_iArtPrevClip[client], newWep);
-        }
-        else
-        {
-            // 已是马格南 → 不切（用户拍板）；0 弹提示（否则无法开火确认，只能等超时退款）
-            if (HasEntProp(weapon, Prop_Send, "m_iClip1")
-                && GetEntProp(weapon, Prop_Send, "m_iClip1") <= 0)
-                PrintToChat(client, "\x04[商店]\x01 你的马格南弹匣为空，\x05换弹后开火\x01确认轰炸（超时自动退款）");
-            LogMessage("[artillery] start client=%N already magnum", client);
-        }
-    }
-    else
-    {
-        int newWep = GivePlayerItem(client, "weapon_pistol_magnum");
-        if (newWep > 0)
-            g_iArtMagnum[client] = EntIndexToEntRef(newWep);
-        LogMessage("[artillery] start client=%N empty slot1, magnum=%d", client, newWep);
-    }
 
     // 标记光点（env_sprite，全队可见；颜色随合法性心跳更新）
     int sprite = CreateEntityByName("env_sprite");
@@ -4298,12 +4155,12 @@ void ArtStartDesignate(int client, int slot, int price)
     g_hArtAimTimer[client] = CreateTimer(ART_TICK_INT, Timer_ArtAim,
         GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 
-    PrintToChat(client, "\x04[商店]\x01 已购买 \x05火炮支援1\x01（-\x03%d\x01 可用积分）。\x05瞄准轰炸区域后开火（马格南）确认\x01，\x05右键取消\x01，\x03%.0f 秒\x01内有效",
-        price, g_cvArtTargetTime.FloatValue);
+    PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分）。\x05瞄准轰炸区域后左键开火确认\x01，\x05右键取消\x01，\x03%.0f 秒\x01内有效",
+        g_ShopTable[slot].name, price, g_cvArtTargetTime.FloatValue);
 }
 
-// 退出瞄准指示：清理标记/马格南/心跳，恢复原副武器，可退款
-void ArtEndDesignate(int client, bool refund, bool restoreWeapon = true)
+// 退出瞄准指示：清理标记/心跳（v1.7.95: 无武器切换，无需恢复武器），可退款
+void ArtEndDesignate(int client, bool refund)
 {
     if (!g_bArtAiming[client]) return;
     g_bArtAiming[client] = false;
@@ -4319,109 +4176,12 @@ void ArtEndDesignate(int client, bool refund, bool restoreWeapon = true)
         AcceptEntityInput(marker, "Kill");
     g_iArtMarker[client] = 0;
 
-    int magnum = EntRefToEntIndex(g_iArtMagnum[client]);
-    if (magnum > 0 && IsValidEntity(magnum))
-    {
-        if (IsClientInGame(client))
-            RemovePlayerItem(client, magnum);
-        AcceptEntityInput(magnum, "Kill");
-    }
-    g_iArtMagnum[client] = 0;
-
-    // 恢复原副武器（重给 classname + 补升级位/弹匣；断线/死亡跳过）
-    // v1.7.82 FIX: 近战恢复弃用 Use 输入（L4D2 武器实体不响应 Use——拾取靠 touch，
-    // 日志实锤 17:15 测试取消后副武器消失）
-    // v1.7.83 FIX: GivePlayerItem("weapon_melee") 无 script 名 → 引擎返回 -1
-    // （日志实锤 17:22 newWep=-1 slot1=-1 近战仍丢）→ 头顶掉落触 touch
-    // v1.7.85 FIX: 头顶掉落不可靠（weapon spawn 后 movetype NONE 悬空不落，玩家
-    // 碰不到，17:27 仍丢）→ 定稿：兜底手枪保证槽位不空（GivePlayerItem 100%
-    // 成功）+ 原近战种类放玩家面前 50u 可捡（L4D2 捡近战自动替换手枪）+
-    // 0.4s 核查贴近提示。
-    if (restoreWeapon && g_sArtPrevWeapon[client][0] != '\0'
-        && IsClientInGame(client) && GetClientTeam(client) == 2)
-    {
-        int newWep = 0;
-        if (StrEqual(g_sArtPrevWeapon[client], "weapon_melee"))
-        {
-            newWep = GivePlayerItem(client, "weapon_pistol");
-            if (g_sArtPrevMelee[client][0] != '\0')
-            {
-                int meleeEnt = CreateEntityByName("weapon_melee");
-                if (meleeEnt > 0)
-                {
-                    DispatchKeyValue(meleeEnt, "melee_script_name", g_sArtPrevMelee[client]);
-                    DispatchSpawn(meleeEnt);
-                    float pos[3], ang[3], fwd[3];
-                    GetClientAbsOrigin(client, pos);
-                    GetClientEyeAngles(client, ang);
-                    GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
-                    pos[0] += fwd[0] * 50.0;
-                    pos[1] += fwd[1] * 50.0;
-                    pos[2] += 5.0;
-                    TeleportEntity(meleeEnt, pos, NULL_VECTOR, NULL_VECTOR);
-                    DataPack pack;
-                    CreateDataTimer(0.4, Timer_ArtRestoreCheck, pack,
-                        TIMER_FLAG_NO_MAPCHANGE);
-                    WritePackCell(pack, GetClientUserId(client));
-                    WritePackCell(pack, EntIndexToEntRef(meleeEnt));
-                }
-            }
-            LogMessage("[artillery] end restore client=%N prevWeapon='weapon_melee' "
-                ... "pistol=%d slot1=%d",
-                client, newWep, GetPlayerWeaponSlot(client, 1));
-        }
-        else
-        {
-            newWep = GivePlayerItem(client, g_sArtPrevWeapon[client]);
-            if (g_iArtPrevUpgrade[client] != 0 && newWep > 0 && IsValidEntity(newWep)
-                && HasEntProp(newWep, Prop_Send, "m_upgradeBitVec"))
-                SetEntProp(newWep, Prop_Send, "m_upgradeBitVec", g_iArtPrevUpgrade[client]);
-            if (g_iArtPrevClip[client] >= 0 && newWep > 0 && IsValidEntity(newWep)
-                && HasEntProp(newWep, Prop_Send, "m_iClip1"))
-                SetEntProp(newWep, Prop_Send, "m_iClip1", g_iArtPrevClip[client]);
-            LogMessage("[artillery] end restore client=%N prevWeapon='%s' slot1=%d upgrade=%d clip=%d",
-                client, g_sArtPrevWeapon[client],
-                GetPlayerWeaponSlot(client, 1), g_iArtPrevUpgrade[client], g_iArtPrevClip[client]);
-        }
-    }
-    g_sArtPrevWeapon[client][0] = '\0';
-    g_sArtPrevMelee[client][0] = '\0';
-    g_iArtPrevUpgrade[client] = 0;
-    g_iArtPrevClip[client] = -1;
-
     if (refund)
     {
         g_iWallet[client] += g_iArtPrice[client];
         g_iShopBought[client][g_iArtSlot[client]]--;
         LogMessage("[artillery] designate cancelled client=%N refund=%d", client, g_iArtPrice[client]);
     }
-}
-
-// v1.7.83: 近战恢复核查——头顶掉落的近战 0.4s 后若玩家仍未拾取（被弹开等），
-// 放回玩家脚下（L4D2 touch 拾取=走到武器旁自动捡）
-public Action Timer_ArtRestoreCheck(Handle timer, DataPack pack)
-{
-    ResetPack(pack);
-    int userid = ReadPackCell(pack);
-    int ref = ReadPackCell(pack);
-    delete pack;
-
-    int client = GetClientOfUserId(userid);
-    if (client <= 0 || !IsClientInGame(client) || !IsPlayerAlive(client))
-        return Plugin_Stop;
-    int slot1 = GetPlayerWeaponSlot(client, 1);
-    if (slot1 > 0 && IsValidEntity(slot1))
-        return Plugin_Stop;                       // 已拾取装备
-
-    int ent = EntRefToEntIndex(ref);
-    if (ent <= 0 || !IsValidEntity(ent))
-        return Plugin_Stop;
-    float pos[3];
-    GetClientAbsOrigin(client, pos);
-    pos[2] += 30.0;
-    TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
-    LogMessage("[artillery] restore check: melee not picked, dropped at feet client=%N", client);
-    return Plugin_Stop;
 }
 
 // 瞄准心跳：更新标记（圆圈+光柱+光点，全队可见）+ 右键取消 + 超时/死亡
@@ -4439,14 +4199,16 @@ public Action Timer_ArtAim(Handle timer, int userid)
 
     if (GetGameTime() >= g_fArtAimEnd[client])
     {
-        PrintToChat(client, "\x04[商店]\x01 火炮支援1瞄准超时，积分已退回");
+        PrintToChat(client, "\x04[商店]\x01 \x05%s\x01瞄准超时，积分已退回",
+            g_ShopTable[g_iArtSlot[client]].name);
         ArtEndDesignate(client, true);
         return Plugin_Stop;
     }
 
     if (GetClientButtons(client) & IN_ATTACK2)    // 右键 → 取消退款
     {
-        PrintToChat(client, "\x04[商店]\x01 已取消火炮支援1，积分已退回");
+        PrintToChat(client, "\x04[商店]\x01 已取消\x05%s\x01，积分已退回",
+            g_ShopTable[g_iArtSlot[client]].name);
         ArtEndDesignate(client, true);
         return Plugin_Stop;
     }
@@ -4465,8 +4227,8 @@ public Action Timer_ArtAim(Handle timer, int userid)
     int radius = 150;
     if (valid)
     {
-        int count; float r, h;
-        Art_PickParams(ceiling, openAbove, count, r, h);
+        float r, h;
+        Art_PickParams(ceiling, openAbove, r, h);
         radius = RoundToNearest(r);
     }
     else
@@ -4507,21 +4269,11 @@ public Action Timer_ArtAim(Handle timer, int userid)
     return Plugin_Continue;
 }
 
-// 马格南开火 = 确认轰炸（weapon_fire 事件；只用设计器马格南判定）
+// 任意武器左键开火 = 确认轰炸（v1.7.95: 不再切马格南/限定武器，用户拍板简化）
 public Action Event_WeaponFire(Event event, const char[] name, bool dontBroadcast)
 {
     int client = GetClientOfUserId(event.GetInt("userid"));
     if (client < 1 || !g_bArtAiming[client])
-        return Plugin_Continue;
-
-    int active = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
-    if (active <= 0)
-        return Plugin_Continue;
-    if (g_iArtMagnum[client] != 0 && EntRefToEntIndex(g_iArtMagnum[client]) != active)
-        return Plugin_Continue;                   // 开的不是设计器马格南（如主武器）
-    char cls[32];
-    GetEntityClassname(active, cls, sizeof(cls));
-    if (!StrEqual(cls, "weapon_pistol_magnum"))
         return Plugin_Continue;
 
     float target[3];
@@ -4586,8 +4338,6 @@ void Art_AimPoint(int client, float out[3], bool &valid)
         delete trw;
     }
     delete tr;
-    LogMessage("[artillery] aimpoint client=%N hit=%s valid=%d pos=(%.0f %.0f %.0f)",
-        client, hitType, valid, out[0], out[1], out[2]);
 }
 
 // 落点上方找天花板：返回距离；0 = 4096u 内无遮挡（室外）
@@ -4681,34 +4431,30 @@ float Art_FindCeiling(const float pos[3], bool &openAbove)
         openAbove = !TR_DidHit(tr);
         delete tr;
     }
-    LogMessage("[artillery] ceiling pos=(%.0f %.0f %.0f) dist=%.0f openAbove=%d hops=%d hits=%d normal=(%.2f %.2f %.2f)",
-        pos[0], pos[1], pos[2], dist, openAbove, hops, hits,
-        lastNormal[0], lastNormal[1], lastNormal[2]);
     return dist;
 }
 
 // 三级参数：室外 / 室内大(≥900) / 室内小(600-900) / 遮挡下短落(<600 且上方开阔)
 // v1.7.84: 短落——平台/桥/树冠下，罐子从遮挡下 150u（下限 100u）掉落照样爆炸，
 // 大平台/桥上使用不再"目标无效"；高度与爆炸伤害无关（落地触发）。
-void Art_PickParams(float ceiling, bool openAbove, int &count, float &radius, float &height)
+// v1.7.95: count 参数已移除——罐数由 ConfirmStrike 的 duration×rate 统一推导；
+// 室内自适应只缩半径/落高（落罐密度不变，用户拍板 3-5 罐/秒）。
+void Art_PickParams(float ceiling, bool openAbove, float &radius, float &height)
 {
     if (ceiling <= 0.0)
     {
-        count  = g_cvArtCountOut.IntValue;
         radius = g_cvArtRadiusOut.FloatValue;
         height = GetRandomFloat(g_cvArtHeightMin.FloatValue, g_cvArtHeightMax.FloatValue);
     }
     else if (ceiling >= ART_CEIL_MID)
     {
-        count  = g_cvArtCountMid.IntValue;
         radius = g_cvArtRadiusMid.FloatValue;
         height = ceiling - 150.0;                 // 吊顶下生成，保证落地高度
     }
     else if (openAbove)
     {
         // v1.7.88: 开阔（平台/桥上方有天，如实测点位 ceiling=339）——之前锁小档
-        // 用户反馈"太小了" → 按室外规模炸（12罐/500），落点高度仍压到吊顶-150 防撞头顶结构
-        count  = g_cvArtCountOut.IntValue;
+        // 用户反馈"太小了" → 按室外规模炸，落点高度仍压到吊顶-150 防撞头顶结构
         radius = g_cvArtRadiusOut.FloatValue;
         height = ceiling - 150.0;
         if (height < 100.0) height = 100.0;
@@ -4716,60 +4462,77 @@ void Art_PickParams(float ceiling, bool openAbove, int &count, float &radius, fl
     }
     else if (ceiling >= ART_CEIL_LOW)
     {
-        count  = g_cvArtCountSmall.IntValue;      // 封闭矮房（600-900）：小规模
-        radius = g_cvArtRadiusSmall.FloatValue;
+        radius = g_cvArtRadiusSmall.FloatValue;   // 封闭矮房（600-900）：小规模
         height = ceiling - 150.0;
         if (height < 100.0) height = 100.0;
     }
     else
     {
-        count  = g_cvArtCountSmall.IntValue;      // 拒绝级：确认前被拦截，不会真正使用
-        radius = g_cvArtRadiusSmall.FloatValue;
+        radius = g_cvArtRadiusSmall.FloatValue;   // 拒绝级：确认前被拦截，不会真正使用
         height = ceiling - 150.0;
     }
-    if (count < 1) count = 1;
-    if (count > ART_MAX_CANS) count = ART_MAX_CANS;
 }
 
-// 确认轰炸：锁定落点 → 全服警报 → 错峰生成罐子
+// 确认轰炸：锁定落点 → 全服警报 → 持续轰炸（duration 秒 × rate 罐/秒，错峰下落）
 void Art_ConfirmStrike(int client, float target[3])
 {
     if (g_hArtCans == null)
         g_hArtCans = new ArrayList();
 
+    // v1.7.98: 支援2 = 油桶/烟花模型池（g_iArtSlot 在确认时未被清除，仍有效）
+    int slot = g_iArtSlot[client];
+    bool art2 = (slot >= 0 && slot < SHOP_SLOTS
+        && StrEqual(g_ShopTable[slot].classname, "artillery2"));
+
     bool openAbove;
     float ceiling = Art_FindCeiling(target, openAbove);
-    int count; float radius, height;
-    Art_PickParams(ceiling, openAbove, count, radius, height);
+    float radius, height;
+    Art_PickParams(ceiling, openAbove, radius, height);
 
-    // 轰炸总时长 = 首罐延迟 + 末罐生成 + 落地 + 落地后燃烧 + 引爆（播报"剩余 x 秒"）
+    // v1.7.96: 按秒分槽——每秒随机 2-3 罐（用户拍板：45s × 2-3/秒 ≈ 90-135 罐），
+    // 每罐在所属秒内随机偏移，保证每秒必有掉落
+    float duration = g_cvArtDuration.FloatValue;
+    int seconds = RoundToCeil(duration);
+    if (seconds < 1) seconds = 1;
+    int total = 0;
+
+    // 结束时刻 = 首罐延迟 + 末秒生成 + 落地(fallT) + 落地后燃烧 + 引爆（播报"剩余 x 秒"）
     // v1.7.86: 点燃的罐子对伤害免疫且燃烧结束不自爆（实测"假火"）→ 火灭后引擎引爆
     float fallT = SquareRoot((2.0 * height) / ART_GRAVITY);
-    float burn = g_cvArtBurn.FloatValue;              // 落地后继续燃烧秒数
-    float duration = g_cvArtDelay.FloatValue + float(count - 1) * g_cvArtStagger.FloatValue
-        + fallT + burn + 0.15;
-    g_fArtNextBuyTime = GetGameTime() + duration + g_cvArtCooldown.FloatValue;
+    float endT = g_cvArtDelay.FloatValue + float(seconds) + fallT + g_cvArtBurn.FloatValue + 0.15;
+    g_fArtNextBuyTime = GetGameTime() + endT + g_cvArtCooldown.FloatValue;
 
     // v1.7.80（用户拍板）：开始/结束全服聊天播报 + 轰炸中/冷却中禁止全体购买
-    PrintToChatAll("\x04[商店]\x01 \x05火炮支援来袭，注意躲避！\x01剩余：\x03%d\x01 秒", RoundToCeil(duration));
-    PrintToChatAll("\x04[商店]\x01 \x05%N\x01 召唤了区域火炮：着火的瓦斯罐/煤气罐即将从天而降！", client);
-    CreateTimer(duration, Timer_ArtNotifyEnd, INVALID_HANDLE, TIMER_FLAG_NO_MAPCHANGE);
+    PrintToChatAll("\x04[商店]\x01 \x05火炮支援来袭，注意躲避！\x01剩余：\x03%.0f\x01 秒", duration);
+    if (art2)
+        PrintToChatAll("\x04[商店]\x01 \x05%N\x01 召唤了\x05狂欢轰炸\x01：着火的油桶/烟花即将从天而降！", client);
+    else
+        PrintToChatAll("\x04[商店]\x01 \x05%N\x01 召唤了\x05天火轰炸\x01：着火的瓦斯罐/煤气罐即将从天而降！", client);
+    CreateTimer(endT, Timer_ArtNotifyEnd, INVALID_HANDLE, TIMER_FLAG_NO_MAPCHANGE);
 
-    for (int i = 0; i < count; i++)
+    for (int sec = 0; sec < seconds; sec++)
     {
-        DataPack dp = new DataPack();
-        dp.WriteFloat(target[0]);
-        dp.WriteFloat(target[1]);
-        dp.WriteFloat(target[2]);
-        dp.WriteFloat(radius);
-        dp.WriteFloat(height);
-        dp.WriteCell(GetClientUserId(client));
-        CreateTimer(g_cvArtDelay.FloatValue + float(i) * g_cvArtStagger.FloatValue,
-            Timer_ArtSpawnCan, dp, TIMER_FLAG_NO_MAPCHANGE);
+        int cans = GetRandomInt(ART_CANS_MIN_PER_SEC, ART_CANS_MAX_PER_SEC);
+        for (int c = 0; c < cans; c++)
+        {
+            if (total >= ART_MAX_TOTAL) break;          // 防 cvar 误配超载
+            DataPack dp = new DataPack();
+            dp.WriteFloat(target[0]);
+            dp.WriteFloat(target[1]);
+            dp.WriteFloat(target[2]);
+            dp.WriteFloat(radius);
+            dp.WriteFloat(height);
+            dp.WriteCell(client);            // v1.7.97: 召唤者传给引爆（击杀归属=召唤者）
+            dp.WriteCell(art2 ? 2 : 1);      // v1.7.98: 罐型池（1=瓦斯/煤气 2=油桶/烟花）
+            CreateTimer(g_cvArtDelay.FloatValue + float(sec) + GetRandomFloat(0.0, 0.9),
+                Timer_ArtSpawnCan, dp, TIMER_FLAG_NO_MAPCHANGE);
+            total++;
+        }
+        if (total >= ART_MAX_TOTAL) break;
     }
 
-    LogMessage("[artillery] strike client=%N target=(%.0f,%.0f,%.0f) ceiling=%.0f count=%d r=%.0f h=%.0f",
-        client, target[0], target[1], target[2], ceiling, count, radius, height);
+    LogMessage("[artillery] strike client=%N target=(%.0f,%.0f,%.0f) ceiling=%.0f dur=%.0fs secs=%d total=%d r=%.0f h=%.0f",
+        client, target[0], target[1], target[2], ceiling, duration, seconds, total, radius, height);
 }
 
 // 生成单个着火罐子（圆内均匀散布）→ 安排落地强制引爆
@@ -4782,7 +4545,8 @@ public Action Timer_ArtSpawnCan(Handle timer, DataPack dp)
     target[2] = dp.ReadFloat();
     float radius = dp.ReadFloat();
     float height = dp.ReadFloat();
-    int userid = dp.ReadCell();
+    int buyer = dp.ReadCell();              // v1.7.97: 召唤者（引爆归属=召唤者）
+    int kind = dp.ReadCell();               // v1.7.98: 罐型池（1=瓦斯/煤气 2=油桶/烟花）
     delete dp;
 
     float ang = GetRandomFloat(0.0, 6.2831853);
@@ -4802,10 +4566,22 @@ public Action Timer_ArtSpawnCan(Handle timer, DataPack dp)
     // weapon_* drop 后不可 break/ignite/explode。直接生成最终形态 → 无 give+drop
     // 副作用；死亡/点燃过热 → 引擎爆炸（音效/火球/伤害/友伤缩放全原版）。
     char model[PLATFORM_MAX_PATH];
-    if (GetRandomInt(1, 100) <= ART_CAN_PROPANE_PCT)
-        strcopy(model, sizeof(model), "models/props_junk/propanecanister001a.mdl");
+    // v1.7.98: 支援2 模型池 = 油桶(gascan001a，商店汽油桶) 70% + 烟花(explosive_box001)
+    // 30%——两个模型都已在 v1.7.93 precache + can_full_damage 清单，引擎死亡爆炸原版。
+    if (kind == 2)
+    {
+        if (GetRandomInt(1, 100) <= ART_CAN_PROPANE_PCT)
+            strcopy(model, sizeof(model), "models/props_junk/gascan001a.mdl");
+        else
+            strcopy(model, sizeof(model), "models/props_junk/explosive_box001.mdl");
+    }
     else
-        strcopy(model, sizeof(model), "models/props_equipment/oxygentank01.mdl");
+    {
+        if (GetRandomInt(1, 100) <= ART_CAN_PROPANE_PCT)
+            strcopy(model, sizeof(model), "models/props_junk/propanecanister001a.mdl");
+        else
+            strcopy(model, sizeof(model), "models/props_equipment/oxygentank01.mdl");
+    }
 
     int ent = CreateEntityByName("prop_physics");
     if (ent == -1)
@@ -4818,12 +4594,12 @@ public Action Timer_ArtSpawnCan(Handle timer, DataPack dp)
     DispatchSpawn(ent);
     SetEntProp(ent, Prop_Data, "m_takedamage", 2);
 
-    Art_LaunchCan(ent, pos, height, userid, true);
+    Art_LaunchCan(ent, pos, height, true, buyer);
     return Plugin_Continue;
 }
 
 // 罐子发射共用尾部：传送落点 + 点火 + 跟踪 + 安排引爆
-void Art_LaunchCan(int ent, const float pos[3], float height, int userid, bool converted)
+void Art_LaunchCan(int ent, const float pos[3], float height, bool converted, int buyer)
 {
     // 火会持续伤害罐子（v1.7.91 实锤 100→57）→ 抬高血量防燃烧中途过热自爆
     // （500hp ≈ 31s 燃烧才自爆，手动引爆时序内安全）
@@ -4845,7 +4621,7 @@ void Art_LaunchCan(int ent, const float pos[3], float height, int userid, bool c
 
     DataPack dp3 = new DataPack();
     dp3.WriteCell(ref);
-    dp3.WriteCell(userid);
+    dp3.WriteCell(buyer);               // v1.7.97: 召唤者传给引爆（击杀归属=召唤者）
     CreateTimer(fallT + burn + 0.15, Timer_ArtExplode, dp3,
         TIMER_FLAG_NO_MAPCHANGE);
 }
@@ -4862,7 +4638,7 @@ public Action Timer_ArtExplode(Handle timer, DataPack dp)
 {
     dp.Reset();
     int ent = EntRefToEntIndex(dp.ReadCell());
-    int buyer = GetClientOfUserId(dp.ReadCell());
+    int buyer = dp.ReadCell();              // v1.7.97: 召唤者（击杀归属）
     delete dp;
 
     if (ent <= 0 || !IsValidEntity(ent))
@@ -4871,39 +4647,22 @@ public Action Timer_ArtExplode(Handle timer, DataPack dp)
     // v1.7.91 FIX（静默消失根因）: 去掉 DMG_ALWAYSGIB——强制碎尸会跳过引擎死亡
     // 爆炸（v1.7.90 实测：罐子死了但没炸，直接消失）。纯 DMG_BLAST 走正常死亡
     // 流程 → 引擎死亡爆炸（音效/火球/伤害/友伤缩放全原版）。
-    SDKHooks_TakeDamage(ent, ent, buyer > 0 ? buyer : 0, 99999.0,
-        DMG_BLAST, -1, NULL_VECTOR, NULL_VECTOR, false);
-
-    if (IsValidEntity(ent))
-    {
-        // 诊断：hp<=0 = 已死但爆炸未触发（引擎问题）；hp>0 = 仍打不死
-        int hp = HasEntProp(ent, Prop_Data, "m_iHealth")
-            ? GetEntProp(ent, Prop_Data, "m_iHealth") : -1;
-        LogMessage("[artillery] can %d post-blast hp=%d (alive after 99999 dmg)", ent, hp);
-    }
+    // v1.7.97 FIX: 回归 v1.7.93 参数 (victim=ent, attacker=ent, inflictor=buyer)。
+    // 引擎爆炸伤害归属跟随 inflictor：v1.7.93（inflictor=召唤者）爆炸伤害正常
+    // 发往队友/特感/僵尸（18:09-18:14 实测 engine 122/184）+ 击杀归属=召唤者
+    // （hit 记录）；v1.7.94 把 inflictor 改成 ent（罐子自己）→ 归属=已死实体 →
+    // 爆炸伤害全灭（19:00 后 13+ 次轰炸零记录，用户实测火炮打不到特感）。
+    // 召唤者自己被引擎豁免（归属者豁免，wiki 原版亦然）→ 由 l4d2_can_full_damage
+    // 插件在罐子销毁时对"最后攻击者"注入伤害+stagger 补炸。
+    // 伤害位置传罐子自身位置（防爆炸 falloff 按 NULL_VECTOR=世界原点 衰减）。
+    float pos[3];
+    GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", pos);
+    int killer = (buyer >= 1 && buyer <= MaxClients && IsClientInGame(buyer)) ? buyer : 0;
+    SDKHooks_TakeDamage(ent, ent, killer, 99999.0,
+        DMG_BLAST, -1, NULL_VECTOR, pos, false);
     return Plugin_Continue;
 }
 
-// v1.7.89 FIX: 近战种类名读取——m_MeleeWeaponName(Prop_Send) 实测读空（18:08 日志
-// prevMelee='' 导致恢复兜底小手枪）→ 多属性名/多 prop 域逐一尝试，取第一个非空
-void Art_SaveMeleeName(int client, int weapon)
-{
-    char name[64];
-    static const char props[][] = { "m_MeleeWeaponName", "m_szMeleeWeaponName" };
-    for (int i = 0; i < 2 && g_sArtPrevMelee[client][0] == '\0'; i++)
-    {
-        if (HasEntProp(weapon, Prop_Send, props[i]))
-            GetEntPropString(weapon, Prop_Send, props[i], name, sizeof(name));
-        if (name[0] == '\0' && HasEntProp(weapon, Prop_Data, props[i]))
-            GetEntPropString(weapon, Prop_Data, props[i], name, sizeof(name));
-        if (name[0] != '\0')
-        {
-            strcopy(g_sArtPrevMelee[client], sizeof(g_sArtPrevMelee[]), name);
-            break;
-        }
-        name[0] = '\0';
-    }
-}
 
 // v1.7.90: prop_physics + 手搓爆炸（Art_DoExplosion/Art_CanTakeDamage/IsArtExplodable）
 // 已整体移除——回归原版 weapon_* 罐子 + 补可破坏状态（见 Timer_ArtSpawnCan 注释）。
@@ -4915,10 +4674,8 @@ void Art_CleanupAll()
 
     for (int i = 1; i <= MaxClients; i++)
     {
-        // v1.7.82: restoreWeapon=false——换图/卸载时机不恢复武器（重生自动重置，
-        // 避免换图瞬间 GivePlayerItem 竞态）
         if (g_bArtAiming[i])
-            ArtEndDesignate(i, false, false);
+            ArtEndDesignate(i, false);
     }
 
     if (g_hArtCans != null)

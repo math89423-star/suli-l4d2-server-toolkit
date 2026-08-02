@@ -15,8 +15,9 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "1.3"
+#define PLUGIN_VERSION "1.4"
 #define DMG_BURN 0x00000008
+#define DMG_BLAST 0x00000040
 
 ConVar g_cvFFMultiplier;
 ConVar g_cvFFFireMultiplier;
@@ -117,8 +118,22 @@ public Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &dam
         return Plugin_Continue;
     if (GetClientTeam(thrower) != 2)
         return Plugin_Continue;
+    // v1.4: 恢复原版自伤——投掷者自己的火也烧自己（实测引擎给 OnTakeDamage
+    // 传 5/秒 = 原版踩火伤害，但引擎在 hook 之后仍吞掉自伤火伤（forgiveness
+    // 归零），故与队友 FF 同法：SDKHooks_TakeDamage 重新注入绕过。
+    // attacker 用 world(0) 避免注入链再次触发"attacker==victim 吞伤害"。
     if (thrower == victim)
-        return Plugin_Continue;
+    {
+        float selfFire = damage * g_cvFFFireMultiplier.FloatValue;
+        damage = 0.0;
+        if (selfFire > 0.0)
+        {
+            g_bInFireHook[victim] = true;
+            SDKHooks_TakeDamage(victim, inflictor, 0, selfFire, damagetype, weapon, damageForce, damagePosition);
+            g_bInFireHook[victim] = false;
+        }
+        return Plugin_Changed;
+    }
 
     // Calculate fire FF damage.
     // The engine may have already zeroed this via z_friendly_fire_forgiveness,
