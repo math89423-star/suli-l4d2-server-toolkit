@@ -9,8 +9,11 @@
 //  2) 打包者奖励失效修复：SDKHooks OnUse 对打包/递药从不触发（实测 2.2 万条 OnUse 无一条
 //     first_aid_kit/pills，OnUse 只在持枪/近战按 E 时触发）→ 改用 left4dhooks 引擎级 detour
 //     L4D2_OnStartUseAction（打包必然触发：action=Healing，client=打包者，target=被打包者）
+// v1.4: 递药检测修复 —— 用户实测递药不回血；StartUseAction 枚举不覆盖递药（无"记录递药者"
+//     日志实锤）→ 0.2s 轮询差分推导：递药瞬间给药者 health 槽 pills 实体消失，吃药者
+//     pills_used 时查 5s 内"失去药"的最近玩家 = 递药者
 
-#define PLUGIN_VERSION "1.3"
+#define PLUGIN_VERSION "1.4"
 
 ConVar g_hCvarEnable;
 ConVar g_hCvarIncap;
@@ -33,6 +36,12 @@ int g_iMedkitHealer[MAXPLAYERS+1];  // [被打包者] = 打包者 client
 int g_iMedkitHealerTime[MAXPLAYERS+1]; // 打包记录时间戳（15s 有效期，防 use 后未完成的残留）
 int g_iPillGiver[MAXPLAYERS+1];     // [吃药者] = 递药者 client
 int g_iPillGiverTime[MAXPLAYERS+1]; // 递药记录时间戳（5s 有效期，防 use 后没给药的残留）
+
+// v1.4: 递药差分推导 —— StartUseAction 枚举不覆盖 pills（实测无"记录递药者"日志），
+// 轮询跟踪 health 槽（slot 4）pills/adrenaline 实体；实体消失时刻 = 给出/吃掉，
+// pills_used 时查 5s 内"失去药"的最近玩家 = 递药者（排除吃药者本人）
+int g_iPillSlotEnt[MAXPLAYERS + 1];   // [玩家] = health 槽当前 pills/adrenaline 实体（0=无）
+float g_fPillLostTime[MAXPLAYERS + 1]; // [玩家] = 上次实体消失时刻（0=未失去过）
 
 public Plugin myinfo =
 {
@@ -108,6 +117,22 @@ public Action Timer_StateCheck(Handle timer)
         {
             g_bHanging[i] = view_as<bool>(GetEntProp(i, Prop_Send, "m_isHangingFromLedge"));
             g_bDead[i] = !IsPlayerAlive(i);
+
+            // v1.4: health 槽差分 —— 记录当前 pills/adrenaline 实体，实体消失记时刻（递药推导用）
+            int ent = GetPlayerWeaponSlot(i, 4);
+            if (ent > 0 && IsValidEntity(ent))
+            {
+                char cls[32];
+                GetEdictClassname(ent, cls, sizeof(cls));
+                if (!StrEqual(cls, "weapon_pain_pills", false) && !StrEqual(cls, "weapon_adrenaline", false))
+                    ent = 0;  // medkit/其他不算药
+            }
+            if (g_iPillSlotEnt[i] != ent)
+            {
+                if (g_iPillSlotEnt[i] > 0)
+                    g_fPillLostTime[i] = GetEngineTime();  // 药离开手（递出/吃掉）
+                g_iPillSlotEnt[i] = ent;
+            }
         }
         else
         {
@@ -192,18 +217,46 @@ void Event_HealInterrupted(Event event, const char[] name, bool dontBroadcast)
 
 void Event_PillsUsed(Event event, const char[] name, bool dontBroadcast)
 {
-    // 本版本 pills_used 无递药者字段，递药者由 L4D2_OnStartUseAction 记录（5s 内有效）
+    // 本版本 pills_used 无递药者字段。递药者来源：优先 L4D2_OnStartUseAction 记录
+    // （实测枚举不覆盖递药，几乎必走差分推导）；未记录/过期/自己吃药 → v1.4 差分推导
     int subject = GetClientOfUserId(event.GetInt("subject"));  // 吃药的人
     if (subject < 1 || subject > MaxClients) return;
 
     int giver = g_iPillGiver[subject];
     g_iPillGiver[subject] = 0;
-    if (giver < 1 || giver > MaxClients) return;
-    if (GetTime() - g_iPillGiverTime[subject] > 5) return;  // 记录过期（use 了但没给药）
-    if (giver == subject) return;  // 自己吃药不算
+    if (giver < 1 || giver > MaxClients || GetTime() - g_iPillGiverTime[subject] > 5 || giver == subject)
+    {
+        giver = InferPillGiver(subject);
+        if (giver < 1 || giver > MaxClients) return;
+    }
 
     Reward(giver, g_hCvarPills, "给队友递药");
     Reward(subject, g_hCvarPills, "递药", true);
+}
+
+// v1.4: 递药者差分推导 —— 递药瞬间给药者 health 槽实体消失（g_fPillLostTime 记录），
+// 吃药者吃药时查 5s 内"失去药"的最近玩家（排除自己）即为递药者
+int InferPillGiver(int subject)
+{
+    float now = GetEngineTime();
+    int bestGiver = 0;
+    float bestAge = 99999.0;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (i == subject) continue;
+        if (g_fPillLostTime[i] <= 0.0) continue;
+        float age = now - g_fPillLostTime[i];
+        if (age < 0.0 || age > 5.0) continue;
+        if (age < bestAge)
+        {
+            bestAge = age;
+            bestGiver = i;
+        }
+    }
+    if (bestGiver > 0)
+        LogMessage("[RescueHeal] 轮询差分推导递药者 %d(%N) -> %d(%N) age=%.1f",
+            bestGiver, bestGiver, subject, subject, bestAge);
+    return bestGiver;
 }
 
 // v1.3 FIX: 打包/递药检测改用 left4dhooks 引擎级 detour L4D2_OnStartUseAction。
