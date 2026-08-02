@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.71"
+#define PLUGIN_VERSION "1.7.72"
 
 // ============================================================================
 // ConVar handles
@@ -811,7 +811,7 @@ int       g_iLastCommonEnt[MAXPLAYERS + 1];
 // 价格/限购写死在此表（改价格需重编译）；掉落（loot_drop v1.7.0）出小件。
 // ============================================================================
 
-#define SHOP_SLOTS      13
+#define SHOP_SLOTS      15
 
 enum struct ShopItem
 {
@@ -828,7 +828,7 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // (si_hud_respawn_coin_max 5) 约束
     { "瓦斯罐",      "weapon_propanetank",             800,  0,  1 },
     { "煤气罐",      "weapon_oxygentank",              800,  0,  1 },
-    { "汽油桶",      "weapon_gascan",                 2000,  0,  1 },
+    { "汽油桶",      "weapon_gascan",                 5000,  0,  1 },   // v1.7.72: 灌油关卡逃生价值，用户定稿 5000
     { "止痛药",      "weapon_pain_pills",             2000,  0,  2 },
     { "肾上腺素",    "weapon_adrenaline",             2000,  0,  2 },
     { "电击器",      "weapon_defibrillator",          4000,  0,  2 },
@@ -838,10 +838,21 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "电锯",        "weapon_chainsaw",               5000,  0,  0 },   // v1.7.44
     { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0,  0 },
     { "复活币",      "",                              12000,  0,  3 },
-    { "透视特感",    "wallhack",                      1,      0,  3 }    // v1.7.67: 全局蓝色高亮 3 分钟（用户定稿 6000）；TEMP-TEST 1 分（测完恢复 6000）
+    { "透视特感",    "wallhack",                      1,      0,  3 },   // v1.7.67: 全局蓝色高亮 3 分钟（用户定稿 6000）；TEMP-TEST 1 分（测完恢复 6000）
+    { "近战盲盒",    "melee_box",                     3000,   0,  0 },   // v1.7.72: 随机一把非电锯近战（价格待用户定稿）
+    { "烟花",        "weapon_fireworkcrate",          2500,   0,  1 }    // v1.7.72: 道具类（用户定稿 2500）
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
+
+// v1.7.72: 近战盲盒奖池（12 把，不含电锯）——2D 字符数组初始化规则
+// （spcomp64 实测）：尺寸全显式 + 行数必须与初始化行数一致（[12][16] 配
+// 2 行 → error 047；const + 省略首维 → parse error）
+char g_MeleePool[12][16] = {
+    "baseball_bat", "cricket_bat", "crowbar", "electric_guitar",
+    "fireaxe", "frying_pan", "golfclub", "katana",
+    "knife", "machete", "tonfa", "shovel"
+};
 
 // v1.7.64: 透视特感（!shop 特殊商品）——购买者独占的克隆轮廓透视
 #define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
@@ -1487,6 +1498,22 @@ public void OnMapStart()
     PrecacheModel("models/v_models/v_chainsaw.mdl");
     // v1.7.46b: 激光升级包附件模型（三方图可能缺 precache → 升级包隐形/不 spawn）
     PrecacheModel("models/w_models/weapons/w_laser_sights.mdl");
+    // v1.7.72: 近战盲盒——12 把近战世界模型 precache（与 M60/榴弹同坑：
+    // 非战役图不 precache → 生成的近战隐形）
+    PrecacheModel("models/weapons/melee/w_bat.mdl");
+    PrecacheModel("models/weapons/melee/w_cricket_bat.mdl");
+    PrecacheModel("models/weapons/melee/w_crowbar.mdl");
+    PrecacheModel("models/weapons/melee/w_guitar.mdl");
+    PrecacheModel("models/weapons/melee/w_fireaxe.mdl");
+    PrecacheModel("models/weapons/melee/w_frying_pan.mdl");
+    PrecacheModel("models/weapons/melee/w_golfclub.mdl");
+    PrecacheModel("models/weapons/melee/w_katana.mdl");
+    PrecacheModel("models/weapons/melee/w_knife.mdl");
+    PrecacheModel("models/weapons/melee/w_machete.mdl");
+    PrecacheModel("models/weapons/melee/w_tonfa.mdl");
+    PrecacheModel("models/weapons/melee/w_shovel.mdl");
+    // v1.7.72: 烟花（道具类）——非战役图缺 precache 会隐形（M60/榴弹同坑）
+    PrecacheModel("models/w_models/weapons/w_firework_crate.mdl");
 
     // HP display is now on-hit only (player_hurt → RefreshHPForClient → 0.5s hide).
     // Persistent timer is no longer started — SI HP only shows when you damage them.
@@ -3234,6 +3261,42 @@ int ShopSpawn(const char[] cls, float pos[3])
     return ent;
 }
 
+// v1.7.72: 近战盲盒——生成指定近战武器（melee_script_name keyvalue 必须
+// 在 DispatchSpawn 前；trace 落地面 + glow 与 ShopSpawn 一致）
+int SpawnMelee(const char[] meleeName, float pos[3])
+{
+    int ent = CreateEntityByName("weapon_melee");
+    if (ent == -1)
+        return -1;
+
+    DispatchKeyValue(ent, "melee_script_name", meleeName);
+
+    float from[3], to[3];
+    from = pos;
+    from[2] += 60.0;
+    Handle tr = TR_TraceRayFilterEx(from, view_as<float>({ 90.0, 0.0, 0.0 }),
+        MASK_SOLID, RayType_Infinite, ShopTraceFilter, ent);
+    if (TR_DidHit(tr))
+    {
+        TR_GetEndPosition(to, tr);
+        to[2] += 5.0;
+    }
+    else
+    {
+        to = from;
+    }
+    delete tr;
+
+    DispatchSpawn(ent);
+    TeleportEntity(ent, to, NULL_VECTOR, NULL_VECTOR);
+
+    SetEntProp(ent, Prop_Send, "m_iGlowType", 3);
+    SetEntProp(ent, Prop_Send, "m_nGlowRange", 800);
+    SetEntProp(ent, Prop_Send, "m_glowColorOverride", 50 | (255 << 8) | (50 << 16) | (255 << 24));
+
+    return ent;
+}
+
 void ShopBuy(int client, int slot)
 {
     if (slot < 0 || slot >= SHOP_SLOTS) return;
@@ -3355,6 +3418,33 @@ void ShopBuy(int client, int slot)
         return;
     }
 
+    // v1.7.72: 近战盲盒——随机掉落一把非电锯近战武器
+    if (StrEqual(g_ShopTable[slot].classname, "melee_box"))
+    {
+        char picked[32];
+        strcopy(picked, sizeof(picked), g_MeleePool[GetRandomInt(0, sizeof(g_MeleePool) / sizeof(g_MeleePool[]) - 1)]);
+
+        float pos[3], ang[3], fwd[3];
+        GetClientEyePosition(client, pos);
+        GetClientEyeAngles(client, ang);
+        GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+        pos[0] += fwd[0] * 70.0;
+        pos[1] += fwd[1] * 70.0;
+        pos[2] -= 20.0;
+
+        int ent = SpawnMelee(picked, pos);
+        if (ent <= 0)
+        {
+            g_iWallet[client] += price;
+            g_iShopBought[client][slot]--;
+            PrintToChat(client, "\x04[商店]\x01 近战盲盒生成失败，积分已退回");
+            return;
+        }
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05近战盲盒\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：开出 \x05%s\x01",
+            price, g_iWallet[client], picked);
+        return;
+    }
+
     // 落点：玩家面前 70 单位（购买时刻的方向）
     float pos[3], ang[3], fwd[3];
     GetClientEyePosition(client, pos);
@@ -3434,6 +3524,8 @@ void ShopCategoryMenu(int client, int cat)
         IntToString(i, info, sizeof(info));
         menu.AddItem(info, line);
     }
+    // v1.7.72: 返回上一步（分类页）
+    menu.AddItem("back", "返回分类");
     menu.ExitButton = true;
     g_hShopMenu[client] = menu;
     menu.Display(client, 20);
@@ -3464,8 +3556,13 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
     // CancelMenu 触发回调时 client/item 是 -3——同上防护
     if (action == MenuAction_Select && item >= 0 && client >= 1)
     {
-        char info[4];
+        char info[8];
         menu.GetItem(item, info, sizeof(info));
+        if (StrEqual(info, "back"))
+        {
+            OpenShopMenu(client);   // v1.7.72: 返回上一步（分类页）
+            return 0;
+        }
         ShopBuy(client, StringToInt(info));
         if (IsClientInGame(client))
             ShopCategoryMenu(client, g_iShopCat[client]);   // 刷新余额/状态（留在当前分类）
