@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.64"
+#define PLUGIN_VERSION "1.7.67"
 
 // ============================================================================
 // ConVar handles
@@ -838,23 +838,17 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "电锯",        "weapon_chainsaw",               5000,  0,  0 },   // v1.7.44
     { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0,  0 },
     { "复活币",      "",                              12000,  0,  3 },
-    { "透视特感",    "wallhack",                      1,      0,  3 }    // v1.7.64: 特殊商品（WallhackStart 激活，生效期间禁购）；TEMP-TEST 1 分（测完恢复 5000）
+    { "透视特感",    "wallhack",                      6000,   0,  3 }    // v1.7.67: 全局蓝色高亮 3 分钟（用户定稿 6000，生效期间禁购）
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
 
 // v1.7.64: 透视特感（!shop 特殊商品）——购买者独占的克隆轮廓透视
 #define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
-#define WALLHACK_DURATION   300.0   // 5 分钟效果
-enum struct WallClone
-{
-    int clone;      // prop_dynamic_override 克隆（alpha 0 隐形，仅发光）
-    int target;     // 目标实体（SI 玩家 index 或 Witch entity）
-}
+#define WALLHACK_DURATION   180.0   // v1.7.67: 3 分钟（用户定稿，原 300=5 分钟）
 bool      g_bWallhack[MAXPLAYERS + 1];          // 透视生效中
-Handle    g_hWallhackTimer[MAXPLAYERS + 1];     // 5 分钟到期计时器
-Handle    g_hWallhackSyncTimer;                 // 克隆位置同步（0.033s，无购买者自动停）
-ArrayList g_hWallClones[MAXPLAYERS + 1];        // 购买者的克隆表 {clone, target}
+Handle    g_hWallhackTimer[MAXPLAYERS + 1];     // 到期计时器
+Handle    g_hWallhackSyncTimer;                 // 补光心跳（0.5s，无购买者自动停）
 ArrayList g_hWitchList;                         // 当前 Witch 实体索引（OnEntityCreated 维护）
 Handle    g_hShopMenu[MAXPLAYERS + 1];          // 当前打开的商店菜单（!buy 切换用）
 
@@ -1159,6 +1153,7 @@ public void OnPluginStart()
     // 复活次数回 base，钱包/复活币从持久化文件恢复（v1.7.34）。
     ScoreSave_Init();
     g_hWitchList = new ArrayList();          // v1.7.64: 透视特感 Witch 实体表
+    WallhackClearGlow();                     // v1.7.67: reload 安全网——清掉残留特感发光（防 reload 后光不灭）
     for (int i = 1; i <= MaxClients; i++)
     {
         if (IsClientInGame(i) && !IsFakeClient(i))
@@ -1941,7 +1936,6 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
         else
             SISystemDeath(victim, event);
 
-        WallhackRemoveTarget(victim);        // v1.7.64: 特感死亡 → 清它的透视克隆
         return Plugin_Continue;
     }
 
@@ -1955,7 +1949,6 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
         {
             SurvivorKilledWitch(attacker, event, entityid);
         }
-        WallhackRemoveTarget(entityid);      // v1.7.64: Witch 死亡 → 清它的透视克隆
         return Plugin_Continue;
     }
 
@@ -3484,13 +3477,12 @@ public Action Cmd_Shop(int client, int args)
     if (client < 1 || !IsClientInGame(client))
         return Plugin_Handled;
     // v1.7.64: 再输入一次 !buy/!shop → 关闭当前商店菜单（用户需求）
-    // L4D2 vgui 坑：CancelMenu 只取消 SM 侧句柄，客户端面板关不掉
-    // （用户实测"显示已关闭但菜单仍在"）→ 必须 CancelClientMenu 发关闭消息
+    // FIX v1.7.65: 先置空再 CancelClientMenu——它同步触发菜单 Cancel→End，
+    // handler 里 delete menu 会杀死句柄，回头再 CancelMenu 就是 "Menu handle 0"
     if (g_hShopMenu[client] != null)
     {
-        CancelClientMenu(client);
-        CancelMenu(g_hShopMenu[client]);
         g_hShopMenu[client] = null;
+        CancelClientMenu(client);
         PrintToChat(client, "\x04[商店]\x01 商店菜单已关闭");
         return Plugin_Handled;
     }
@@ -3509,25 +3501,67 @@ public Action Cmd_Shop(int client, int args)
 }
 
 // ============================================================================
-// v1.7.64: 透视特感（!shop 特殊商品）——购买者独占的克隆轮廓透视
-// 原理（社区验证方案）：每个特感/Witch 建一个 prop_dynamic_override 克隆，
-// RENDER_TRANSCOLOR + alpha 0 隐藏网格（轮廓保留），m_iGlowType 3 恒定穿墙
-// 发光；SDKHook_SetTransmit 只让购买者收到克隆 → 只有购买者看到穿墙轮廓。
-// 同步：0.033s 全局计时器把克隆位置/朝向吸到目标身上（不 parent，避免
-// 父实体被 PVS 裁剪导致发光消失）。
+// v1.7.67: 透视特感（!shop 特殊商品）——全局蓝色高亮（用户定稿 2026-08-02）
+// 直接给特感实体加发光（与商店物品同机制 m_iGlowType 3 + 颜色）——轮廓完美
+// 贴合动作。克隆方案已废弃（prop 不播特感动画 → 冻结人偶轮廓，用户否决）。
+// 全队可见（co-op 团队增益）；任一购买者生效 → 全部特感蓝色；最后一位结束
+// → 清光。价格 6000 / 3 分钟（用户定稿）。
 // ============================================================================
 
 void WallhackStart(int client, int price)
 {
     g_bWallhack[client] = true;
-    if (g_hWallClones[client] == null)
-        g_hWallClones[client] = new ArrayList();
     g_hWallhackTimer[client] = CreateTimer(WALLHACK_DURATION, Timer_WallhackExpire,
         GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
     if (g_hWallhackSyncTimer == null)
-        g_hWallhackSyncTimer = CreateTimer(0.033, Timer_WallhackSync, INVALID_HANDLE, TIMER_REPEAT);
-    PrintToChat(client, "\x04[商店]\x01 已购买 \x05透视特感\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：特感穿墙轮廓生效 \x035 分钟\x01（死亡/切图/重开/闲置后失效）",
+        g_hWallhackSyncTimer = CreateTimer(0.5, Timer_WallhackSync, INVALID_HANDLE, TIMER_REPEAT);
+    LogMessage("[wallhack] start client=%N wallet=%d", client, g_iWallet[client]);
+    PrintToChat(client, "\x04[商店]\x01 已购买 \x05透视特感\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：特感蓝色高亮生效 \x033 分钟\x01（全队可见；死亡/切图/重开/闲置后失效）",
         price, g_iWallet[client]);
+    WallhackApplyGlow();   // 立即上光（不等首 tick）
+}
+
+// 给当前所有特感/Witch 上蓝色发光（幂等——新刷新的特感由心跳计时器自动补光）
+void WallhackApplyGlow()
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != 3)
+            continue;
+        SetEntProp(i, Prop_Send, "m_iGlowType", 3);
+        SetEntProp(i, Prop_Send, "m_nGlowRange", 999999);
+        SetEntProp(i, Prop_Send, "m_nGlowRangeMin", 0);
+        SetEntProp(i, Prop_Send, "m_glowColorOverride", 0 | (0 << 8) | (255 << 16) | (255 << 24));  // 蓝
+    }
+    for (int i = 0; i < g_hWitchList.Length; i++)
+    {
+        int w = g_hWitchList.Get(i);
+        if (!IsValidEntity(w) || !IsWitchEntity(w))
+        {
+            g_hWitchList.Erase(i--);
+            continue;
+        }
+        SetEntProp(w, Prop_Send, "m_iGlowType", 3);
+        SetEntProp(w, Prop_Send, "m_nGlowRange", 999999);
+        SetEntProp(w, Prop_Send, "m_nGlowRangeMin", 0);
+        SetEntProp(w, Prop_Send, "m_glowColorOverride", 0 | (0 << 8) | (255 << 16) | (255 << 24));  // 蓝
+    }
+}
+
+void WallhackClearGlow()
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != 3)
+            continue;
+        SetEntProp(i, Prop_Send, "m_iGlowType", 0);
+    }
+    for (int i = 0; i < g_hWitchList.Length; i++)
+    {
+        int w = g_hWitchList.Get(i);
+        if (IsValidEntity(w) && IsWitchEntity(w))
+            SetEntProp(w, Prop_Send, "m_iGlowType", 0);
+    }
 }
 
 void WallhackEnd(int client, bool silent = false)
@@ -3538,17 +3572,19 @@ void WallhackEnd(int client, bool silent = false)
         KillTimer(g_hWallhackTimer[client]);
         g_hWallhackTimer[client] = null;
     }
-    if (g_hWallClones[client] != null)
+    LogMessage("[wallhack] end client=%N silent=%d", client, silent ? 1 : 0);
+    // 若已无任何购买者 → 立即清光（不等心跳下 tick）
+    bool any = false;
+    for (int i = 1; i <= MaxClients; i++)
     {
-        for (int i = 0; i < g_hWallClones[client].Length; i++)
+        if (g_bWallhack[i])
         {
-            WallClone wc;
-            g_hWallClones[client].GetArray(i, wc);
-            if (IsValidEntity(wc.clone))
-                RemoveEntity(wc.clone);
+            any = true;
+            break;
         }
-        g_hWallClones[client].Clear();
     }
+    if (!any)
+        WallhackClearGlow();
     if (!silent && IsClientInGame(client))
         PrintToChat(client, "\x04[商店]\x01 透视特感效果已结束");
 }
@@ -3562,198 +3598,25 @@ void WallhackEndAll()
     }
 }
 
-// v1.7.64: 手写客户端索引判定（SM 1.12 include 无 IsClientIndex）
-bool WallhackIsClient(int target)
-{
-    return target >= 1 && target <= MaxClients;
-}
-
-bool WallhackTargetValid(int target)
-{
-    // 0/负数 = 非法目标（脏条目），直接剔除——不能走 IsClientInGame(0)（会抛异常
-    // 中断整个同步 tick → 克隆永远建不出来，用户实测"透视没作用"）
-    if (target <= 0)
-        return false;
-    // 必须用客户端索引判定：Witch 实体索引可能 ≤ MaxClients（低号实体），
-    // 用 target<=MaxClients 会把 Witch 误判成客户端（错路 + 丢 Witch 克隆）
-    if (WallhackIsClient(target))
-        return IsClientInGame(target) && IsPlayerAlive(target) && GetClientTeam(target) == 3;
-    return IsValidEntity(target) && IsWitchEntity(target);
-}
-
-bool WallhackHasClone(int buyer, int target)
-{
-    if (g_hWallClones[buyer] == null) return false;
-    for (int i = 0; i < g_hWallClones[buyer].Length; i++)
-    {
-        WallClone wc;
-        g_hWallClones[buyer].GetArray(i, wc);
-        if (wc.target == target) return true;
-    }
-    return false;
-}
-
-int WallhackCreateClone(int target)
-{
-    if (target <= 0)
-        return -1;
-    char model[192];
-    if (WallhackIsClient(target))
-        GetClientModel(target, model, sizeof(model));               // "infected/hunter.mdl"
-    else
-        GetEntPropString(target, Prop_Data, "m_ModelName", model, sizeof(model));  // "models/infected/witch.mdl"
-    if (StrContains(model, "models/") != 0)
-    {
-        char full[192];
-        Format(full, sizeof(full), "models/%s", model);
-        strcopy(model, sizeof(model), full);
-    }
-    PrecacheModel(model);
-
-    int clone = CreateEntityByName("prop_dynamic_override");
-    if (clone == -1)
-        return -1;
-
-    DispatchKeyValue(clone, "model", model);
-    DispatchKeyValue(clone, "solid", "0");
-    DispatchSpawn(clone);
-
-    // 穿墙恒定发光（0 = 无限距离）
-    SetEntProp(clone, Prop_Send, "m_iGlowType", 3);
-    SetEntProp(clone, Prop_Send, "m_nGlowRange", 0);
-    SetEntProp(clone, Prop_Send, "m_nGlowRangeMin", 0);
-    SetEntProp(clone, Prop_Send, "m_glowColorOverride", 255 | (0 << 8) | (0 << 16) | (255 << 24));  // 红
-
-    // 网格隐形（轮廓保留）——必须 RENDER_TRANSCOLOR，纯 SetEntityRenderColor 无效
-    SetEntityRenderMode(clone, RENDER_TRANSCOLOR);
-    SetEntityRenderColor(clone, 0, 0, 0, 0);
-
-    // 无碰撞（穿墙传送不会卡/推实体）——0 = SOLID_NONE / COLLISION_GROUP_NONE
-    SetEntProp(clone, Prop_Data, "m_nSolidType", 0);
-    SetEntProp(clone, Prop_Data, "m_CollisionGroup", 0);
-
-    SDKHook(clone, SDKHook_SetTransmit, WallhackTransmit);
-    return clone;
-}
-
-// 只有购买者能收到克隆实体 → 只有他看到发光轮廓
-public Action WallhackTransmit(int entity, int client)
-{
-    for (int b = 1; b <= MaxClients; b++)
-    {
-        if (!g_bWallhack[b] || g_hWallClones[b] == null) continue;
-        if (WallhackHasClone(b, entity))
-        {
-            if (b != client)
-                return Plugin_Handled;
-            return Plugin_Continue;
-        }
-    }
-    return Plugin_Continue;   // 不是我们的克隆，放行
-}
-
-void WallhackSyncClone(int clone, int target)
-{
-    if (target <= 0)
-        return;
-    float origin[3], ang[3];
-    if (WallhackIsClient(target))
-    {
-        GetClientAbsOrigin(target, origin);
-        GetClientAbsAngles(target, ang);
-    }
-    else
-    {
-        GetEntPropVector(target, Prop_Data, "m_vecAbsOrigin", origin);
-        GetEntPropVector(target, Prop_Data, "m_angRotation", ang);
-    }
-    TeleportEntity(clone, origin, ang, NULL_VECTOR);
-
-    // Witch 双形态（普通/怒）模型不同——同步模型保证轮廓贴合
-    if (!WallhackIsClient(target))
-    {
-        char model[192], cur[192];
-        GetEntPropString(target, Prop_Data, "m_ModelName", model, sizeof(model));
-        GetEntPropString(clone, Prop_Data, "m_ModelName", cur, sizeof(cur));
-        if (!StrEqual(model, cur))
-            SetEntityModel(clone, model);
-    }
-}
-
-void WallhackSyncBuyer(int buyer)
-{
-    if (g_hWallClones[buyer] == null)
-        return;
-
-    // 1) 清理失效克隆（目标死亡/消失）
-    for (int i = g_hWallClones[buyer].Length - 1; i >= 0; i--)
-    {
-        WallClone wc;
-        g_hWallClones[buyer].GetArray(i, wc);
-        if (!WallhackTargetValid(wc.target) || !IsValidEntity(wc.clone))
-        {
-            if (IsValidEntity(wc.clone))
-                RemoveEntity(wc.clone);
-            g_hWallClones[buyer].Erase(i);
-        }
-    }
-
-    // 2) 补齐新刷新的特感 / Witch
-    for (int i = 1; i <= MaxClients; i++)
-    {
-        if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != 3)
-            continue;
-        if (WallhackHasClone(buyer, i))
-            continue;
-        int clone = WallhackCreateClone(i);
-        if (clone <= 0) continue;
-        WallClone wc;
-        wc.clone = clone;
-        wc.target = i;
-        g_hWallClones[buyer].PushArray(wc);
-    }
-    for (int i = 0; i < g_hWitchList.Length; i++)
-    {
-        int w = g_hWitchList.Get(i);
-        if (!WallhackTargetValid(w))
-        {
-            g_hWitchList.Erase(i--);
-            continue;
-        }
-        if (WallhackHasClone(buyer, w))
-            continue;
-        int clone = WallhackCreateClone(w);
-        if (clone <= 0) continue;
-        WallClone wc;
-        wc.clone = clone;
-        wc.target = w;
-        g_hWallClones[buyer].PushArray(wc);
-    }
-
-    // 3) 位置/朝向同步
-    for (int i = 0; i < g_hWallClones[buyer].Length; i++)
-    {
-        WallClone wc;
-        g_hWallClones[buyer].GetArray(i, wc);
-        WallhackSyncClone(wc.clone, wc.target);
-    }
-}
-
+// 0.5s 心跳：有购买者 → 补光新刷新的特感/Witch；无购买者 → 清光停表
 Action Timer_WallhackSync(Handle timer)
 {
     bool any = false;
     for (int b = 1; b <= MaxClients; b++)
     {
-        if (!g_bWallhack[b] || !IsClientInGame(b))
-            continue;
-        any = true;
-        WallhackSyncBuyer(b);
+        if (g_bWallhack[b])
+        {
+            any = true;
+            break;
+        }
     }
     if (!any)
     {
+        WallhackClearGlow();   // 最后一位失效时清光
         g_hWallhackSyncTimer = null;
-        return Plugin_Stop;   // 无购买者 → 停表
+        return Plugin_Stop;
     }
+    WallhackApplyGlow();
     return Plugin_Continue;
 }
 
@@ -3766,26 +3629,6 @@ Action Timer_WallhackExpire(Handle timer, int userId)
         WallhackEnd(client);
     }
     return Plugin_Continue;
-}
-
-void WallhackRemoveTarget(int target)
-{
-    for (int b = 1; b <= MaxClients; b++)
-    {
-        if (!g_bWallhack[b] || g_hWallClones[b] == null)
-            continue;
-        for (int i = g_hWallClones[b].Length - 1; i >= 0; i--)
-        {
-            WallClone wc;
-            g_hWallClones[b].GetArray(i, wc);
-            if (wc.target == target)
-            {
-                if (IsValidEntity(wc.clone))
-                    RemoveEntity(wc.clone);
-                g_hWallClones[b].Erase(i);
-            }
-        }
-    }
 }
 
 public Action Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
