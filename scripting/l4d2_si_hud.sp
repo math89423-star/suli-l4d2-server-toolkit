@@ -742,10 +742,10 @@ ConVar g_cvRespawnBase;        // v1.7.28
 ConVar g_cvRespawnDelay;       // v1.7.28
 ConVar g_cvRespawnCoinMax;     // v1.7.29: 复活币持有上限
 ConVar g_cvRespawnCoinStart;   // v1.7.31: 新玩家初始复活币
-// v1.7.80: 区域火炮空袭（!shop 特殊商品）
+// v1.7.80: 火炮支援1（!shop 特殊商品）
 ConVar g_cvArtEnable;
 ConVar g_cvArtTargetTime;
-// v1.7.80: 区域火炮空袭状态（实现区见文件末尾）——提前声明因 ShopBuy/OnMapStart
+// v1.7.80: 火炮支援1状态（实现区见文件末尾）——提前声明因 ShopBuy/OnMapStart
 // 在其实现之前引用（SourcePawn 变量无前向声明，函数可以）
 #define ART_AIM_MAX_DIST     2000.0   // 准星 trace 最远距离
 #define ART_CEIL_CLEAR       4096.0   // 向上探测上限（无遮挡 = 室外）
@@ -893,7 +893,7 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "透视特感",    "wallhack",                      6000,   0,  3 },   // v1.7.79: 恢复正式价 6000（全局蓝色高亮 3 分钟，可续费至 15 分钟）
     { "近战盲盒",    "melee_box",                     3000,   0,  0 },   // v1.7.79: 恢复正式价 3000（随机一把非电锯近战）
     { "烟花",        "weapon_fireworkcrate",          2500,   0,  1 },   // v1.7.72: 道具类（用户定稿 2500）
-    { "区域火炮空袭","artillery",                     8000,  0,  3 },   // v1.7.93: 恢复正式价 8000（实测通过）
+    { "火炮支援1", "artillery",                     1,     0,  3 },   // v1.7.93: 用户定稿——正式命名火炮支援1，价格暂定 1 分（随时可调）
     { "火炮支援II",  "ext_artillery2",                1,     0,  3 }     // v1.7.93: 榴弹炮弹雨（独立插件 l4d2_shop_artillery2 接管；TEMP-TEST 1 分，测完恢复 8000）
 };
 
@@ -913,8 +913,8 @@ char g_MeleePool[MELEE_POOL_COUNT][16] = {
 
 // v1.7.64: 透视特感（!shop 特殊商品）——购买者独占的克隆轮廓透视
 #define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
-// v1.7.80: 区域火炮空袭（!shop 特殊商品）——BFV 式瞄准轰炸
-#define ARTILLERY_SLOT      15      // g_ShopTable 槽位（= 区域火炮空袭）
+// v1.7.80: 火炮支援1（!shop 特殊商品）——BFV 式瞄准轰炸
+#define ARTILLERY_SLOT      15      // g_ShopTable 槽位（= 火炮支援1）
 // v1.7.93: 火炮支援II（!shop 特殊商品）——榴弹炮弹雨，独立插件接管
 #define ARTILLERY2_SLOT     16      // g_ShopTable 槽位（= 火炮支援II，classname ext_ 前缀）
 #define WALLHACK_DURATION   180.0   // v1.7.67: 3 分钟（用户定稿，原 300=5 分钟）
@@ -1176,7 +1176,7 @@ public void OnPluginStart()
     g_cvRespawnCoinStart = CreateConVar("si_hud_respawn_coin_start", "2",
         "Revive coins a NEW player joins with (full default state: 0 wallet + these coins).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
 
-    // v1.7.80: 区域火炮空袭（!shop 特殊商品；v1.7.93 恢复正式价 8000）
+    // v1.7.80: 火炮支援1（!shop 特殊商品；v1.7.93 用户定稿命名，价格暂定 1 分）
     g_cvArtEnable = CreateConVar("si_hud_art_enable", "1",
         "Enable the artillery strike shop item (0=off, purchase refunded).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     g_cvArtTargetTime = CreateConVar("si_hud_art_target_time", "15.0",
@@ -1665,7 +1665,7 @@ public void OnMapStart()
     PrecacheModel("models/weapons/melee/w_shovel.mdl");
     // v1.7.72: 烟花（道具类）——非战役图缺 precache 会隐形（M60/榴弹同坑）
     PrecacheModel("models/w_models/weapons/w_firework_crate.mdl");
-    // v1.7.80: 区域火炮空袭——瞄准标记特效（TE 模型必须 precache，否则光柱/圆圈不渲染）
+    // v1.7.80: 火炮支援1——瞄准标记特效（TE 模型必须 precache，否则光柱/圆圈不渲染）
     g_iBeamLaser = PrecacheModel("sprites/laserbeam.vmt");
     g_iBeamHalo = PrecacheModel("sprites/halo01.vmt");
     PrecacheModel("sprites/glow01.spr");
@@ -3639,7 +3639,7 @@ void ShopBuy(int client, int slot)
         return;
     }
 
-    // v1.7.80: 区域火炮空袭——进入瞄准指示（服务器马格南设计器，射击确认轰炸）。
+    // v1.7.80: 火炮支援1——进入瞄准指示（服务器马格南设计器，射击确认轰炸）。
     // 不 spawn 实体；扣款已在上游完成，取消/超时/死亡/断线由 ArtEndDesignate 退款。
     if (StrEqual(g_ShopTable[slot].classname, "artillery"))
     {
@@ -3649,7 +3649,7 @@ void ShopBuy(int client, int slot)
         {
             g_iWallet[client] += price;
             g_iShopBought[client][slot]--;
-            PrintToChat(client, "\x04[商店]\x01 倒地/死亡状态无法使用\x05区域火炮空袭\x01，积分已退回");
+            PrintToChat(client, "\x04[商店]\x01 倒地/死亡状态无法使用\x05火炮支援1\x01，积分已退回");
             return;
         }
         // v1.7.80: 全局硬冷却——轰炸中/结束后 si_hud_art_cooldown 秒内全体禁止购买（用户拍板）
@@ -3659,10 +3659,10 @@ void ShopBuy(int client, int slot)
             g_iWallet[client] += price;
             g_iShopBought[client][slot]--;
             if (wait > 0.0)
-                PrintToChat(client, "\x04[商店]\x01 \x05区域火炮空袭\x01 冷却中，\x03%d\x01 秒后可购买",
+                PrintToChat(client, "\x04[商店]\x01 \x05火炮支援1\x01 冷却中，\x03%d\x01 秒后可购买",
                     RoundToCeil(wait));
             else
-                PrintToChat(client, "\x04[商店]\x01 \x05区域火炮空袭\x01 不可用，积分已退回");
+                PrintToChat(client, "\x04[商店]\x01 \x05火炮支援1\x01 不可用，积分已退回");
             return;
         }
         if (g_bArtAiming[client])
@@ -4196,7 +4196,7 @@ void KillRespawnTimer(int client)
 }
 
 // ============================================================================
-// v1.7.80: 区域火炮空袭（!shop 特殊商品「artillery」）——BFV 式目标指示轰炸
+// v1.7.80: 火炮支援1（!shop 特殊商品「artillery」）——BFV 式目标指示轰炸
 //
 // 交互（BFV 召唤火炮复刻，用户拍板）：
 //   购买 → 扣款 → 切到服务器马格南（副武器已是马格南则不动）→ 准星瞄准处
@@ -4298,7 +4298,7 @@ void ArtStartDesignate(int client, int slot, int price)
     g_hArtAimTimer[client] = CreateTimer(ART_TICK_INT, Timer_ArtAim,
         GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 
-    PrintToChat(client, "\x04[商店]\x01 已购买 \x05区域火炮空袭\x01（-\x03%d\x01 可用积分）。\x05瞄准轰炸区域后开火（马格南）确认\x01，\x05右键取消\x01，\x03%.0f 秒\x01内有效",
+    PrintToChat(client, "\x04[商店]\x01 已购买 \x05火炮支援1\x01（-\x03%d\x01 可用积分）。\x05瞄准轰炸区域后开火（马格南）确认\x01，\x05右键取消\x01，\x03%.0f 秒\x01内有效",
         price, g_cvArtTargetTime.FloatValue);
 }
 
@@ -4439,14 +4439,14 @@ public Action Timer_ArtAim(Handle timer, int userid)
 
     if (GetGameTime() >= g_fArtAimEnd[client])
     {
-        PrintToChat(client, "\x04[商店]\x01 区域火炮空袭瞄准超时，积分已退回");
+        PrintToChat(client, "\x04[商店]\x01 火炮支援1瞄准超时，积分已退回");
         ArtEndDesignate(client, true);
         return Plugin_Stop;
     }
 
     if (GetClientButtons(client) & IN_ATTACK2)    // 右键 → 取消退款
     {
-        PrintToChat(client, "\x04[商店]\x01 已取消区域火炮空袭，积分已退回");
+        PrintToChat(client, "\x04[商店]\x01 已取消火炮支援1，积分已退回");
         ArtEndDesignate(client, true);
         return Plugin_Stop;
     }
