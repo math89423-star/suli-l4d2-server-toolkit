@@ -11,6 +11,15 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.47:
+ *   - 连杀结算音效调大 (user): 音量上限 1.0 → 2.0，默认 1.0 → 1.5。
+ *     原代码把 EmitSoundToClient 音量钳制在 1.0（vol >= 1.0 ? 1.0 : vol），
+ *     而 award mp3s 已 loudnorm 到 ~-15 dB —— 放开增益后 1.5x 无削波风险。
+ *     改 cfg 中 si_hud_streak_sound_volume 为 1.5 后 reload 生效。
+ *   - 残留 cvar 坑 (实测): 该 cvar 已被引擎自动创建（cfg exec），
+ *     CreateConVar 拿到已有 cvar 不更新 def/max → 值被钳在 1.0。
+ *     修复: SetBounds(ConVarBound_Upper, 2.0) + SetDefault("1.5") 强制重设。
+ *
  * Changelog v1.7.46:
  *   - 激光根本原因确认 (errors 日志实锤): L4D2 武器无 m_bHasLaserSight prop
  *     （CS 系列的）——SetEntProp 抛 "Invalid property" 运行时错误中断。
@@ -534,7 +543,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.46"
+#define PLUGIN_VERSION "1.7.47"
 
 // ============================================================================
 // ConVar handles
@@ -931,8 +940,12 @@ public void OnPluginStart()
     g_cvStreakEnable = CreateConVar("si_hud_streak_sound_enable", "1",
         "Play the BF1 award sound when a kill streak settles (streak >= 2).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvStreakVol = CreateConVar("si_hud_streak_sound_volume", "1.0",
-        "Streak award sound volume, independent of si_hud_sound_volume.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvStreakVol = CreateConVar("si_hud_streak_sound_volume", "1.5",
+        "Streak award sound volume, independent of si_hud_sound_volume. >1.0 boosts gain (mp3s mastered ~-15 dB, no clipping below 2.0).", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+    // v1.7.47 FIX (engine-residue cvar): a cfg exec once auto-created this cvar
+    // in the engine before the plugin loaded; CreateConVar returns the existing
+    // cvar WITHOUT updating bounds — force them (no server restart).
+    g_cvStreakVol.SetBounds(ConVarBound_Upper, true, 2.0);
 
     // v1.7.2: all six awards re-mastered to a uniform loudness (loudnorm,
     // mean ≈ -15 dB) and re-shipped under the bf_award_* names so clients
@@ -2621,8 +2634,10 @@ void PlayStreakSound(int client, const char[] sound)
 
     // v1.7.1 FIX: full path (with .mp3) — bare names resolve to .wav only.
     // SOUND_FROM_PLAYER = non-spatialized UI sound, same as bf_killfeedback.
+    // v1.7.47: volume may exceed 1.0 (gain boost, up to si_hud_streak_sound_volume
+    // max 2.0) — award mp3s are mastered at ~-15 dB, so 1.5x has no clipping.
     EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_STATIC,
-        SNDLEVEL_NORMAL, SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
+        SNDLEVEL_NORMAL, SND_NOFLAGS, vol);
 }
 
 void KillStreakTimer(int client)
