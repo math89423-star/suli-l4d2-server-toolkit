@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.70"
+#define PLUGIN_VERSION "1.7.71"
 
 // ============================================================================
 // ConVar handles
@@ -3379,8 +3379,8 @@ void OpenShopMenu(int client)
     Menu menu = new Menu(ShopCatMenuHandler);
     // v1.7.32c FIX: title 必须单行 — L4D2 VguiMenu 标题不支持 \n，
     // 多行标题 → 整个菜单不渲染（用户实测 !buy 无反应，!csm 的 Panel 单行正常）
-    menu.SetTitle("商店: 可用 %d / 本关 %d / 复活币 %d 枚",
-        g_iWallet[client], g_iTotalScore[client], g_iReviveCoins[client]);
+    menu.SetTitle("商店: 可用积分 %d  复活币 %d 枚",
+        g_iWallet[client], g_iReviveCoins[client]);
     menu.AddItem("0", "武器类");
     menu.AddItem("1", "道具类");
     menu.AddItem("2", "医疗类");
@@ -3397,8 +3397,8 @@ void ShopCategoryMenu(int client, int cat)
     char catNames[4][16] = { "武器类", "道具类", "医疗类", "其他" };
     Menu menu = new Menu(ShopItemMenuHandler);
     char title[96];
-    Format(title, sizeof(title), "%s: 可用 %d / 本关 %d / 复活币 %d 枚",
-        catNames[cat], g_iWallet[client], g_iTotalScore[client], g_iReviveCoins[client]);
+    Format(title, sizeof(title), "%s: 可用积分 %d  复活币 %d 枚",
+        catNames[cat], g_iWallet[client], g_iReviveCoins[client]);
     menu.SetTitle(title);
 
     char info[4];
