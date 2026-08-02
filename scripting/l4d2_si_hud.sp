@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.69"
+#define PLUGIN_VERSION "1.7.70"
 
 // ============================================================================
 // ConVar handles
@@ -1446,8 +1446,9 @@ void ShowScoreboardTo(int client)
         PrintToChat(client, "\x04[得分榜]\x01 你的战绩：0 分");
 
     // v1.7.28 (user): 播报计入可用积分 + 复活币（战役内资源，新战役清零）
-    PrintToChat(client, "\x04[得分榜]\x01 可用积分 \x03%d\x01  复活币 \x03%d\x01 枚  复活 \x03%d\x01 次",
-        g_iWallet[client], g_iReviveCoins[client], g_iRevivesLeft[client]);
+    // v1.7.70 (user): 去掉"复活 X 次"，只显示复活币剩余数量
+    PrintToChat(client, "\x04[得分榜]\x01 可用积分 \x03%d\x01  复活币 \x03%d\x01 枚",
+        g_iWallet[client], g_iReviveCoins[client]);
     // v1.7.32 (user): 积分总结后提醒玩家商店入口
     PrintToChat(client, "\x04[得分榜]\x01 输入 \x05!shop\x01 或 \x05!buy\x01 打开商店，用可用积分兑换补给/武器");
 }
