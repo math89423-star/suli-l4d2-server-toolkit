@@ -4,7 +4,7 @@
 #include <sdktools>
 #include <l4d2_mission_manager>
 
-#define PLUGIN_VERSION "1.2"
+#define PLUGIN_VERSION "1.3"
 
 // Official L4D2 campaign rotation (first maps only)
 char g_szOfficialCampaigns[][] = {
@@ -19,7 +19,7 @@ public Plugin myinfo =
 {
     name = "Campaign Finale Auto Transition",
     author = "claude",
-    description = "After finale win, advance to next campaign (official→official, custom→mapcycle)",
+    description = "After finale win, advance to next campaign (official→official, custom→c1m1)",
     version = PLUGIN_VERSION,
     url = ""
 };
@@ -42,58 +42,6 @@ bool IsOfficialCampaign(const char[] map, int &index)
         }
     }
     return false;
-}
-
-// Get next campaign from mapcycle.txt
-bool GetNextFromMapcycle(const char[] currentFirstMap, char[] nextMap, int maxlen)
-{
-    char mapcyclePath[PLATFORM_MAX_PATH];
-    BuildPath(Path_SM, mapcyclePath, sizeof(mapcyclePath), "configs/mapcycle.txt");
-
-    File file = OpenFile(mapcyclePath, "r");
-    if (file == null)
-        return false;
-
-    char lines[128][64];
-    int count = 0;
-    char line[64];
-
-    while (!file.EndOfFile() && count < 128)
-    {
-        if (!file.ReadLine(line, sizeof(line)))
-            break;
-        TrimString(line);
-        if (line[0] == '\0' || line[0] == '/' || line[0] == '#')
-            continue;
-        strcopy(lines[count], sizeof(lines[]), line);
-        count++;
-    }
-    delete file;
-
-    if (count == 0)
-        return false;
-
-    // Find current in list
-    int idx = -1;
-    for (int i = 0; i < count; i++)
-    {
-        if (StrEqual(lines[i], currentFirstMap, false))
-        {
-            idx = i;
-            break;
-        }
-    }
-
-    if (idx == -1)
-    {
-        // Not found — start from first
-        strcopy(nextMap, maxlen, lines[0]);
-        return true;
-    }
-
-    int nextIdx = (idx + 1) % count;
-    strcopy(nextMap, maxlen, lines[nextIdx]);
-    return true;
 }
 
 public Action Event_FinaleWin(Event event, const char[] name, bool dontBroadcast)
@@ -139,13 +87,9 @@ public Action Event_FinaleWin(Event event, const char[] name, bool dontBroadcast
     }
     else
     {
-        // Custom → next from mapcycle.txt
-        if (!GetNextFromMapcycle(firstMap, nextMap, sizeof(nextMap)))
-        {
-            PrintToChatAll("\x04[战役结束] \x01无法确定下一战役，保持不动");
-            return Plugin_Continue;
-        }
-        PrintToChatAll("\x04[战役结束] \x01下一三方图: \x05%s", nextMap);
+        // Custom campaign finished → back to c1m1, then official rotation continues
+        strcopy(nextMap, sizeof(nextMap), "c1m1_hotel");
+        PrintToChatAll("\x04[战役结束] \x01三方图战役结束，切回官方战役: \x05c1m1_hotel");
     }
 
     DataPack pack = new DataPack();
