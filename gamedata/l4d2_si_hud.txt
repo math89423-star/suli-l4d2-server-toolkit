@@ -1,0 +1,16 @@
+"Games"
+{
+	"left4dead2"
+	{
+		"Signatures"
+		{
+			// v1.7.46: L4D2 激光无 networked prop（SetEntProp m_bHasLaserSight
+			// 抛 "Invalid property"）——只能调用引擎虚函数
+			"SetHasLaserSight"
+			{
+				"library"	"server"
+				"linux"		"@_ZN17CBaseCombatWeapon16SetHasLaserSightEb"
+			}
+		}
+	}
+}

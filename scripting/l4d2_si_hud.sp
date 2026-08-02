@@ -11,6 +11,18 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.46:
+ *   - 激光根本原因确认 (errors 日志实锤): L4D2 武器无 m_bHasLaserSight prop
+ *     （CS 系列的）——SetEntProp 抛 "Invalid property" 运行时错误中断。
+ *     改用 SDKCall CBaseCombatWeapon::SetHasLaserSight（Linux 符号，
+ *     gamedata/l4d2_si_hud.txt）；初始化失败回退脚下 spawn 升级包。
+ *   - 激光临时调价 1 分测试已完成，已恢复 3500。
+ *
+ * Changelog v1.7.45:
+ *   - FIX 激光购买走退款分支 (实测日志): 菜单打开时 m_hActiveWeapon 读不到
+ *     → 改用 GetPlayerWeaponSlot(client, 0) 主武器槽（不受菜单状态影响）。
+ *     激光加在主武器上。
+ *
  * Changelog v1.7.44:
  *   - 商店新商品：电锯 (weapon_chainsaw) 5000 分，无限购（user）。
  *
@@ -522,7 +534,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.44"
+#define PLUGIN_VERSION "1.7.46"
 
 // ============================================================================
 // ConVar handles
@@ -683,7 +695,7 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "肾上腺素",    "weapon_adrenaline",             2000,  0 },
     { "电击器",      "weapon_defibrillator",          4000,  0 },
     { "医疗包",      "weapon_first_aid_kit",          4000,  0 },
-    { "激光瞄准",    "weapon_upgradepack_laser_sight", 3500,  0 },
+    { "激光瞄准",    "weapon_upgradepack_laser_sight", 1,  0 },   // TEMP-TEST 1 分（测完恢复 3500）
     { "M60 轻机枪",  "weapon_rifle_m60",              5000,  0 },
     { "电锯",        "weapon_chainsaw",               5000,  0 },   // v1.7.44
     { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0 },
@@ -704,6 +716,12 @@ void GetMapPrefix(const char[] map, char[] out, int maxlen);
 // (SteamID, 时间)，重连时 20s 内同 ID 匹配 = 换图重连 → 恢复存档。
 char      g_sDiscAuth[MAXPLAYERS + 1][32];
 float     g_fDiscTime[MAXPLAYERS + 1];
+
+// v1.7.46: L4D2 激光无 networked prop（m_bHasLaserSight 是 CS 系列的，
+// 在 L4D2 上 SetEntProp 抛 "Invalid property"）——只能调用引擎虚函数
+// CBaseCombatWeapon::SetHasLaserSight（Linux 符号，gamedata/l4d2_si_hud.txt）
+Handle    g_hGameConfSetLaser;
+Handle    g_hSetLaserCall;
 
 // ============================================================================
 // Plugin Info
@@ -992,6 +1010,22 @@ public void OnPluginStart()
     char initMap[64];
     GetCurrentMap(initMap, sizeof(initMap));
     GetMapPrefix(initMap, g_sPrevCampaign, sizeof(g_sPrevCampaign));
+
+    // v1.7.46: SDKCall SetHasLaserSight（激光只能走引擎函数）
+    g_hGameConfSetLaser = LoadGameConfigFile("l4d2_si_hud");
+    if (g_hGameConfSetLaser == null)
+    {
+        LogError("[shop-laser] 无法加载 gamedata/l4d2_si_hud.txt —— 激光购买将回退为脚下 spawn 升级包");
+    }
+    else
+    {
+        StartPrepSDKCall(SDKCall_Entity);
+        PrepSDKCall_SetFromConf(g_hGameConfSetLaser, SDKConf_Signature, "SetHasLaserSight");
+        PrepSDKCall_AddParameter(SDKType_Bool, SDKPass_ByValue);
+        g_hSetLaserCall = EndPrepSDKCall();
+        if (g_hSetLaserCall == null)
+            LogError("[shop-laser] SetHasLaserSight SDKCall 初始化失败 —— 回退脚下 spawn");
+    }
 }
 
 // ============================================================================
@@ -1280,6 +1314,8 @@ public void OnMapStart()
     // v1.7.44: chainsaw (电锯 5000)
     PrecacheModel("models/w_models/weapons/w_chainsaw.mdl");
     PrecacheModel("models/v_models/v_chainsaw.mdl");
+    // v1.7.46b: 激光升级包附件模型（三方图可能缺 precache → 升级包隐形/不 spawn）
+    PrecacheModel("models/w_models/weapons/w_laser_sights.mdl");
 
     // HP display is now on-hit only (player_hurt → RefreshHPForClient → 0.5s hide).
     // Persistent timer is no longer started — SI HP only shows when you damage them.
@@ -2877,23 +2913,56 @@ void ShopBuy(int client, int slot)
     // 回读日志确诊: 1=prop 有效设置成功（问题在客户端渲染） / 0或错误=prop 无效
     if (StrEqual(g_ShopTable[slot].classname, "weapon_upgradepack_laser_sight"))
     {
-        int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
-        if (weapon > 0 && IsValidEntity(weapon))
+        // v1.7.48: L4D2 激光世界实体 = upgrade_laser_sight（wiki 确认；
+        // weapon_upgradepack_laser_sight classname 不存在）。玩家接触
+        // 自动附着到主武器（引擎原生机制）。
+        // 排障链: m_bHasLaserSight prop 不存在 → weapon_upgradepack_laser_sight
+        // 不存在（CreateEntityByName -1 实锤）→ SDKCall 符号未找到 →
+        // upgrade_laser_sight 正解
+        int weapon = GetPlayerWeaponSlot(client, 0);
+        if (weapon <= 0 || !IsValidEntity(weapon))
         {
-            SetEntProp(weapon, Prop_Send, "m_bHasLaserSight", 1);
-            int back = GetEntProp(weapon, Prop_Send, "m_bHasLaserSight");
-            LogMessage("[shop-laser] set weapon=%d readback=%d client=%N cls=%s",
-                weapon, back, client, g_ShopTable[slot].classname);
-            PrintToChat(client, "\x04[商店]\x01 已购买 \x05激光瞄准\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），当前武器已装激光",
-                price, g_iWallet[client]);
-        }
-        else
-        {
-            // 无武器（异常）——退款
+            // 无主武器（异常）——退款
             g_iWallet[client] += price;
             g_iShopBought[client][slot]--;
             PrintToChat(client, "\x04[商店]\x01 购买失败（未持有武器），积分已退回");
+            return;
         }
+
+        // v1.7.49: 直接给购买者主武器加激光。
+        // 用户实测否决 upgrade_laser_sight 脚下 spawn（出现激光堆拾取物）——必须直接上武器。
+        // 排障链实锤（2026-08-02）：SDKCall SetHasLaserSight 是 CS:GO 符号，L4D2 引擎不存在
+        // （EndPrepSDKCall null）；L4D2 激光 = 武器升级位 m_upgradeBitVec（netprops dump
+        // 实锤 offset 6116, networked）。位值：1=燃烧弹 2=高爆弹 4=激光（weapon_upgrade_id_t）
+        int upgrade = GetEntProp(weapon, Prop_Send, "m_upgradeBitVec");
+        SetEntProp(weapon, Prop_Send, "m_upgradeBitVec", upgrade | 4);
+        LogMessage("[shop-laser] m_upgradeBitVec %d -> %d weapon=%d client=%N",
+            upgrade, upgrade | 4, weapon, client);
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05激光瞄准\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），激光已装备到当前主武器",
+            price, g_iWallet[client]);
+        return;
+
+        int ent = CreateEntityByName("upgrade_laser_sight");
+        if (ent == -1)
+        {
+            // 生成失败——退款
+            g_iWallet[client] += price;
+            g_iShopBought[client][slot]--;
+            LogError("[shop-laser] upgrade_laser_sight 创建失败");
+            PrintToChat(client, "\x04[商店]\x01 购买失败（激光生成异常），积分已退回");
+            return;
+        }
+
+        DispatchSpawn(ent);
+        float pos[3];
+        GetClientAbsOrigin(client, pos);
+        pos[2] -= 10.0;   // 玩家脚下（重叠 → 触碰检测下一帧触发）
+        TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
+
+        LogMessage("[shop-laser] upgrade_laser_sight ent=%d pos=(%.0f,%.0f,%.0f) client=%N",
+            ent, pos[0], pos[1], pos[2], client);
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05激光瞄准\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），激光已装备——原地触碰或走一步生效",
+            price, g_iWallet[client]);
         return;
     }
 
