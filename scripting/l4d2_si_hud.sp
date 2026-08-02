@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.73"
+#define PLUGIN_VERSION "1.7.74"
 
 // ============================================================================
 // ConVar handles
@@ -3524,6 +3524,11 @@ void ShopCategoryMenu(int client, int cat)
         IntToString(i, info, sizeof(info));
         menu.AddItem(info, line);
     }
+    // v1.7.74: 空白占位补到 7 个内容位——返回/退出钉死在 8/9 号位
+    // （v1.7.73 直接跟在商品后面导致位置随商品数漂移，用户实测发现）
+    // 社区商店插件同款做法；handler 需忽略空 info 的占位项
+    for (int i = menu.ItemCount; i < 7; i++)
+        menu.AddItem("", "");
     // v1.7.73: 习惯布局——8=返回（绿色高亮防眼花），9=退出；不用原生
     // ExitButton（原生显示 0. Exit，社区商店插件有"显示 0 实际按 9"的错位
     // Bug——显式菜单项保证显示与按键一致）
@@ -3560,6 +3565,8 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
     {
         char info[8];
         menu.GetItem(item, info, sizeof(info));
+        if (info[0] == '\0')
+            return 0;   // v1.7.74: 空白占位项——点了无操作
         if (StrEqual(info, "back"))
         {
             OpenShopMenu(client);   // v1.7.72: 返回上一步（分类页）
