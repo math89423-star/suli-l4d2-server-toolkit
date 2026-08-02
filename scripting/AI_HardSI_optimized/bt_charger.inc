@@ -38,6 +38,10 @@ BT_Status ChargerAct_BlockCharge(int client) {
 // 修法：ghost→unghost 边沿检测，unghost 后 2s 内本条件 SUCCESS → 根 selector
 //       停在 BlockCharge 分支（持续推后 m_timestamp，引擎 AI 也释放不了），
 //       2s 后 FAIL 恢复正常战术。
+// v4.0.2: 加 freshSpawn 兜底 —— 未观察到 ghost 阶段（运出复活出生即实体、
+//       或 player_spawn 在 unghost 时重发导致黑板被 BB_Init 重置）时，
+//       从 Event_PlayerSpawn 记录的 _charger_spawn_at 起 2s 内同样保护。
+//       ghost 期间引擎不会攻击，保护期对正常流程无害。
 BT_Status CND_ChargerSpawnProtect(int client) {
     bool ghostNow = L4D_IsPlayerGhost(client);
     float ghostSince = BB_GetFloat(client, "_charger_ghost_since", 0.0);
@@ -61,6 +65,13 @@ BT_Status CND_ChargerSpawnProtect(int client) {
     if (unghostAt > 0.0) {
         return (GetGameTime() - unghostAt < 2.0) ? BT_SUCCESS : BT_FAILURE;
     }
+
+    // v4.0.2 freshSpawn 兜底（须在边沿检测之后，避免 long-ghost 场景双重保护）
+    float spawnAt = BB_GetFloat(client, "_charger_spawn_at", 0.0);
+    if (spawnAt > 0.0 && GetGameTime() - spawnAt < 2.0) {
+        return BT_SUCCESS;
+    }
+
     return BT_FAILURE;
 }
 
@@ -179,17 +190,14 @@ stock int BT_CreateChargerTree() {
     if (hCvar != null) iHpThreshold = GetConVarInt(hCvar);
 
     // --- v3.2 terrain strategies: narrow ---
-    int narrowHoldSeq = BT_CreateSequence(4,
-        BT_CreateCondition(CND_IsNarrowSpace),
-        BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateIsInRange(600.0),
-        BT_CreateAction(ACT_HoldChokepoint)
-    );
+    // v4.0.2: 移除 narrowHoldSeq（HoldChokepoint 站桩是 Tank/Boomer 卡点动作，
+    // 对 Charger 是"原地不动看着生还者"）——窄巷本应无解直冲；
+    // narrowChargeSeq 距离 400→fChargeProx(750)，与开阔地冲锋距离对齐。
     int narrowChargeSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(400.0),
+        BT_CreateIsInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -368,9 +376,8 @@ stock int BT_CreateChargerTree() {
     BT_AddChild(root, coordSeq);               // 4. ← v4.0 前置: coordination 冲被 pin 者
     BT_AddChild(root, acidCharge);             // 4.5. v4.0: 冲酸液里的人（Charger×Spitter 配合）
     BT_AddChild(root, ledgeChargeSeq);         // 5. v3.2: ledge → charge
-    BT_AddChild(root, narrowChargeSeq);        // 6. v3.2: narrow → charge
-    BT_AddChild(root, narrowHoldSeq);          // 7. v3.2: narrow → hold
-    BT_AddChild(root, openStrategyRoll);        // 8a. v3.5: open → roll token
+    BT_AddChild(root, narrowChargeSeq);        // 6. v3.2/v4.0.2: narrow → charge (750u)
+    BT_AddChild(root, openStrategyRoll);        // 7a. v3.5: open → roll token
     BT_AddChild(root, openS0_Charge);           // 8b. v3.5: open strat0 → flank charge
     BT_AddChild(root, openS0_Approach);         // 8c. v3.5: open strat0 → flank approach
     BT_AddChild(root, openS1_Charge);           // 9a. v3.5: open strat1 → erratic charge

@@ -9,6 +9,11 @@
 // v3.7: Audit fixes — RandomChance thrashing, dead code, missing range checks
 // v4.0.1: Charger 出生保护（unghost 后 2s 禁冲）+ coordSeq 补距离/LOS；
 //         Hunter 出生蠕动修复（sprint 死区消除 + crouchApproach 站立快跑化）
+// v4.0.2: P0 修复 hardcoop_util m_hasBeenBoomed Prop_Data→Prop_Send（每日 4 万异常，
+//         Boomer 窗口期 BT tick 全中止 → 协同进攻瘫痪）；
+//         Charger 出生保护加 freshSpawn 兜底（未观察到 ghost 阶段也保护 2s）；
+//         走廊窄巷 Charger 直接 750u 冲（移除 HoldChokepoint 站桩分支）；
+//         TICK_INTERVAL 4→2（BT 帧率翻倍，原版 AI 主导帧减半）
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -50,7 +55,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "4.0.1",
+    version = "4.0.2",
     url = "github.com/breezyplease"
 };
 
@@ -59,8 +64,10 @@ public Plugin:myinfo = {
 // ============================================================================
 
 // Tick throttling — evaluate AI every N frames
+// v4.0.2: 4→2 —— 原 75% 帧由引擎原版 AI（官方故意保守）主导，插件行为被稀释。
+// BT 帧率翻倍（25%→50%），terrain 分类已 0.5s 限频，CPU 代价可忽略。
 int   g_iTickCounter[MAXPLAYERS + 1];
-#define TICK_INTERVAL 4
+#define TICK_INTERVAL 2
 
 // Shove tracking
 bool  g_bHasBeenShoved[MAXPLAYERS + 1];
@@ -173,6 +180,12 @@ public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast)
 
     // Per-SI spawn initialization (reset per-SI state)
     switch (L4D2_Infected:GetInfectedClass(client)) {
+        case L4D2Infected_Charger: {
+            // v4.0.2: 记录出生时刻 —— CND_ChargerSpawnProtect 的 freshSpawn 兜底用。
+            // 覆盖"出生即实体（运出复活）未观察到 ghost 阶段"和
+            // "player_spawn 在 unghost 时重发导致黑板重置"两种情况。
+            BB_SetFloat(client, "_charger_spawn_at", GetGameTime());
+        }
         case L4D2Infected_Hunter: {
             g_bHunterJustLunged[client] = false;
             g_fHunterMissEscapeCooldown[client] = 0.0;

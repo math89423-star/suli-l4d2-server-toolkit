@@ -744,7 +744,7 @@ stock SI_GetCoordinatedTarget(si, preferClass = -1) {
 			}
 		}
 		if (alreadyTargeted && candidateCount > 1) continue;
-		if (SI_IsBoomerActive() && GetEntProp(candidates[i], Prop_Data, "m_hasBeenBoomed") > 0) {
+		if (SI_IsBoomerActive() && GetEntProp(candidates[i], Prop_Send, "m_hasBeenBoomed") > 0) {
 			return candidates[i];
 		}
 		if (bestDist < 0.0 || candidateDist[i] < bestDist) {
@@ -805,7 +805,7 @@ stock SI_SignalAttack(si) {
 stock bool:SI_AnySurvivorBoomaBiled() {
 	for (new client = 1; client <= MaxClients; client++) {
 		if (IsSurvivor(client) && IsPlayerAlive(client)) {
-			if (GetEntProp(client, Prop_Data, "m_hasBeenBoomed") > 0) return true;
+			if (GetEntProp(client, Prop_Send, "m_hasBeenBoomed") > 0) return true;
 		}
 	}
 	return false;
