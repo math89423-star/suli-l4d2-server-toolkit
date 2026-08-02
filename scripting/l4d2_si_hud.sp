@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.72"
+#define PLUGIN_VERSION "1.7.73"
 
 // ============================================================================
 // ConVar handles
@@ -839,7 +839,7 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0,  0 },
     { "复活币",      "",                              12000,  0,  3 },
     { "透视特感",    "wallhack",                      1,      0,  3 },   // v1.7.67: 全局蓝色高亮 3 分钟（用户定稿 6000）；TEMP-TEST 1 分（测完恢复 6000）
-    { "近战盲盒",    "melee_box",                     3000,   0,  0 },   // v1.7.72: 随机一把非电锯近战（价格待用户定稿）
+    { "近战盲盒",    "melee_box",                     1,      0,  0 },   // v1.7.72: 随机一把非电锯近战（用户定稿 3000）；TEMP-TEST 1 分（测完恢复 3000）
     { "烟花",        "weapon_fireworkcrate",          2500,   0,  1 }    // v1.7.72: 道具类（用户定稿 2500）
 };
 
@@ -3524,9 +3524,11 @@ void ShopCategoryMenu(int client, int cat)
         IntToString(i, info, sizeof(info));
         menu.AddItem(info, line);
     }
-    // v1.7.72: 返回上一步（分类页）
-    menu.AddItem("back", "返回分类");
-    menu.ExitButton = true;
+    // v1.7.73: 习惯布局——8=返回（绿色高亮防眼花），9=退出；不用原生
+    // ExitButton（原生显示 0. Exit，社区商店插件有"显示 0 实际按 9"的错位
+    // Bug——显式菜单项保证显示与按键一致）
+    menu.AddItem("back", "\x04返回分类\x01");
+    menu.AddItem("exit", "\x02退出\x01");
     g_hShopMenu[client] = menu;
     menu.Display(client, 20);
 }
@@ -3561,6 +3563,13 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
         if (StrEqual(info, "back"))
         {
             OpenShopMenu(client);   // v1.7.72: 返回上一步（分类页）
+            return 0;
+        }
+        if (StrEqual(info, "exit"))
+        {
+            // v1.7.73: 9=退出——CancelClientMenu 触发 Cancel→End，句柄由 handler 清理
+            g_hShopMenu[client] = null;
+            CancelClientMenu(client);
             return 0;
         }
         ShopBuy(client, StringToInt(info));
