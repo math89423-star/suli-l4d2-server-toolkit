@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.75"
+#define PLUGIN_VERSION "1.7.76"
 
 // ============================================================================
 // ConVar handles
@@ -848,7 +848,10 @@ int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（O
 // v1.7.72: 近战盲盒奖池（12 把，不含电锯）——2D 字符数组初始化规则
 // （spcomp64 实测）：尺寸全显式 + 行数必须与初始化行数一致（[12][16] 配
 // 2 行 → error 047；const + 省略首维 → parse error）
-char g_MeleePool[12][16] = {
+// v1.7.76 FIX: 抽取下标用显式常量 MELEE_POOL_COUNT——sizeof(x)/sizeof(x[])
+// 在全局数组上实测算出 0（GetRandomInt(0,0) 永远棒球棍）
+#define MELEE_POOL_COUNT   12
+char g_MeleePool[MELEE_POOL_COUNT][16] = {
     "baseball_bat", "cricket_bat", "crowbar", "electric_guitar",
     "fireaxe", "frying_pan", "golfclub", "katana",
     "knife", "machete", "tonfa", "shovel"
@@ -3269,7 +3272,11 @@ int SpawnMelee(const char[] meleeName, float pos[3])
     if (ent == -1)
         return -1;
 
+    // v1.7.76: 双保险——keyvalue + networked prop 都写（任一路径生效都行；
+    // 都不生效引擎默认 baseball_bat，用户实测"全是棒球棍"）
     DispatchKeyValue(ent, "melee_script_name", meleeName);
+    SetEntPropString(ent, Prop_Send, "m_MeleeWeaponName", meleeName);
+    LogMessage("[melee-box] spawn melee=%s ent=%d", meleeName, ent);
 
     float from[3], to[3];
     from = pos;
@@ -3422,7 +3429,7 @@ void ShopBuy(int client, int slot)
     if (StrEqual(g_ShopTable[slot].classname, "melee_box"))
     {
         char picked[32];
-        strcopy(picked, sizeof(picked), g_MeleePool[GetRandomInt(0, sizeof(g_MeleePool) / sizeof(g_MeleePool[]) - 1)]);
+        strcopy(picked, sizeof(picked), g_MeleePool[GetRandomInt(0, MELEE_POOL_COUNT - 1)]);
 
         float pos[3], ang[3], fwd[3];
         GetClientEyePosition(client, pos);
