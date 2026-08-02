@@ -79,7 +79,7 @@
 
 | 插件 | 说明 |
 |------|------|
-| `l4d2_auto_respawn.smx` | 自动复活（45 秒） |
+| `l4d2_auto_respawn.smx` | ⛔ 已禁用（2026-08-02）— 无条件复活绕过复活币限次，功能已并入 l4d2_si_hud（si_hud_respawn_*） |
 | `l4d2_ff_fix.smx` | 友伤调整 — 友伤倍率 0.30（降低70%），火伤 1.0 |
 | `l4d2_shove_fatigue_scaler.smx` | 推挠疲劳度缩放控制 |
 | `l4d2_medical_supply_scaler.smx` | 医疗补给数量按人数缩放（包/药/针） |

@@ -681,7 +681,7 @@
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 #include <float>         // v1.7.80: 火炮 Sqrt/Cos/Sin
 
-#define PLUGIN_VERSION "1.7.99"
+#define PLUGIN_VERSION "1.8.1"
 
 // ============================================================================
 // ConVar handles
@@ -769,6 +769,7 @@ int       g_iBeamLaser;                       // precache 的 beam 模型索引�
 int       g_iBeamHalo;
 float     g_fArtNextBuyTime;                  // v1.7.80: 下次可购买 GameTime（轰炸中+冷却=禁止全体购买）
 ConVar g_cvArtDuration;      // v1.7.95: 轰炸总时长（秒）
+ConVar g_cvArtDuration2;     // v1.8.0: II-燃烧 独立时长（秒）
 ConVar g_cvArtRadiusOut;
 ConVar g_cvArtRadiusMid;
 ConVar g_cvArtRadiusSmall;
@@ -884,12 +885,12 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "M60 轻机枪",  "weapon_rifle_m60",              5000,  0,  0 },   // v1.7.96: 用户定稿 5000
     { "电锯",        "weapon_chainsaw",               5000,  0,  0 },   // v1.7.44
     { "榴弹发射器",  "weapon_grenade_launcher",       6500,  0,  0 },   // v1.7.96: 用户定稿 6500（原 8000）
-    { "复活币",      "",                              9000,  0,  3 },   // v1.7.96: 用户定稿 9000（原 12000）
-    { "透视特感",    "wallhack",                      6000,   0,  3 },   // v1.7.79: 恢复正式价 6000（全局蓝色高亮 3 分钟，可续费至 15 分钟）
+    { "复活币",      "",                              8500,  0,  3 },   // v1.8.1: 用户定稿 8500（v1.7.96 定稿 9000）
+    { "透视特感",    "wallhack",                      4000,   0,  3 },   // v1.8.1: 用户定稿 4000/5分钟（原 6000/3分钟；可续费至 15 分钟）
     { "近战盲盒",    "melee_box",                     1000,   0,  0 },   // v1.7.96: 用户定稿 1000（原 3000）
     { "烟花",        "weapon_fireworkcrate",          1200,   0,  1 },   // v1.7.96: 用户定稿 1200（原 2500）
-    { "天火轰炸", "artillery",                     5000,   0,  3 },  // v1.7.99: 正式命名+定价（原火炮支援1：瓦斯/煤气罐雨）
-    { "狂欢轰炸", "artillery2",                    6000,   0,  3 }   // v1.7.99: 正式命名+定价（原火炮支援2：油桶+烟花雨）
+    { "火力支援I-炮击", "artillery",               4500,   0,  3 },  // v1.8.1: 用户定稿 4500/30s（v1.7.99 定稿 4000/35s）
+    { "火力支援II-燃烧", "artillery2",             6500,   0,  3 }   // v1.8.1: 用户定稿 6500/25s（v1.7.99 定稿 7000/30s）
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -910,7 +911,7 @@ char g_MeleePool[MELEE_POOL_COUNT][16] = {
 #define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
 // v1.7.80: 火炮支援1（!shop 特殊商品）——BFV 式瞄准轰炸
 #define ARTILLERY_SLOT      15      // g_ShopTable 槽位（= 火炮支援1）
-#define WALLHACK_DURATION   180.0   // v1.7.67: 3 分钟（用户定稿，原 300=5 分钟）
+#define WALLHACK_DURATION   300.0   // v1.8.1: 5 分钟（用户定稿，原 v1.7.67 定稿 180=3 分钟）
 #define WALLHACK_CAP        900.0   // v1.7.69: 可续费，单次效果累计上限 15 分钟（用户定稿）
 bool      g_bWallhack[MAXPLAYERS + 1];          // 透视生效中
 float     g_fWallhackEnd[MAXPLAYERS + 1];       // v1.7.69: 效果结束的 GameTime（续费累计）
@@ -1130,8 +1131,11 @@ public void OnPluginStart()
     g_cvArtTargetTime = CreateConVar("si_hud_art_target_time", "15.0",
         "Seconds to designate the strike target with the magnum before auto-cancel+refund.", FCVAR_NOTIFY, true, 3.0, true, 60.0);
     // v1.7.96: 持续轰炸——时长秒数 × 每秒随机 2-3 罐（用户拍板：30s ≈ 60-90 罐）
+    // v1.8.1: I-炮击 30s；II-燃烧 25s（用户定稿）
     g_cvArtDuration = CreateConVar("si_hud_art_duration", "30.0",
-        "Total barrage duration in seconds (2-3 cans fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+        "Total barrage duration in seconds for 火力支援I-炮击 (2-3 cans fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+    g_cvArtDuration2 = CreateConVar("si_hud_art2_duration", "25.0",
+        "Total barrage duration in seconds for 火力支援II-燃烧 (2-3 cans fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArtRadiusOut = CreateConVar("si_hud_art_radius_out", "750.0",
         "Spread radius (units) of the open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArtRadiusMid = CreateConVar("si_hud_art_radius_mid", "525.0",
@@ -3666,10 +3670,28 @@ void ShopCategoryMenu(int client, int cat)
 
     char info[4];
     char line[96];
+    // v1.8.1: 商品按价格升序展示（用户需求）——收集分类内槽位下标，插入排序
+    int slots[SHOP_SLOTS];
+    int count = 0;
     for (int i = 0; i < SHOP_SLOTS; i++)
     {
-        if (g_ShopTable[i].cat != cat)
-            continue;
+        if (g_ShopTable[i].cat == cat)
+            slots[count++] = i;
+    }
+    for (int a = 1; a < count; a++)
+    {
+        int key = slots[a];
+        int j = a - 1;
+        while (j >= 0 && g_ShopTable[slots[j]].price > g_ShopTable[key].price)
+        {
+            slots[j + 1] = slots[j];
+            j--;
+        }
+        slots[j + 1] = key;
+    }
+    for (int k = 0; k < count; k++)
+    {
+        int i = slots[k];
         int price = g_ShopTable[i].price;
         int limit = g_ShopTable[i].limit;
         if (i == WALLHACK_SLOT && g_bWallhack[client])
@@ -4491,7 +4513,7 @@ void Art_ConfirmStrike(int client, float target[3])
 
     // v1.7.96: 按秒分槽——每秒随机 2-3 罐（用户拍板：45s × 2-3/秒 ≈ 90-135 罐），
     // 每罐在所属秒内随机偏移，保证每秒必有掉落
-    float duration = g_cvArtDuration.FloatValue;
+    float duration = art2 ? g_cvArtDuration2.FloatValue : g_cvArtDuration.FloatValue;   // v1.8.0: 分项时长
     int seconds = RoundToCeil(duration);
     if (seconds < 1) seconds = 1;
     int total = 0;
@@ -4505,9 +4527,9 @@ void Art_ConfirmStrike(int client, float target[3])
     // v1.7.80（用户拍板）：开始/结束全服聊天播报 + 轰炸中/冷却中禁止全体购买
     PrintToChatAll("\x04[商店]\x01 \x05火炮支援来袭，注意躲避！\x01剩余：\x03%.0f\x01 秒", duration);
     if (art2)
-        PrintToChatAll("\x04[商店]\x01 \x05%N\x01 召唤了\x05狂欢轰炸\x01：着火的油桶/烟花即将从天而降！", client);
+        PrintToChatAll("\x04[商店]\x01 \x05%N\x01 召唤了\x05火力支援II-燃烧\x01：着火的油桶/烟花即将从天而降！", client);
     else
-        PrintToChatAll("\x04[商店]\x01 \x05%N\x01 召唤了\x05天火轰炸\x01：着火的瓦斯罐/煤气罐即将从天而降！", client);
+        PrintToChatAll("\x04[商店]\x01 \x05%N\x01 召唤了\x05火力支援I-炮击\x01：着火的瓦斯罐/煤气罐即将从天而降！", client);
     CreateTimer(endT, Timer_ArtNotifyEnd, INVALID_HANDLE, TIMER_FLAG_NO_MAPCHANGE);
 
     for (int sec = 0; sec < seconds; sec++)
