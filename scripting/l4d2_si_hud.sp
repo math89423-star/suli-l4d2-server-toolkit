@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.77"
+#define PLUGIN_VERSION "1.7.78"
 
 // ============================================================================
 // ConVar handles
@@ -3346,6 +3346,22 @@ void ShopBuy(int client, int slot)
         {
             PrintToChat(client, "\x04[商店]\x01 特感透视已达上限 \x0315 分钟\x01（900 秒），无法继续续费");
             return;
+        }
+    }
+
+    // v1.7.78: 激光——主武器已有激光 → 拦截（扣款前检查；用户实测重复购买
+    // 会白扣款）
+    if (StrEqual(g_ShopTable[slot].classname, "weapon_upgradepack_laser_sight"))
+    {
+        int weapon = GetPlayerWeaponSlot(client, 0);
+        if (weapon > 0 && IsValidEntity(weapon))
+        {
+            int upgrade = GetEntProp(weapon, Prop_Send, "m_upgradeBitVec");
+            if (upgrade & 4)   // 位值 4 = 激光（1=燃烧弹 2=高爆弹 4=激光）
+            {
+                PrintToChat(client, "\x04[商店]\x01 你的主武器已装备激光，无需重复购买");
+                return;
+            }
         }
     }
 
