@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.67"
+#define PLUGIN_VERSION "1.7.68"
 
 // ============================================================================
 // ConVar handles
@@ -838,7 +838,7 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "电锯",        "weapon_chainsaw",               5000,  0,  0 },   // v1.7.44
     { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0,  0 },
     { "复活币",      "",                              12000,  0,  3 },
-    { "透视特感",    "wallhack",                      6000,   0,  3 }    // v1.7.67: 全局蓝色高亮 3 分钟（用户定稿 6000，生效期间禁购）
+    { "透视特感",    "wallhack",                      1,      0,  3 }    // v1.7.67: 全局蓝色高亮 3 分钟（用户定稿 6000）；TEMP-TEST 1 分（测完恢复 6000）
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -848,6 +848,7 @@ int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（O
 #define WALLHACK_DURATION   180.0   // v1.7.67: 3 分钟（用户定稿，原 300=5 分钟）
 bool      g_bWallhack[MAXPLAYERS + 1];          // 透视生效中
 Handle    g_hWallhackTimer[MAXPLAYERS + 1];     // 到期计时器
+Handle    g_hWallhackWarnTimer[MAXPLAYERS + 1]; // v1.7.68: 结束前 30 秒提醒计时器
 Handle    g_hWallhackSyncTimer;                 // 补光心跳（0.5s，无购买者自动停）
 ArrayList g_hWitchList;                         // 当前 Witch 实体索引（OnEntityCreated 维护）
 Handle    g_hShopMenu[MAXPLAYERS + 1];          // 当前打开的商店菜单（!buy 切换用）
@@ -3513,11 +3514,17 @@ void WallhackStart(int client, int price)
     g_bWallhack[client] = true;
     g_hWallhackTimer[client] = CreateTimer(WALLHACK_DURATION, Timer_WallhackExpire,
         GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+    // v1.7.68: 结束前 30 秒提醒（一次性）
+    g_hWallhackWarnTimer[client] = CreateTimer(WALLHACK_DURATION - 30.0, Timer_WallhackWarn,
+        GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
     if (g_hWallhackSyncTimer == null)
         g_hWallhackSyncTimer = CreateTimer(0.5, Timer_WallhackSync, INVALID_HANDLE, TIMER_REPEAT);
     LogMessage("[wallhack] start client=%N wallet=%d", client, g_iWallet[client]);
     PrintToChat(client, "\x04[商店]\x01 已购买 \x05透视特感\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：特感蓝色高亮生效 \x033 分钟\x01（全队可见；死亡/切图/重开/闲置后失效）",
         price, g_iWallet[client]);
+    // v1.7.68: 全服播报购买（y 键聊天可见）
+    PrintToChatAll("\x04[商店]\x01 \x05%N\x01 购买了特感透视，剩余生效时长：\x03%d\x01 秒",
+        client, RoundToNearest(WALLHACK_DURATION));
     WallhackApplyGlow();   // 立即上光（不等首 tick）
 }
 
@@ -3571,6 +3578,11 @@ void WallhackEnd(int client, bool silent = false)
     {
         KillTimer(g_hWallhackTimer[client]);
         g_hWallhackTimer[client] = null;
+    }
+    if (g_hWallhackWarnTimer[client] != null)
+    {
+        KillTimer(g_hWallhackWarnTimer[client]);
+        g_hWallhackWarnTimer[client] = null;
     }
     LogMessage("[wallhack] end client=%N silent=%d", client, silent ? 1 : 0);
     // 若已无任何购买者 → 立即清光（不等心跳下 tick）
@@ -3627,6 +3639,18 @@ Action Timer_WallhackExpire(Handle timer, int userId)
     {
         g_hWallhackTimer[client] = null;   // 先置空，避免 WallhackEnd 自杀计时器
         WallhackEnd(client);
+    }
+    return Plugin_Continue;
+}
+
+// v1.7.68: 结束前 30 秒全服提醒（y 键聊天可见）
+Action Timer_WallhackWarn(Handle timer, int userId)
+{
+    int client = GetClientOfUserId(userId);
+    if (client >= 1 && client <= MaxClients && g_bWallhack[client])
+    {
+        g_hWallhackWarnTimer[client] = null;   // 一次性——先置空防 WallhackEnd 杀已关句柄
+        PrintToChatAll("\x04[商店]\x01 特感透视剩余 \x0330\x01 秒");
     }
     return Plugin_Continue;
 }
