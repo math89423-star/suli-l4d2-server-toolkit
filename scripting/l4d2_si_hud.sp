@@ -1887,6 +1887,8 @@ public void OnEntityCreated(int entity, const char[] classname)
         return;
     if (StrContains(classname, "witch") == -1)
         return;
+    if (entity <= 0)   // v1.7.64: 防脏索引进 Witch 表（透视同步计时器每 tick 会校验，但 0 会抛异常）
+        return;
     SDKHook(entity, SDKHook_OnTakeDamage, WitchTakeDamage);
     // v1.7.64: 记录 Witch 实体（透视克隆目标；脏条目由同步计时器校验剔除）
     if (g_hWitchList != null && g_hWitchList.FindValue(entity) == -1)
@@ -3438,24 +3440,28 @@ void ShopCategoryMenu(int client, int cat)
 
 public int ShopCatMenuHandler(Menu menu, MenuAction action, int client, int item)
 {
-    if (action == MenuAction_Select)
+    // CancelMenu 触发的回调 client/item 是 -3（取消标记）——必须挡在 GetItem 前，
+    // 否则数组越界崩溃（用户实测 !buy 关不掉菜单，日志 index -3 实锤）
+    if (action == MenuAction_Select && item >= 0 && client >= 1)
     {
         char info[4];
         menu.GetItem(item, info, sizeof(info));
         ShopCategoryMenu(client, StringToInt(info));
     }
-    else if (action == MenuAction_End)
+    else if (action == MenuAction_Cancel || action == MenuAction_End)
     {
-        if (g_hShopMenu[client] == menu)   // 只清自己（旧菜单 End 不覆盖新菜单句柄）
+        if (client >= 1 && g_hShopMenu[client] == menu)   // 只清自己（旧菜单 End 不覆盖新菜单句柄）
             g_hShopMenu[client] = null;
-        delete menu;
+        if (action == MenuAction_End)   // 只删一次（Cancel 后必跟 End）
+            delete menu;
     }
     return 0;
 }
 
 public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int item)
 {
-    if (action == MenuAction_Select)
+    // CancelMenu 触发回调时 client/item 是 -3——同上防护
+    if (action == MenuAction_Select && item >= 0 && client >= 1)
     {
         char info[4];
         menu.GetItem(item, info, sizeof(info));
@@ -3463,11 +3469,12 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
         if (IsClientInGame(client))
             ShopCategoryMenu(client, g_iShopCat[client]);   // 刷新余额/状态（留在当前分类）
     }
-    else if (action == MenuAction_End)
+    else if (action == MenuAction_Cancel || action == MenuAction_End)
     {
-        if (g_hShopMenu[client] == menu)   // 只清自己（旧菜单 End 不覆盖新菜单句柄）
+        if (client >= 1 && g_hShopMenu[client] == menu)   // 只清自己（旧菜单 End 不覆盖新菜单句柄）
             g_hShopMenu[client] = null;
-        delete menu;
+        if (action == MenuAction_End)   // 只删一次（Cancel 后必跟 End）
+            delete menu;
     }
     return 0;
 }
@@ -3477,8 +3484,11 @@ public Action Cmd_Shop(int client, int args)
     if (client < 1 || !IsClientInGame(client))
         return Plugin_Handled;
     // v1.7.64: 再输入一次 !buy/!shop → 关闭当前商店菜单（用户需求）
+    // L4D2 vgui 坑：CancelMenu 只取消 SM 侧句柄，客户端面板关不掉
+    // （用户实测"显示已关闭但菜单仍在"）→ 必须 CancelClientMenu 发关闭消息
     if (g_hShopMenu[client] != null)
     {
+        CancelClientMenu(client);
         CancelMenu(g_hShopMenu[client]);
         g_hShopMenu[client] = null;
         PrintToChat(client, "\x04[商店]\x01 商店菜单已关闭");
@@ -3552,9 +3562,21 @@ void WallhackEndAll()
     }
 }
 
+// v1.7.64: 手写客户端索引判定（SM 1.12 include 无 IsClientIndex）
+bool WallhackIsClient(int target)
+{
+    return target >= 1 && target <= MaxClients;
+}
+
 bool WallhackTargetValid(int target)
 {
-    if (target <= MaxClients)
+    // 0/负数 = 非法目标（脏条目），直接剔除——不能走 IsClientInGame(0)（会抛异常
+    // 中断整个同步 tick → 克隆永远建不出来，用户实测"透视没作用"）
+    if (target <= 0)
+        return false;
+    // 必须用客户端索引判定：Witch 实体索引可能 ≤ MaxClients（低号实体），
+    // 用 target<=MaxClients 会把 Witch 误判成客户端（错路 + 丢 Witch 克隆）
+    if (WallhackIsClient(target))
         return IsClientInGame(target) && IsPlayerAlive(target) && GetClientTeam(target) == 3;
     return IsValidEntity(target) && IsWitchEntity(target);
 }
@@ -3573,8 +3595,10 @@ bool WallhackHasClone(int buyer, int target)
 
 int WallhackCreateClone(int target)
 {
+    if (target <= 0)
+        return -1;
     char model[192];
-    if (target <= MaxClients)
+    if (WallhackIsClient(target))
         GetClientModel(target, model, sizeof(model));               // "infected/hunter.mdl"
     else
         GetEntPropString(target, Prop_Data, "m_ModelName", model, sizeof(model));  // "models/infected/witch.mdl"
@@ -3630,8 +3654,10 @@ public Action WallhackTransmit(int entity, int client)
 
 void WallhackSyncClone(int clone, int target)
 {
+    if (target <= 0)
+        return;
     float origin[3], ang[3];
-    if (target <= MaxClients)
+    if (WallhackIsClient(target))
     {
         GetClientAbsOrigin(target, origin);
         GetClientAbsAngles(target, ang);
@@ -3644,7 +3670,7 @@ void WallhackSyncClone(int clone, int target)
     TeleportEntity(clone, origin, ang, NULL_VECTOR);
 
     // Witch 双形态（普通/怒）模型不同——同步模型保证轮廓贴合
-    if (target > MaxClients)
+    if (!WallhackIsClient(target))
     {
         char model[192], cur[192];
         GetEntPropString(target, Prop_Data, "m_ModelName", model, sizeof(model));
