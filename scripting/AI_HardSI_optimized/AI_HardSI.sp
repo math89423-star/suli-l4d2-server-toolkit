@@ -7,6 +7,8 @@
 // v3.5: Randomized open-terrain strategies per SI type
 // v3.6: Anti-melee for control SI — ability-first, melee as valid fallback
 // v3.7: Audit fixes — RandomChance thrashing, dead code, missing range checks
+// v4.0.1: Charger 出生保护（unghost 后 2s 禁冲）+ coordSeq 补距离/LOS；
+//         Hunter 出生蠕动修复（sprint 死区消除 + crouchApproach 站立快跑化）
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -48,7 +50,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "3.7",
+    version = "4.0.1",
     url = "github.com/breezyplease"
 };
 

@@ -36,6 +36,10 @@
 bool g_bHunterJustLunged[MAXPLAYERS + 1];
 float g_fHunterMissEscapeCooldown[MAXPLAYERS + 1];
 
+// v4.0.1: 扑击范围缓存（BT_CreateHunterTree 里从 ai_fast_pounce_proximity 读取），
+// crouchApproach 需要用它判断"是否已进入扑击范围"来决定蹲伏 vs 站立快跑。
+float g_fHunterPounceRange = 1000.0;
+
 // Forward declarations for tree builder
 
 // ---------------------------------------------------------------------------
@@ -180,11 +184,13 @@ BT_Status HunterAct_SprintApproach(int client) {
 // pressed IN_MOVELEFT/IN_MOVERIGHT with NO forward movement at all.
 // The Hunter was literally strafing in place without closing distance.
 BT_Status HunterAct_CrouchApproach(int client) {
+    float dist = 999999.0;
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
         float sPos[3], tPos[3], dir[3], ang[3];
         GetClientAbsOrigin(client, sPos);
         GetClientAbsOrigin(target, tPos);
+        dist = GetVectorDistance(sPos, tPos);
         MakeVectorFromPoints(sPos, tPos, dir);
         GetVectorAngles(dir, ang);
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
@@ -206,9 +212,17 @@ BT_Status HunterAct_CrouchApproach(int client) {
         BT_RemoveButton(client, IN_MOVELEFT);
     }
 
-    // Move forward toward target (crouched) + stay ducked
+    // v4.0.1 FIX: 蹲伏策略 —— 只有已进入扑击范围且已经蹲伏时才保持蹲（潜行接近），
+    // 范围外一律站立快跑。原版无条件按 IN_DUCK：出生（运出复活）在 1000-1150u 或
+    // 无 LOS 时落入本分支 → 蹲着以 50% 移速爬 6-8 秒才到扑击距离，观感就是"缓慢蠕动"。
+    if (dist <= g_fHunterPounceRange && (GetEntityFlags(client) & FL_DUCKING)) {
+        BT_AddButton(client, IN_DUCK);
+    } else {
+        BT_RemoveButton(client, IN_DUCK);
+    }
+
+    // Move forward toward target
     BT_AddButton(client, IN_FORWARD);
-    BT_AddButton(client, IN_DUCK);
 
     return BT_RUNNING;
 }
@@ -249,6 +263,7 @@ stock int BT_CreateHunterTree() {
     if (hCvar != null) fPounceRange = GetConVarFloat(hCvar);
     hCvar = FindConVar("ai_straight_pounce_proximity");
     if (hCvar != null) fStraightRange = GetConVarFloat(hCvar);
+    g_fHunterPounceRange = fPounceRange;  // v4.0.1: 供 crouchApproach 判断蹲伏 vs 快跑
 
     // --- Leaf nodes ---
     int missEscSeq = BT_CreateSequence(2,
@@ -385,12 +400,15 @@ stock int BT_CreateHunterTree() {
     // Replaces the old approachFull which forced crouch BEFORE running.
     // Crouching cuts movement speed by ~50%, making Hunter crawl slowly.
     // This branch only fires when: OnGround + NOT ducking + > pounce range.
-    // v4.0: +150u hysteresis —— 进入扑击范围后不会在边界处 sprint↔crouch 反复横跳。
-    //       只有退到 fPounceRange+150 之外才重新冲刺，保证一次冲到底。
+    // v4.0.1 FIX: 边界从 fPounceRange+150 改回 fPounceRange —— v4.0 的 +150 迟滞
+    //       在 1000~1150u 之间制造了死区（sprint 不触发、crouchPrep 也不触发），
+    //       出生运出点常落在这个区间 → 直接掉进 crouchApproachSeq 蹲爬蠕动。
+    //       原迟滞意图（防 sprint↔crouch 边界抖动）已由 crouchApproach 的
+    //       站立快跑化取代（见 HunterAct_CrouchApproach），抖动代价消失。
     int sprintApproachSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_OnGround),
         BT_CreateInverter(BT_CreateCondition(CND_IsDucking)),
-        BT_CreateInverter(BT_CreateIsInRange(fPounceRange + 150.0)),
+        BT_CreateInverter(BT_CreateIsInRange(fPounceRange)),
         BT_CreateSequence(2,
             BT_CreateAction(ACT_AcquireClosestTarget),
             BT_CreateAction(HunterAct_SprintApproach)

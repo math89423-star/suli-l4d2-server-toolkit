@@ -30,6 +30,40 @@ BT_Status ChargerAct_BlockCharge(int client) {
     return BT_RUNNING;
 }
 
+// v4.0.1: 出生保护 —— unghost 后 2s 内禁止释放 charge。
+// 症状：Charger 出生（运出复活）后立刻对着空气冲一次。
+// 根因：出生瞬间 charge 技能即 ready（m_timestamp 是过去时间），而 coordSeq
+//       （攻击窗口分支）没有距离/LOS 限制 —— 窗口常被其他 SI 的攻击/pin 广播
+//       打开，一出生就冲远处或隔墙的协同目标，观感就是"对空气冲"。
+// 修法：ghost→unghost 边沿检测，unghost 后 2s 内本条件 SUCCESS → 根 selector
+//       停在 BlockCharge 分支（持续推后 m_timestamp，引擎 AI 也释放不了），
+//       2s 后 FAIL 恢复正常战术。
+BT_Status CND_ChargerSpawnProtect(int client) {
+    bool ghostNow = L4D_IsPlayerGhost(client);
+    float ghostSince = BB_GetFloat(client, "_charger_ghost_since", 0.0);
+    float unghostAt = BB_GetFloat(client, "_charger_unghost_at", 0.0);
+
+    if (ghostNow) {
+        if (ghostSince <= 0.0) {
+            BB_SetFloat(client, "_charger_ghost_since", GetGameTime());
+        }
+        BB_SetFloat(client, "_charger_unghost_at", 0.0);
+        return BT_FAILURE;  // ghost 期间引擎忽略攻击，无需保护
+    }
+
+    if (ghostSince > 0.0) {
+        // 刚 unghost —— 记录时刻并立即进入保护
+        unghostAt = GetGameTime();
+        BB_SetFloat(client, "_charger_unghost_at", unghostAt);
+        BB_SetFloat(client, "_charger_ghost_since", 0.0);
+    }
+
+    if (unghostAt > 0.0) {
+        return (GetGameTime() - unghostAt < 2.0) ? BT_SUCCESS : BT_FAILURE;
+    }
+    return BT_FAILURE;
+}
+
 // v4.0: 酸液配合 —— 找站在 Spitter 酸液里的生还者作为冲撞目标。
 // Charger × Spitter 经典组合：把人撞倒在酸里 → 掉血 + 队友救人要趟酸 → 快速减员。
 // 被撞中后 pin 广播会触发 Spitter 吐被撞者（spitOnPinned 分支），形成闭环。
@@ -224,8 +258,13 @@ stock int BT_CreateChargerTree() {
     // v4.0: 目标由 SI_GetCoordinatedTarget 决定 ——
     //   集火模式（0/1/2/3/5）：窗口内优先冲被 pin 者（队友锁住的人必中）
     //   分散模式（4/6）：冲未受控目标（Tank 模式下冲别的目标减轻 Tank 压力）
-    int coordSeq = BT_CreateSequence(3,
+    // v4.0.1 FIX: 补上 HasLOS + inRange —— 原版无任何距离/LOS 限制，
+    //   攻击窗口（5.5s，常被其他 SI 攻击/pin 广播打开）一开，Charger 在
+    //   2000u+ 外/隔墙也直接释放 charge，造成"出生对空气冲"与平时白冲。
+    int coordSeq = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsAttackWindow),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(fChargeProx),
         BT_CreateAction(ACT_SnapAimToCoordTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -314,6 +353,12 @@ stock int BT_CreateChargerTree() {
 
     // Root selector — terrain branches fail when disabled → fallback to standard.
     int root = BT_Create(BTN_SELECTOR);
+    // v4.0.1: 0. 出生保护 —— unghost 后 2s 内强制 BlockCharge（防出生对空气冲）
+    int spawnProtect = BT_CreateSequence(2,
+        BT_CreateCondition(CND_ChargerSpawnProtect),
+        BT_CreateAction(ChargerAct_BlockCharge)
+    );
+    BT_AddChild(root, spawnProtect);                               // 0. v4.0.1
     BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor)); // 1
     BT_AddChild(root, stepBackCharge);         // 2. v3.7: too close → step back + charge
     BT_AddChild(root, blindCharge);            // 3. v3.7: no LOS + close → 30% blind charge
