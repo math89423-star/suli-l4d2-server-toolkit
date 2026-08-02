@@ -3,6 +3,38 @@
  *
  * SOUND-ONLY: Battlefield-style kill sounds per kill type.
  *
+ * v4.4.7 — Tank/Witch/melee kill sound = si_kill.mp3 (user 拍板, 2026-08-02):
+ *   - v4.4.6 logs proved the witch play path executes end-to-end
+ *     (PLAY 'battlefield/witch_kill.mp3'), yet the client hears nothing
+ *     while si_kill.mp3 works — witch_kill.mp3 never reached this client.
+ *   - User decision: drop the per-type sound files (tank_kill.mp3 /
+ *     witch_kill.mp3 / melee_kill.mp3 were never verified on clients);
+ *     Tank, Witch and melee kills all play the same si_kill.mp3 as regular
+ *     SI. bf_kill_sound_tank/_witch/_melee now default to
+ *     battlefield/si_kill.mp3; cfg updated too. Headshot keeps
+ *     si_headshot_kill.mp3.
+ *   - v4.4.6 debug logs removed.
+ *
+ * v4.4.5 — FIX Witch kill sound silent (user 实测, 2026-08-02):
+ *   - Event order for a Witch kill (verified by the v4.4.4 symptom):
+ *     infected_death fires BEFORE player_death, gap < 0.1s. v4.4.4's guard
+ *     returned without sound and the player_death witch branch then hit the
+ *     shared 0.1s cooldown -> completely silent.
+ *   - Fix: the witch guard now PLAYS witch_kill.mp3 itself (player_death
+ *     branch kept as a fallback; the shared cooldown guarantees no double
+ *     play in either order).
+ *
+ * v4.4.4 — FIX Witch death plays the common-kill sound (2026-08-02):
+ *   - The engine fires infected_death for NPC Witch kills too (she lives in
+ *     the infected event system). This plugin had no witch guard on
+ *     Event_InfectedDeath, so killing a Witch played csgo_kill_common.mp3
+ *     (and the shared 0.1s cooldown could swallow the real witch_kill.mp3
+ *     from Event_PlayerDeath).
+ *   - Fix: track the killer's last-hit infected entity (new infected_hurt
+ *     hook, witch entities included — same approach as si_hud) and skip
+ *     Event_InfectedDeath when that entity is a witch. Witch death sound
+ *     then comes ONLY from Event_PlayerDeath's witch branch.
+ *
  * v4.4.0 — CS:GO kill sounds for common infected (2026-08-01):
  *   - Common-infected kills now play CS:GO original sounds (extracted
  *     from the game files): every common kill plays
@@ -80,7 +112,7 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "4.4.3"
+#define PLUGIN_VERSION "4.4.7"
 
 // ============================================================================
 // ConVars — hold file paths relative to sound/ (WITH extension)
@@ -102,6 +134,11 @@ ConVar g_cvCooldown;
 // ============================================================================
 
 float g_fLastKillTime[MAXPLAYERS + 1];
+
+// v4.4.4: killer's last-hit infected entity (commons AND witch) — infected_death
+// carries no entity id, so witch kills are detected via this back-reference.
+// Witch hurt fires infected_hurt (NPC entity in the infected event system).
+int   g_iLastCommonEnt[MAXPLAYERS + 1];
 
 // ============================================================================
 // Sound files to download (actual mp3 files, relative to sound/)
@@ -147,12 +184,12 @@ public void OnPluginStart()
         "SI kill sound (file path relative to sound/).", FCVAR_NOTIFY);
     g_cvSoundSIHeadshot = CreateConVar("bf_kill_sound_headshot", "battlefield/si_headshot_kill.mp3",
         "SI headshot sound (file path relative to sound/).", FCVAR_NOTIFY);
-    g_cvSoundTankKill = CreateConVar("bf_kill_sound_tank", "battlefield/tank_kill.mp3",
-        "Tank kill sound (file path relative to sound/).", FCVAR_NOTIFY);
-    g_cvSoundWitchKill = CreateConVar("bf_kill_sound_witch", "battlefield/witch_kill.mp3",
-        "Witch kill sound (file path relative to sound/).", FCVAR_NOTIFY);
-    g_cvSoundMeleeKill = CreateConVar("bf_kill_sound_melee", "battlefield/melee_kill.mp3",
-        "Melee kill sound (file path relative to sound/).", FCVAR_NOTIFY);
+    g_cvSoundTankKill = CreateConVar("bf_kill_sound_tank", "battlefield/si_kill.mp3",
+        "Tank kill sound (file path relative to sound/).", FCVAR_NOTIFY);   // v4.4.7: = SI sound (user)
+    g_cvSoundWitchKill = CreateConVar("bf_kill_sound_witch", "battlefield/si_kill.mp3",
+        "Witch kill sound (file path relative to sound/).", FCVAR_NOTIFY);   // v4.4.7: = SI sound (user)
+    g_cvSoundMeleeKill = CreateConVar("bf_kill_sound_melee", "battlefield/si_kill.mp3",
+        "Melee kill sound (file path relative to sound/).", FCVAR_NOTIFY);   // v4.4.7: = SI sound (user)
     g_cvSoundCommon = CreateConVar("bf_kill_sound_common", "battlefield/csgo_kill_common.mp3",
         "Common infected kill sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
     g_cvSoundCommonHS = CreateConVar("bf_kill_sound_common_hs", "battlefield/csgo_kill_headshot.mp3",
@@ -178,6 +215,28 @@ public void OnPluginStart()
 
     HookEvent("player_death",   Event_PlayerDeath);
     HookEvent("infected_death", Event_InfectedDeath);
+    HookEvent("infected_hurt",  Event_InfectedHurt);   // v4.4.4: last-hit ent for the witch guard
+}
+
+// ============================================================================
+// infected_hurt — track the killer's last-hit infected entity (v4.4.4).
+// Witches are NPCs in the infected event system: hurting her fires
+// infected_hurt (verified) — record her entity too so her death can be told
+// apart from a common kill in Event_InfectedDeath.
+// ============================================================================
+
+public Action Event_InfectedHurt(Event event, const char[] name, bool dontBroadcast)
+{
+    int attacker = GetClientOfUserId(event.GetInt("attacker"));
+    if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker))
+        return Plugin_Continue;
+    if (GetClientTeam(attacker) != 2)
+        return Plugin_Continue;
+
+    int ent = event.GetInt("entityid");
+    if (ent >= 1 && ent < 2048)
+        g_iLastCommonEnt[attacker] = ent;
+    return Plugin_Continue;
 }
 
 // ============================================================================
@@ -210,6 +269,7 @@ public void OnMapStart()
 public void OnClientDisconnect(int client)
 {
     g_fLastKillTime[client] = 0.0;
+    g_iLastCommonEnt[client] = 0;   // v4.4.4
 }
 
 // ============================================================================
@@ -291,6 +351,35 @@ public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroad
     int attacker = GetClientOfUserId(event.GetInt("attacker"));
     if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker)) return Plugin_Continue;
     if (GetClientTeam(attacker) != 2) return Plugin_Continue;
+
+    // v4.4.4/4.4.5 (bug): Witch death also fires infected_death — if the
+    // killer's last-hit infected entity is a Witch, this is HER death.
+    // v4.4.5: event order for a Witch kill is infected_death FIRST,
+    // player_death later (gap < 0.1s, verified by the v4.4.4 symptom) — the
+    // player_death witch branch gets swallowed by the shared cooldown, so
+    // PLAY the witch sound right here instead of returning silently.
+    // (The player_death branch stays as a fallback; the shared cooldown
+    // guarantees no double play in either event order.)
+    int lastEnt = g_iLastCommonEnt[attacker];
+    if (lastEnt >= 1 && lastEnt < 2048)
+    {
+        char cls[16];
+        GetEntityClassname(lastEnt, cls, sizeof(cls));
+        if (StrContains(cls, "witch") != -1)
+        {
+            g_iLastCommonEnt[attacker] = 0;
+            float now = GetGameTime();
+            if (now - g_fLastKillTime[attacker] >= g_cvCooldown.FloatValue)
+            {
+                g_fLastKillTime[attacker] = now;
+                char sound[PLATFORM_MAX_PATH];
+                PickSound(sound, sizeof(sound), g_cvSoundWitchKill, g_cvSoundSIKill);
+                PlayClientSound(attacker, sound);
+            }
+            return Plugin_Continue;
+        }
+    }
+
     if (GetGameTime() - g_fLastKillTime[attacker] < g_cvCooldown.FloatValue) return Plugin_Continue;
 
     // Headshot -> headshot sound, plain kill -> plain sound (CS2 style).

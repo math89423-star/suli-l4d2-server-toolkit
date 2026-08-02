@@ -11,6 +11,107 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.61:
+ *   - 音效档位改按结算总额判定 (user 实测): 26 小僵尸 (hw=26) 达标发 +350
+ *     奖励、结算卡 +490，却因击杀分 140 < L2(200) 落在无声档——奖励已发
+ *     但没音效，卡面数字与听觉不匹配。档位判定从 score 改为 score+bonus
+ *     （490 → L4 档音效）。v1.7.60 后结算整体已受 hw>=20 门控，v1.7.4 的
+ *     "按击杀分防小僵尸刷档"已冗余（hw 门槛本身防刷），档位直接对应该次
+ *     结算的总收益。
+ *
+ * Changelog v1.7.60:
+ *   - 结算整体受阈值门控 (user 实测): 之前结算卡只在窗口关闭且 score>0 时
+ *     必弹（单杀女巫 500、3 特感 hw=18 也弹"连杀结算"卡），只有奖励入账
+ *     被 hw>=20 门控——hw=18 时无奖励却照弹结算卡 +295 误导。现在
+ *     hw < 20（未达阈值）窗口关闭只静默重置连杀状态：不弹结算卡、不播
+ *     奖励音效；达阈值（hw>=20）才结算（结算卡 + 奖励音效 + 奖励入账）。
+ *     单只女巫 (hw=6) 不再触发任何结算。
+ *
+ * Changelog v1.7.59:
+ *   - 统一 Witch 双 hook (user 拍板): 原先 Event_WitchSpawn（v1.7.16 加分
+ *     hook）和 OnEntityCreated（v1.7.25 显示 hook）各挂一个
+ *     SDKHook_OnTakeDamage，调用顺序不定 → 显示读 g_iDmgPtsKiller 时加分
+ *     可能还没入账，击中女巫看不到 +伤害分。合并为一个 WitchTakeDamage
+ *     （先加分入账 → 再 ShowWitchHP 显示，同函数内顺序保证），统一从
+ *     OnEntityCreated 挂载（游戏事件无关，最可靠）；删除 Event_WitchSpawn
+ *     与 Witch_OnTakeDamage。
+ *
+ * Changelog v1.7.58:
+ *   - FIX Witch 死亡误当小僵尸 (user 实测): 引擎对 Witch 死亡也发
+ *     infected_death。v1.7.56 修 infected_hurt 时提前 return 不记录实体 →
+ *     g_iLastCommonEnt 永不为 witch → Event_InfectedDeath 的排除（v1.7.56
+ *     加的）变死代码 → 女巫击杀被当小僵尸：† 横幅覆盖女巫横幅、5 分误入
+ *     连杀（† 骷髅）、伤害分网格被误消费。修复：witch 受伤时恢复记录
+ *     g_iLastCommonEnt（加分排除保留），死亡排除重新生效；小僵尸击杀卡
+ *     读取伤害分前校验实体 classname 非 witch（防串台）。音效侧同步
+ *     bf_killfeedback v4.4.4（infected_death 加 witch 守卫）。
+ *
+ * Changelog v1.7.57:
+ *   - 积分/连杀与 HUD 显示解耦 (user 拍板): StackStreakKill 原藏在
+ *     BuildBFBanner 里，被 si_hud_kill_hint_enable 门控——关 HUD 时特感/
+ *     Tank/Witch 击杀会连击杀分和连杀一起丢，而小僵尸入账在门控外，
+ *     行为不对称。现在 SurvivorKilledSI / SurvivorKilledWitch 在 points
+ *     计算后立即入账（同小僵尸路径），BuildBFBanner 退化为纯显示函数
+ *     （去掉内部调用和无用 points 参数）。
+ *
+ * Changelog v1.7.56:
+ *   - FIX 手枪打 Witch 误显示"† 小僵尸" (user 实测): 引擎对 Witch 受伤也发
+ *     infected_hurt（Witch 是 NPC 实体归在 infected 事件）→ si_hud 误当小僵尸
+ *     加分+显示，且伤害分被计两次（common 系数 + Witch 系数）。已排除：
+ *     Event_InfectedHurt 检查 entityid classname=="witch" 直接跳过；
+ *     Event_InfectedDeath 同步排除（g_iLastCommonEnt 回退路径防误判）。
+ *
+ * Changelog v1.7.55:
+ *   - FIX 击杀卡榴弹武器名英文 (user 实测): 引擎对 GL 击杀事件报 WeaponType
+ *     值 "grenadelauncher"（无下划线，left4dhooks g_sWeaponTypes 定义），不是
+ *     classname 后缀 "grenade_launcher" → 翻译表漏配 → fallback 显示原文英文。
+ *     已加别名；两条都映射"榴弹"。
+ *
+ * Changelog v1.7.54:
+ *   - FIX 连杀奖励门槛 (user 实测发现): v1.7.53 的 `if (hw > 0)` 导致 0~20 段
+ *     也在计价——2 特感 (hw=12) 错发 12×1.3×10 = 156 奖励。第一档边界
+ *     20 人头是门槛: hw < 20 → 奖励 0（3 特感 hw=18 同样不开闸）；达到后
+ *     全段计价不变（hw=24 → 320）。
+ *
+ * Changelog v1.7.53:
+ *   - 连杀奖励 = 加权人头 × 阶梯分段 (user 设计, 电费模式): 小僵尸 1 人头 /
+ *     特感 6 人头；奖励 = Σ(各段实际人头 × 1.3 × 该段倍率)，段边界
+ *     20/40/55/70/85/100，倍率一级 10 每段 +1.5（鼓励多杀）。落在阈值之间
+ *     按实际值分段累计——无"差 1 人头跳档"悬崖。例: hw=30 → 410，
+ *     hw=60 → 897，hw=100 → 1749。音效档位保持击杀分数制
+ *     （200/400/700/1100/1500/2000）。救援不占人头。废弃
+ *     si_hud_streak_bonus_l2/l4/l6。
+ *
+ * Changelog v1.7.52:
+ *   - 击杀分公式重做 (user 设计): 基础分 = 特感实际最大血量 × 25%（向上取整，
+ *     实时读 m_iMaxHealth，服务器调血后自动跟随）；Tank 1500 / Witch 500 固定
+ *     （大头在伤害分）；爆头 ×1.5、满血 ×1.25 倍率制（取代固定 +50，连乘后
+ *     统一 ceil——Witch 满血爆头 938 = 500×1.5×1.25）；近战加成取消。
+ *     验证例: Tank 爆头 1500×1.5 = 2250。
+ *   - 武器倍率 (user): 铁喷 (chrome) 并入木喷 1.5（原走 other 1.0）；
+ *     普通手枪/双枪 1.75（新 cvar si_hud_bf_damage_mult_pistol）；马格南不变。
+ *   - 废弃 cvar: si_hud_bf_points_smoker/boomer/hunter/jockey/spitter/charger、
+ *     si_hud_bf_points_headshot/_melee/_fullhp（源码 + cfg 已清理）。
+ *
+ * Changelog v1.7.51:
+ *   - 救援队友算分 (user 设计): revive_success 监听（拉人/电击统一走此事件），
+ *     救援者 +si_hud_points_rescue（默认 75）入账钱包+总分，并计入连杀——
+ *     刷新 6 秒窗口 + 累计滚动分（推动音效档位）+ 结算卡显示 "+ 救援 ×N"。
+ *   - 档位判定口径定论 (user): 纯击杀分混合总分（小僵尸+特感击杀分同池），
+ *     伤害分（打血分）不参与连杀任何环节——已单独入账，连杀是连杀。
+ *     打 Tank 血没杀死不推动 award（边界场景作废，用户最终拍板）。
+ *
+ * Changelog v1.7.50:
+ *   - 连杀奖励实际入账 (user 确认): 结算卡 "+累计分+奖励" 的奖励（si_hud_streak_bonus_l2/4/6，
+ *     +30/+50/+100）之前只显示不入账（击杀分本就是击杀时即时入账），玩家误以为
+ *     有额外奖励 → 现在 streak>=2 结算时真实加进历史积分（排行榜）和钱包（商店），
+ *     结算数字 = 本连杀总收益。
+ *   - 音效与结算解耦: 低分连杀（score < si_hud_streak_score_l2）之前整个 return
+ *     （无音效无结算卡），现在只跳过音效，奖励照发 + 结算卡照显。
+ *   - FIX L6 档音效从未播放 (nginx 404 实锤): 默认值/cfg 写成 bf_award_warbonds.mp3，
+ *     实际文件名是 bf_award_war_bonds.mp3（带下划线）→ 客户端下载 404 静音，
+ *     已改源码默认值 + cfg。
+ *
  * Changelog v1.7.48:
  *   - 通道实验 (user 反馈 v1.7.47 的 1.5 反而更小): 引擎对 volume>1.0 处理
  *     异常 → 上限收回 1.0。SNDCHAN_STATIC 疑似走客户端音乐/UI 总线（受玩家
@@ -548,7 +649,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.49"
+#define PLUGIN_VERSION "1.7.61"
 
 // ============================================================================
 // ConVar handles
@@ -563,20 +664,21 @@ ConVar g_cvKillHintEnable;
 ConVar g_cvKillCardEnable;
 ConVar g_cvKillCardTime;
 ConVar g_cvBFWindow;
-ConVar g_cvBFPointsSmoker;
-ConVar g_cvBFPointsBoomer;
-ConVar g_cvBFPointsHunter;
-ConVar g_cvBFPointsJockey;
-ConVar g_cvBFPointsSpitter;
-ConVar g_cvBFPointsCharger;
-ConVar g_cvBFPointsHeadshot;
-ConVar g_cvBFPointsMelee;
-ConVar g_cvBFPointsTank;
-ConVar g_cvBFPointsWitch;
-ConVar g_cvBFFullHP;
-ConVar g_cvStreakBonus2;
-ConVar g_cvStreakBonus4;
-ConVar g_cvStreakBonus6;
+ConVar g_cvBFPointsBasePct;        // v1.7.52: 基础分 = 特感实际血量 × %
+ConVar g_cvBFHeadshotMult;         // v1.7.52: 爆头击杀倍率
+ConVar g_cvBFFullHPMult;            // v1.7.52: 满血击杀倍率
+ConVar g_cvBFPointsTank;            // v1.7.52: Tank 固定击杀分
+ConVar g_cvBFPointsWitch;           // v1.7.52: Witch 固定击杀分
+ConVar g_cvDmgMultPistol;           // v1.7.52: 手枪伤害倍率
+ConVar g_cvStreakHwL1;             // v1.7.53: 加权人头档位阈值
+ConVar g_cvStreakHwL2;
+ConVar g_cvStreakHwL3;
+ConVar g_cvStreakHwL4;
+ConVar g_cvStreakHwL5;
+ConVar g_cvStreakHwL6;
+ConVar g_cvStreakBonusMultL1;      // v1.7.53: 一级档位倍率
+ConVar g_cvStreakBonusMultStep;    // v1.7.53: 每档倍率增量
+ConVar g_cvStreakBonusCoeff;       // v1.7.53: 奖励公式系数 1.3
 ConVar g_cvCommonEnable;
 ConVar g_cvCommonTime;
 ConVar g_cvBFPointsCommon;
@@ -594,6 +696,7 @@ ConVar g_cvDmgMultPump;
 ConVar g_cvDmgMultAuto;
 ConVar g_cvDmgMultSniper;
 ConVar g_cvDmgMultOther;
+ConVar g_cvPointsRescue;                 // v1.7.51: 救援奖励分
 ConVar g_cvStreakScoreL2;
 ConVar g_cvStreakScoreL4;
 ConVar g_cvStreakScoreL6;
@@ -638,6 +741,7 @@ Handle    g_hStreakTimer[MAXPLAYERS + 1];            // per-client streak settle
 float     g_fLastKillSoundTime[MAXPLAYERS + 1];       // sound cooldown
 int       g_iKillStreak[MAXPLAYERS + 1];              // BF banner: kills in current streak
 int       g_iStreakScore[MAXPLAYERS + 1];             // BF banner: rolling score in current streak (v1.6.7)
+int       g_iRescueStreak[MAXPLAYERS + 1];            // v1.7.51: 连杀窗口内救援次数（结算卡显示）
 float     g_fLastStreakKillTime[MAXPLAYERS + 1];      // BF banner: last streak-kill time
 int       g_iCommonStreak[MAXPLAYERS + 1];            // v1.7.4: common streak count (separate icons from SI skulls, shared window)
 int       g_iTotalScore[MAXPLAYERS + 1];              // v1.7.6: 本关积分 (scoreboard; 每关从 0 算, OnMapEnd 清零)
@@ -796,38 +900,45 @@ public void OnPluginStart()
     g_cvBFWindow = CreateConVar("si_hud_bf_window", "6.0",
         "Kill streak window (s) — the streak-interrupt timeout: kills within this time stack skulls; when it closes the streak settles (award sound + settle score).", FCVAR_NOTIFY, true, 1.0, true, 30.0);
 
-    // v1.7.2: per-class base points (difficulty + max HP) — BF1/BF5-style
-    // scoring. Boomer/Smoker are easy kills, Charger/Spitter are high-value.
-    g_cvBFPointsSmoker = CreateConVar("si_hud_bf_points_smoker", "75",
-        "BF banner points: Smoker kill (250 HP, easy).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsBoomer = CreateConVar("si_hud_bf_points_boomer", "75",
-        "BF banner points: Boomer kill (50 HP, easiest).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsHunter = CreateConVar("si_hud_bf_points_hunter", "100",
-        "BF banner points: Hunter kill (325 HP).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsJockey = CreateConVar("si_hud_bf_points_jockey", "100",
-        "BF banner points: Jockey kill (325 HP).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsSpitter = CreateConVar("si_hud_bf_points_spitter", "125",
-        "BF banner points: Spitter kill (100 HP but high threat / hard to reach).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsCharger = CreateConVar("si_hud_bf_points_charger", "150",
-        "BF banner points: Charger kill (600 HP, highest threat SI).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsTank = CreateConVar("si_hud_bf_points_tank", "500",
-        "BF banner points: Tank kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    // v1.7.52 (user): 击杀分重做——基础分 = 特感实际最大血量 ×
+    // si_hud_bf_points_base_pct (25%)，向上取整；Tank 固定 1500 / Witch 固定
+    // 500（大头在伤害分）；爆头 ×1.5、满血 ×1.25 倍率制（取代固定 +50），
+    // 近战加成取消（近战优势已有伤害分倍率 1.75）。
+    g_cvBFPointsBasePct = CreateConVar("si_hud_bf_points_base_pct", "25",
+        "Kill base points = SI actual max HP × this %% (ceiled). Tank/Witch fixed below.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
+    g_cvBFPointsTank = CreateConVar("si_hud_bf_points_tank", "1500",
+        "Kill points: Tank fixed (damage points are the main share).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
     g_cvBFPointsWitch = CreateConVar("si_hud_bf_points_witch", "500",
-        "BF banner points: Witch kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsHeadshot = CreateConVar("si_hud_bf_points_headshot", "50",
-        "BF banner points: headshot bonus (BF1: +10, scaled to L4D2).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsMelee = CreateConVar("si_hud_bf_points_melee", "50",
-        "BF banner points: melee bonus.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFFullHP = CreateConVar("si_hud_bf_points_fullhp", "50",
-        "BF banner points: full-HP kill bonus — SI that was never hurt before dying.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+        "Kill points: Witch fixed.", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    g_cvBFHeadshotMult = CreateConVar("si_hud_bf_headshot_mult", "1.5",
+        "Kill points multiplier: headshot kill (was fixed +50).", FCVAR_NOTIFY, true, 1.0, true, 10.0);
+    g_cvBFFullHPMult = CreateConVar("si_hud_bf_fullhp_mult", "1.25",
+        "Kill points multiplier: full-HP kill — SI never hurt before dying (stacks with headshot).", FCVAR_NOTIFY, true, 1.0, true, 10.0);
 
-    // v1.7.2: streak settle bonus (BF1 double/triple/multi-kill bonus, +30/+50/+100)
-    g_cvStreakBonus2 = CreateConVar("si_hud_streak_bonus_l2", "30",
-        "Streak settle bonus: streak 2-3 (BF1 Double Kill).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvStreakBonus4 = CreateConVar("si_hud_streak_bonus_l4", "50",
-        "Streak settle bonus: streak 4-5 (BF1 Triple Kill).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvStreakBonus6 = CreateConVar("si_hud_streak_bonus_l6", "100",
-        "Streak settle bonus: streak 6+ (BF1 Multi Kill).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    // v1.7.53 (user): 连杀奖励 = 加权人头档位制。小僵尸 1 人头 / 特感 6 人头，
+    // 档位 20/40/55/70/85/100；奖励 = 该档阈值 × si_hud_streak_bonus_coeff (1.3)
+    // × 档位倍率（一级 si_hud_streak_bonus_mult_l1 = 10，每档 +1.5，鼓励多杀）。
+    g_cvStreakHwL1 = CreateConVar("si_hud_streak_hw_l1", "20",
+        "Weighted-head bonus tier 1 threshold (SI×6 + common×1).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvStreakHwL2 = CreateConVar("si_hud_streak_hw_l2", "40",
+        "Weighted-head bonus tier 2 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvStreakHwL3 = CreateConVar("si_hud_streak_hw_l3", "55",
+        "Weighted-head bonus tier 3 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvStreakHwL4 = CreateConVar("si_hud_streak_hw_l4", "70",
+        "Weighted-head bonus tier 4 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvStreakHwL5 = CreateConVar("si_hud_streak_hw_l5", "85",
+        "Weighted-head bonus tier 5 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvStreakHwL6 = CreateConVar("si_hud_streak_hw_l6", "100",
+        "Weighted-head bonus tier 6 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
+    g_cvStreakBonusMultL1 = CreateConVar("si_hud_streak_bonus_mult_l1", "10",
+        "Bonus formula: tier-1 multiplier (reward = threshold × coeff × mult).", FCVAR_NOTIFY, true, 1.0, true, 100.0);
+    g_cvStreakBonusMultStep = CreateConVar("si_hud_streak_bonus_mult_step", "1.5",
+        "Bonus formula: multiplier +this per extra tier.", FCVAR_NOTIFY, true, 0.0, true, 100.0);
+    g_cvStreakBonusCoeff = CreateConVar("si_hud_streak_bonus_coeff", "1.3",
+        "Bonus formula coefficient.", FCVAR_NOTIFY, true, 0.0, true, 100.0);
+    // v1.7.51: 救援奖励分 (user)——救援队友计入连杀（刷新窗口+滚动分+结算卡）
+    g_cvPointsRescue = CreateConVar("si_hud_points_rescue", "75",
+        "Rescue score: reviving a teammate (revive_success) awards this, stacking the streak window.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
 
     // v1.7.3: common infected fully taken over — they score, stack the
     // streak (and the award settle), and show a center kill line (†).
@@ -862,6 +973,8 @@ public void OnPluginStart()
         "Damage mult: SMGs (smg/silenced/mp5).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
     g_cvDmgMultMagnum = CreateConVar("si_hud_bf_damage_mult_magnum", "1.75",
         "Damage mult: magnum pistol.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    g_cvDmgMultPistol = CreateConVar("si_hud_bf_damage_mult_pistol", "1.75",
+        "Damage mult: pistols (pistol/dual_pistols) — user: 手枪 1.75.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
     g_cvDmgMultMelee = CreateConVar("si_hud_bf_damage_mult_melee", "1.75",
         "Damage mult: melee weapons.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
     g_cvDmgMultPump = CreateConVar("si_hud_bf_damage_mult_pump", "1.5",
@@ -959,7 +1072,7 @@ public void OnPluginStart()
         "Streak 2-3 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
     g_cvStreakSnd4 = CreateConVar("si_hud_streak_sound_l4", "battlefield/bf_award_purchase.mp3",
         "Streak 4-5 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd6 = CreateConVar("si_hud_streak_sound_l6", "battlefield/bf_award_warbonds.mp3",
+    g_cvStreakSnd6 = CreateConVar("si_hud_streak_sound_l6", "battlefield/bf_award_war_bonds.mp3",
         "Streak 6-8 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
     g_cvStreakSnd9 = CreateConVar("si_hud_streak_sound_l9", "battlefield/bf_award_dogtag.mp3",
         "Streak 9-11 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
@@ -977,7 +1090,7 @@ public void OnPluginStart()
     HookEvent("player_death",   Event_PlayerDeath);
     HookEvent("infected_death", Event_InfectedDeath);
     HookEvent("infected_hurt",  Event_InfectedHurt);    // v1.7.16: common damage points
-    HookEvent("witch_spawn",    Event_WitchSpawn);      // v1.7.16: witch damage points
+    HookEvent("revive_success", Event_ReviveSuccess);   // v1.7.51: 救援算分
     HookEvent("round_end",      Event_RoundEnd);
     HookEvent("round_start",    Event_RoundStart);      // v1.7.30: 团灭重开判定
     HookEvent("map_transition", Event_MapTransition);   // v1.7.9
@@ -1436,6 +1549,7 @@ public void OnMapEnd()
         g_iKillStreak[i] = 0;
         g_iCommonStreak[i] = 0;            // v1.7.4
         g_iStreakScore[i] = 0;
+        g_iRescueStreak[i] = 0;            // v1.7.51
         // v1.7.28: 排行榜积分每关从 0 算（用户）；可用积分/复活币战役内保留
         g_iTotalScore[i] = 0;              // v1.7.6: 本关积分每关清零
         g_iRevivesLeft[i] = 0;             // v1.7.28: 本图次数（OnMapStart 重置）
@@ -1478,6 +1592,7 @@ public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
         g_iKillStreak[i] = 0;
         g_iCommonStreak[i] = 0;            // v1.7.4
         g_iStreakScore[i] = 0;
+        g_iRescueStreak[i] = 0;            // v1.7.51
         g_fLastStreakKillTime[i] = 0.0;
         g_fSIHurtAt[i] = 0.0;              // v1.7.2
     }
@@ -1573,6 +1688,7 @@ public void OnClientDisconnect(int client)
     g_iKillStreak[client] = 0;
     g_iCommonStreak[client] = 0;           // v1.7.4
     g_iStreakScore[client] = 0;
+    g_iRescueStreak[client] = 0;           // v1.7.51
     g_iTotalScore[client] = 0;             // v1.7.6 (本关积分断线清零，防槽位泄漏)
     g_iWallet[client] = 0;                 // v1.7.27 (可用积分断线清零)
     g_iRevivesLeft[client] = 0;            // v1.7.28
@@ -1617,9 +1733,12 @@ float GetDamageMult(int client)
         return g_cvDmgMultSMG.FloatValue;
     if (StrEqual(cls, "weapon_pistol_magnum"))
         return g_cvDmgMultMagnum.FloatValue;
+    // v1.7.52 (user): 手枪（含双枪）1.75
+    if (StrEqual(cls, "weapon_pistol") || StrEqual(cls, "weapon_dual_pistols"))
+        return g_cvDmgMultPistol.FloatValue;
     if (StrEqual(cls, "weapon_melee"))
         return g_cvDmgMultMelee.FloatValue;
-    if (StrEqual(cls, "weapon_pumpshotgun"))
+    if (StrEqual(cls, "weapon_pumpshotgun") || StrEqual(cls, "weapon_shotgun_chrome"))   // v1.7.52: 铁喷 1.5
         return g_cvDmgMultPump.FloatValue;
     if (StrEqual(cls, "weapon_autoshotgun") || StrEqual(cls, "weapon_shotgun_spas"))
         return g_cvDmgMultAuto.FloatValue;
@@ -1711,29 +1830,19 @@ public Action Event_PlayerHurt(Event event, const char[] name, bool dontBroadcas
 }
 
 // ============================================================================
-// OnEntityCreated — hook OnTakeDamage on Witch entities
-// (player_hurt never fires for NPCs like Witch)
+// OnEntityCreated — hook OnTakeDamage on Witch entities (single hook)
+// (player_hurt never fires for NPCs like Witch; the Witch lives in the
+// infected event system and the common path excludes her — her damage
+// points go through this hook only)
 // ============================================================================
 
 public void OnEntityCreated(int entity, const char[] classname)
 {
-    if (!g_cvEnable.BoolValue || !g_cvHPEnable.BoolValue || !g_cvHPShowWitch.BoolValue)
+    if (!g_cvEnable.BoolValue)
         return;
     if (StrContains(classname, "witch") == -1)
         return;
-    SDKHook(entity, SDKHook_OnTakeDamage, Witch_OnTakeDamage);
-}
-
-Action Witch_OnTakeDamage(int victim, int &attacker, int &inflictor,
-                          float &damage, int &damagetype)
-{
-    if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker))
-        return Plugin_Continue;
-    if (GetClientTeam(attacker) != 2)
-        return Plugin_Continue;
-
-    ShowWitchHP(attacker, victim);
-    return Plugin_Continue;
+    SDKHook(entity, SDKHook_OnTakeDamage, WitchTakeDamage);
 }
 
 // v1.7.2: SI (re)spawn resets the hurt tracker — a fresh SI starts as
@@ -1848,6 +1957,26 @@ public Action Event_InfectedHurt(Event event, const char[] name, bool dontBroadc
     if (GetClientTeam(attacker) != 2)
         return Plugin_Continue;
 
+    // v1.7.56 (bug): 引擎对 Witch 受伤也发 infected_hurt（Witch 是 NPC 实体，
+    // 归在 infected 事件里）—— 手枪打 Witch 被误当小僵尸加分 + 显示 "† 小僵尸"，
+    // 且伤害分被计两次（此处 common 系数 + WitchTakeDamage 的 witch 系数）。
+    // Witch 伤害分走 WitchTakeDamage（SDKHooks），这里直接排除。
+    int entId = event.GetInt("entityid");
+    if (entId >= 1 && entId < 2048)
+    {
+        char cls[16];
+        GetEntityClassname(entId, cls, sizeof(cls));
+        if (StrEqual(cls, "witch"))
+        {
+            // v1.7.58 (bug): v1.7.56 提前 return 不记录 → g_iLastCommonEnt
+            // 永不为 witch → Event_InfectedDeath 的排除变死代码 → Witch 死亡
+            // 被误当小僵尸：† 横幅覆盖女巫横幅 + 5 分入账 + † 骷髅。
+            // 这里只记录实体供死亡排除（加分排除保留，防双计分）。
+            g_iLastCommonEnt[attacker] = entId;
+            return Plugin_Continue;
+        }
+    }
+
     int amount = event.GetInt("amount");
     if (amount <= 0)
         return Plugin_Continue;
@@ -1889,25 +2018,21 @@ public Action Event_InfectedHurt(Event event, const char[] name, bool dontBroadc
 }
 
 // ============================================================================
-// Event: witch_spawn — Witch damage points (v1.7.16, SDKHooks)
+// WitchTakeDamage — unified Witch OnTakeDamage hook (v1.7.59)
 // ============================================================================
 
 // The Witch is an NPC (not a player entity) — player_hurt never fires for
-// her and she is not a common, so neither event covers her. witch_spawn
-// hooks the entity with SDKHooks_OnTakeDamage; the hook lives as long as
-// the entity does (freed on kill/despawn automatically).
-public Action Event_WitchSpawn(Event event, const char[] name, bool dontBroadcast)
-{
-    int witch = event.GetInt("entityid");
-    if (witch > 0 && IsValidEntity(witch) && IsValidEdict(witch))
-        SDKHook(witch, SDKHook_OnTakeDamage, WitchTakeDamage);
-    return Plugin_Continue;
-}
-
+// her and she is not a common, so neither event covers her. Hooks via
+// OnEntityCreated; the hook lives as long as the entity does (freed on
+// kill/despawn automatically).
+//
+// v1.7.59: single hook does BOTH scoring and display — score into the
+// g_iDmgPtsKiller grid FIRST, then ShowWitchHP consumes it, so the +pts
+// always shows on the Witch HP line (order was undefined with two hooks).
 public Action WitchTakeDamage(int victim, int &attacker, int &inflictor,
                               float &damage, int &damagetype)
 {
-    if (!g_cvEnable.BoolValue || !g_cvDamageEnable.BoolValue)
+    if (!g_cvEnable.BoolValue)
         return Plugin_Continue;
     if (damage <= 0.0)
         return Plugin_Continue;
@@ -1916,19 +2041,29 @@ public Action WitchTakeDamage(int victim, int &attacker, int &inflictor,
     if (GetClientTeam(attacker) != 2)
         return Plugin_Continue;
 
-    // Same coefficient as SI (1.0 = 1:1): Witch 500 HP fully burned =
-    // ~500 pts, matching her kill score.
-    int pts = RoundToFloor(damage * GetDamageMult(attacker) * g_cvDamageCoeff.FloatValue);
-    if (pts > 0)
+    // ── score (independent of the HP display gate) ──
+    if (g_cvDamageEnable.BoolValue)
     {
-        g_iTotalScore[attacker] += pts;
-        g_iWallet[attacker] += pts;             // v1.7.27
-        // v1.7.25: display copy for ShowWitchHP / witch kill card
-        // (victim = witch ENTITY idx)
-        // v1.7.31b fix: 实体索引 < 2048 才写（SourcePawn 越界 = 运行时错误）
-        if (g_cvHPEnable.BoolValue && victim >= 1 && victim < 2048)
-            g_iDmgPtsKiller[attacker][victim] += pts;
+        // Same coefficient as SI (1.0 = 1:1): Witch 500 HP fully burned =
+        // ~500 pts, matching her kill score.
+        int pts = RoundToFloor(damage * GetDamageMult(attacker)
+            * g_cvDamageCoeff.FloatValue);
+        if (pts > 0)
+        {
+            g_iTotalScore[attacker] += pts;
+            g_iWallet[attacker] += pts;             // v1.7.27
+            // v1.7.25: display copy for ShowWitchHP / witch kill card
+            // (victim = witch ENTITY idx)
+            // v1.7.31b fix: 实体索引 < 2048 才写（SourcePawn 越界 = 运行时错误）
+            if (g_cvHPEnable.BoolValue && victim >= 1 && victim < 2048)
+                g_iDmgPtsKiller[attacker][victim] += pts;
+        }
     }
+
+    // ── display — same hook, score already in the grid so +pts is ready ──
+    if (g_cvHPEnable.BoolValue && g_cvHPShowWitch.BoolValue)
+        ShowWitchHP(attacker, victim);
+
     return Plugin_Continue;
 }
 
@@ -1948,6 +2083,21 @@ public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroad
         return Plugin_Continue;
     if (GetClientTeam(attacker) != 2)
         return Plugin_Continue;
+
+    // v1.7.56 (bug): 排除 Witch —— 引擎对 Witch 死亡也可能发 infected_death
+    //（回退路径 g_iLastCommonEnt 此时 = Witch 实体），会误显示 "† 小僵尸"。
+    int witchEnt = g_iLastCommonEnt[attacker];
+    if (witchEnt >= 1 && witchEnt < 2048)
+    {
+        char cls[16];
+        GetEntityClassname(witchEnt, cls, sizeof(cls));
+        if (StrEqual(cls, "witch"))
+        {
+            g_iLastCommonEnt[attacker] = 0;
+            g_iDmgPtsKiller[attacker][witchEnt] = 0;
+            return Plugin_Continue;
+        }
+    }
 
     // v1.7.3: common infected are fully taken over — they score points,
     // stack the streak (→ award settle), and show a center kill line.
@@ -1972,8 +2122,16 @@ public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroad
         int dmgPts = 0;
         if (ent >= 1 && ent < 2048)
         {
-            dmgPts = g_iDmgPtsKiller[attacker][ent];   // v1.7.25: per-killer
-            g_iDmgPtsKiller[attacker][ent] = 0;        // consumed with the kill
+            // v1.7.58: 防 witch 伤害分串台——last-ent 可能是 Witch 实体（打
+            // witch 后未再碰小僵尸，实体已死索引未复用），其伤害分存在同一
+            // 张网格里，不校验会被当成小僵尸伤害分显示。
+            char cls[16];
+            GetEntityClassname(ent, cls, sizeof(cls));
+            if (!StrEqual(cls, "witch"))
+            {
+                dmgPts = g_iDmgPtsKiller[attacker][ent];   // v1.7.25: per-killer
+                g_iDmgPtsKiller[attacker][ent] = 0;        // consumed with the kill
+            }
             g_iLastCommonEnt[attacker] = 0;
         }
         int showPts = points + dmgPts;
@@ -2169,13 +2327,20 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
     bool melee  = IsMeleeWeapon(weaponEnt);
     bool isTank = (IsTankOrWitch(victim) == 1);
 
-    // v1.7.2: per-class base points (difficulty + max HP), plus headshot /
-    // melee / full-HP bonuses. Tank scores its class base too and DOES get
-    // the bonuses (previously skipped by the else-if branch).
+    // v1.7.52 (user): 击杀分 = 基础(血×25% ceil) × 爆头1.5 × 满血1.25；
+    // 近战加成取消。倍率链合并后统一向上取整（938 = 500×1.5×1.25 例）。
     int points = PointsForSI(victim);
-    if (headshot) points += g_cvBFPointsHeadshot.IntValue;
-    if (melee) points += g_cvBFPointsMelee.IntValue;
-    if (g_fSIHurtAt[victim] == 0.0) points += g_cvBFFullHP.IntValue;
+    float mult = 1.0;
+    if (headshot) mult *= g_cvBFHeadshotMult.FloatValue;
+    if (g_fSIHurtAt[victim] == 0.0) mult *= g_cvBFFullHPMult.FloatValue;
+    if (mult != 1.0)
+        points = RoundToCeil(points * mult);
+
+    // ── Streak & score (v1.7.57: independent of HUD display) ──
+    // StackStreakKill 移出 kill_hint 门控（原藏在 BuildBFBanner 里，关 HUD
+    // 会连击杀分和连杀一起丢）——与 Event_InfectedDeath 一致：先入账，后显示。
+    if (points > 0)
+        StackStreakKill(attacker, points, false);
 
     // ── Sound (independent cooldown, does NOT block HUD/chat) ──
 
@@ -2226,7 +2391,7 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
     if (g_cvKillHintEnable.BoolValue)
     {
         char banner[192];
-        BuildBFBanner(banner, sizeof(banner), attacker, points,
+        BuildBFBanner(banner, sizeof(banner), attacker,
             isTank ? "坦克击杀" : headshot ? "爆头击杀" : melee ? "近战击杀" : "击杀",
             siName);
 
@@ -2288,9 +2453,14 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
 
     // v1.7.2: Witch scores its base + headshot/melee bonuses (BF style).
     // No full-HP bonus: player_hurt never fires for NPC Witch entities.
+    // v1.7.52: Witch 固定 500；爆头 ×1.5；无满血（NPC 不触发 player_hurt）
     int points = g_cvBFPointsWitch.IntValue;
-    if (headshot) points += g_cvBFPointsHeadshot.IntValue;
-    if (IsMeleeWeapon(weaponEnt)) points += g_cvBFPointsMelee.IntValue;
+    if (headshot)
+        points = RoundToCeil(points * g_cvBFHeadshotMult.FloatValue);
+
+    // v1.7.57: 与 SI 同——入账移出 HUD 门控，kill_hint 关闭时女巫击杀仍计连杀
+    if (points > 0)
+        StackStreakKill(attacker, points, false);
 
     if (g_cvChatEnable.BoolValue)
     {
@@ -2306,7 +2476,7 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
     if (g_cvKillHintEnable.BoolValue)
     {
         char banner[192];
-        BuildBFBanner(banner, sizeof(banner), attacker, points,
+        BuildBFBanner(banner, sizeof(banner), attacker,
             "女巫击杀", "WITCH 女巫");
 
         char msg[256];
@@ -2437,6 +2607,7 @@ void StackStreakKill(int client, int points, bool isCommon)
         g_iKillStreak[client] = 0;
         g_iCommonStreak[client] = 0;     // v1.7.4: separate count, shared window
         g_iStreakScore[client] = 0;      // v1.6.7: rolling score resets with the streak
+        g_iRescueStreak[client] = 0;     // v1.7.51: rescue count shares the window
     }
     if (isCommon)
         g_iCommonStreak[client]++;
@@ -2459,6 +2630,48 @@ void StackStreakKill(int client, int points, bool isCommon)
     // v1.6.6: schedule the streak settle — when the window closes the
     // killer hears the BF1 award sound for their score tier.
     ScheduleStreakSettle(client);
+}
+
+// v1.7.51 (user): 救援队友算分——救援计入连杀（刷新 6 秒窗口 + 累计滚动分 +
+// 结算卡显示），奖励分直接入账钱包/总分。revive_success 覆盖拉人（被扑/骑/
+// 舌头/挂边）和电击（L4D2 无专门 defib 事件，实锤也走 revive_success），
+// 统一 si_hud_points_rescue 分（默认 75）。
+public Action Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
+{
+    if (!g_cvEnable.BoolValue)
+        return Plugin_Continue;
+
+    int reviver = GetClientOfUserId(event.GetInt("reviver"));
+    if (reviver < 1 || reviver > MaxClients || !IsClientInGame(reviver)
+        || GetClientTeam(reviver) != 2)
+        return Plugin_Continue;
+
+    int revived = GetClientOfUserId(event.GetInt("revived"));
+    if (revived == reviver)
+        return Plugin_Continue;            // 防御：defib 不能自电，正常不会相等
+
+    int pts = g_cvPointsRescue.IntValue;
+    if (pts <= 0)
+        return Plugin_Continue;
+
+    // 与击杀共享窗口重置逻辑：窗口过期则清空连杀状态
+    float now = GetGameTime();
+    if (now - g_fLastStreakKillTime[reviver] > g_cvBFWindow.FloatValue)
+    {
+        g_iKillStreak[reviver] = 0;
+        g_iCommonStreak[reviver] = 0;
+        g_iStreakScore[reviver] = 0;
+        g_iRescueStreak[reviver] = 0;
+    }
+    g_iRescueStreak[reviver]++;
+    g_iStreakScore[reviver] += pts;        // 推动音效档位判定（纯击杀+救援混合分）
+    g_iTotalScore[reviver] += pts;         // 历史积分（排行榜）
+    g_iWallet[reviver] += pts;             // 当前积分（商店钱包）
+    g_fLastStreakKillTime[reviver] = now;  // 救援刷新连杀窗口
+    ScheduleStreakSettle(reviver);
+
+    PrintToChat(reviver, "\x04[得分]\x01 你救起了 \x03%N\x01，+\x03%d\x01分", revived, pts);
+    return Plugin_Continue;
 }
 
 // v1.7.4: one icon row, SI skulls (☠) and common daggers (†) as separate
@@ -2489,11 +2702,12 @@ void BuildStreakIcons(char[] buffer, int maxlen, int client)
     }
 }
 
-void BuildBFBanner(char[] buffer, int maxlen, int client, int points,
+// v1.7.57: pure display — streak/score stacking moved OUT to the callers
+// (SurvivorKilledSI / SurvivorKilledWitch, before the HUD gate), so kills
+// still count when si_hud_kill_hint_enable is off (same as commons).
+void BuildBFBanner(char[] buffer, int maxlen, int client,
                    const char[] type, const char[] siName)
 {
-    StackStreakKill(client, points, false);
-
     char icons[80];
     BuildStreakIcons(icons, sizeof(icons), client);
 
@@ -2536,43 +2750,96 @@ Action Timer_StreakSettle(Handle timer, int userId)
 
     int siCount = g_iKillStreak[client];       // v1.7.5: separate counts for the settle card
     int commonCount = g_iCommonStreak[client];
+    int rescueCount = g_iRescueStreak[client]; // v1.7.51
     int streak = siCount + commonCount;        // combined for the multi-kill bonus
     int score = g_iStreakScore[client];   // v1.7.2: capture before reset — settle display
     g_iKillStreak[client] = 0;            // settle: reset for the next run
     g_iCommonStreak[client] = 0;          // v1.7.4
+    g_iRescueStreak[client] = 0;          // v1.7.51
     g_iStreakScore[client] = 0;           // v1.6.7: rolling score resets on settle
     g_fLastStreakKillTime[client] = 0.0;
-    LogMessage("[streak] %N settle kills=%d score=%d", client, streak, score);   // debug
+    LogMessage("[streak] %N settle kills=%d rescues=%d score=%d", client, streak, rescueCount, score);   // debug
     if (score <= 0)
         return Plugin_Stop;
 
-    // v1.7.4: award tiers trigger on the settled SCORE, not the kill count
-    // (commons score 5-10, so zombie spam cannot climb tiers cheaply; a
-    // single Tank/Witch kill at 500+ lands in tier 4).
+    // v1.7.53 (user): 连杀奖励 = 加权人头 × 阶梯分段（电费模式）——小僵尸 1
+    // 人头、特感 6 人头；奖励 = Σ(各段实际人头 × 1.3 × 该段倍率)，段边界
+    // 20/40/55/70/85/100，倍率一级 10 每段 +1.5；落在阈值之间按实际值分段
+    // 累计（无跳档悬崖）。每段 ceil 累加。救援不占人头（贡献已在滚动分）。
+    // v1.7.54 (user fix): 第一档边界是门槛——hw < l1（20 人头）不开闸，
+    // 奖励为 0（2 特感 hw=12 之前错发 156）；达到门槛后全段计价
+    // （例 hw=24 → 320 = 20×13 + 4×14.5 不变）。
+    int hw = siCount * 6 + commonCount;
+    int bonus = 0;
+    if (hw >= g_cvStreakHwL1.IntValue)
+    {
+        float segEdge[6];
+        segEdge[0] = g_cvStreakHwL1.FloatValue;
+        segEdge[1] = g_cvStreakHwL2.FloatValue;
+        segEdge[2] = g_cvStreakHwL3.FloatValue;
+        segEdge[3] = g_cvStreakHwL4.FloatValue;
+        segEdge[4] = g_cvStreakHwL5.FloatValue;
+        segEdge[5] = g_cvStreakHwL6.FloatValue;
+        float mult = g_cvStreakBonusMultL1.FloatValue;
+        float coeff = g_cvStreakBonusCoeff.FloatValue;
+        float prev = 0.0;
+        float remain = float(hw);
+        for (int k = 0; k < 6; k++)
+        {
+            float seg = remain;
+            if (seg > segEdge[k] - prev)
+                seg = segEdge[k] - prev;        // 段内人头（本段上界截断）
+            if (seg > 0.0)
+                bonus += RoundToCeil(seg * coeff * mult);
+            remain -= seg;
+            if (remain <= 0.0)
+                break;
+            prev = segEdge[k];
+            mult += g_cvStreakBonusMultStep.FloatValue;
+        }
+        if (remain > 0.0)                        // 超出最后一段上界
+            bonus += RoundToCeil(remain * coeff * mult);
+    }
+    // v1.7.60 (user): 结算整体受阈值门控——hw < 20（3 特感 = 18、单只女巫 =
+    // 6）窗口关闭时只静默重置连杀状态（上方已完成），不弹"连杀结算"卡、
+    // 不播奖励音效。之前结算卡只看 score>0，hw=18 无奖励也弹卡 +295 误导。
+    // 连杀状态已在上方重置，这里直接退出即可。
+    if (bonus <= 0)
+        return Plugin_Stop;
+    g_iTotalScore[client] += bonus;   // 历史积分（排行榜）
+    g_iWallet[client] += bonus;       // 当前积分（商店钱包）
+    LogMessage("[streak] %N bonus +%d credited (hw=%d)", client, bonus, hw);
+
+    // v1.7.61 (user): 档位按结算总额 (score+bonus) 判定，与结算卡显示一致。
+    // 之前按击杀分 score 判：26 小僵尸 hw=26 发了 +350 奖励，但击杀分 140
+    // < L2(200) → 静默档，奖励发了没音效。v1.7.60 后结算整体已受 hw>=20
+    // 门控，v1.7.4 的"按击杀分防小僵尸刷档"已冗余，档位直接对应该次结算
+    // 的总收益（卡面数字 = 听觉档位）。
+    // v1.7.50: 音效与结算解耦 — 无声档位只跳过播放，结算卡照常显示（奖励已入账，
+    // 玩家需要看到去向）。
     char sound[PLATFORM_MAX_PATH];
     ConVar cv;
-    if (score >= g_cvStreakScoreL15.IntValue)      cv = g_cvStreakSnd15;
-    else if (score >= g_cvStreakScoreL12.IntValue) cv = g_cvStreakSnd12;
-    else if (score >= g_cvStreakScoreL9.IntValue)  cv = g_cvStreakSnd9;
-    else if (score >= g_cvStreakScoreL6.IntValue)  cv = g_cvStreakSnd6;
-    else if (score >= g_cvStreakScoreL4.IntValue)  cv = g_cvStreakSnd4;
-    else if (score >= g_cvStreakScoreL2.IntValue)  cv = g_cvStreakSnd2;
-    else return Plugin_Stop;                       // below the lowest tier → silent
-    cv.GetString(sound, sizeof(sound));
-    if (sound[0] == '\0')
-        return Plugin_Stop;
-
-    PlayStreakSound(client, sound);
+    int settleTotal = score + bonus;
+    if (settleTotal >= g_cvStreakScoreL15.IntValue)      cv = g_cvStreakSnd15;
+    else if (settleTotal >= g_cvStreakScoreL12.IntValue) cv = g_cvStreakSnd12;
+    else if (settleTotal >= g_cvStreakScoreL9.IntValue)  cv = g_cvStreakSnd9;
+    else if (settleTotal >= g_cvStreakScoreL6.IntValue)  cv = g_cvStreakSnd6;
+    else if (settleTotal >= g_cvStreakScoreL4.IntValue)  cv = g_cvStreakSnd4;
+    else if (settleTotal >= g_cvStreakScoreL2.IntValue)  cv = g_cvStreakSnd2;
+    else                                                cv = null;   // below the lowest tier → silent
+    if (cv != null)
+    {
+        cv.GetString(sound, sizeof(sound));
+        if (sound[0] != '\0')
+            PlayStreakSound(client, sound);
+    }
 
     // v1.7.2: settle display — BF1-style streak score record. BF1 awards a
     // bonus on multi-kills (Double +30 / Triple +50 / Multi +100); show the
     // accumulated kill score + that bonus while the award sound plays.
-    int bonus;
-    if (streak >= 6)      bonus = g_cvStreakBonus6.IntValue;
-    else if (streak >= 4) bonus = g_cvStreakBonus4.IntValue;
-    else if (streak >= 2) bonus = g_cvStreakBonus2.IntValue;
-    else                  bonus = 0;
-    ShowStreakSettle(client, siCount, commonCount, score, bonus);
+    // v1.7.50: total = score + bonus 现在与入账一致 — 累计分击杀时已入账，奖励
+    // 结算时入账，玩家看到的结算数字 = 本连杀的总收益。
+    ShowStreakSettle(client, siCount, commonCount, rescueCount, score, bonus);
     return Plugin_Stop;
 }
 
@@ -2583,7 +2850,7 @@ Action Timer_StreakSettle(Handle timer, int userId)
 // so the tally stays visible for the whole award sound (the old 2s center
 // card vanished before the longer sounds ended).
 void ShowStreakSettle(int client, int siCount, int commonCount,
-                      int score, int bonus)
+                      int rescueCount, int score, int bonus)
 {
     int total = score + bonus;
 
@@ -2599,6 +2866,13 @@ void ShowStreakSettle(int client, int siCount, int commonCount,
         char tmp[64];
         Format(tmp, sizeof(tmp), "%s☠ 特感 ×%d",
             cpart[0] != '\0' ? "、" : "", siCount);
+        StrCat(cpart, sizeof(cpart), tmp);
+    }
+    if (rescueCount > 0)                       // v1.7.51: 救援计入结算卡
+    {
+        char tmp[64];
+        Format(tmp, sizeof(tmp), "%s+ 救援 ×%d",
+            cpart[0] != '\0' ? "、" : "", rescueCount);
         StrCat(cpart, sizeof(cpart), tmp);
     }
     char cmsg[160];
@@ -2622,6 +2896,13 @@ void ShowStreakSettle(int client, int siCount, int commonCount,
         char tmp[64];
         Format(tmp, sizeof(tmp), "%s特感 x%d",
             parts[0] != '\0' ? "、" : "", siCount);
+        StrCat(parts, sizeof(parts), tmp);
+    }
+    if (rescueCount > 0)                       // v1.7.51
+    {
+        char tmp[64];
+        Format(tmp, sizeof(tmp), "%s救援 x%d",
+            parts[0] != '\0' ? "、" : "", rescueCount);
         StrCat(parts, sizeof(parts), tmp);
     }
 
@@ -2717,21 +2998,20 @@ void PlayClientSound(int client, const char[] sound)
 // SI name lookup (by m_zombieClass)
 // ============================================================================
 
-// v1.7.2: base points by zombie class (difficulty + max HP ladder).
-int PointsForSI(int client)
+// v1.7.52 (user): 基础分 = 特感实际最大血量 × si_hud_bf_points_base_pct (25%),
+// 向上取整；Tank/Witch 固定（1500/500，大头在伤害分）。血量实时读
+// m_iMaxHealth——服务器调过特感血量（[[l4d2-si-health]] 配置）则按调后算。
+int PointsForSI(int victim)
 {
-    int zombieClass = GetEntProp(client, Prop_Send, "m_zombieClass");
-    switch (zombieClass)
-    {
-        case 1: return g_cvBFPointsSmoker.IntValue;
-        case 2: return g_cvBFPointsBoomer.IntValue;
-        case 4: return g_cvBFPointsSpitter.IntValue;
-        case 5: return g_cvBFPointsJockey.IntValue;
-        case 6: return g_cvBFPointsCharger.IntValue;
-        case 8: return g_cvBFPointsTank.IntValue;
-        case 3: return g_cvBFPointsHunter.IntValue;
-        default: return g_cvBFPointsHunter.IntValue;
-    }
+    int zombieClass = GetEntProp(victim, Prop_Send, "m_zombieClass");
+    if (zombieClass == 8)              // Tank
+        return g_cvBFPointsTank.IntValue;
+    if (zombieClass == 7)              // Witch
+        return g_cvBFPointsWitch.IntValue;
+    int maxHP = GetEntProp(victim, Prop_Data, "m_iMaxHealth");
+    if (maxHP <= 0)
+        maxHP = 100;                   // 读不到防御值
+    return RoundToCeil(maxHP * g_cvBFPointsBasePct.FloatValue / 100.0);
 }
 
 void GetSIName(int client, char[] buffer, int maxlen)
@@ -2781,6 +3061,10 @@ void GetWeaponDisplayName(const char[] weapon, char[] buffer, int maxlen)
     if (StrEqual(weapon, "molotov"))             { strcopy(buffer, maxlen, "燃烧瓶");   return; }
     if (StrEqual(weapon, "vomitjar"))            { strcopy(buffer, maxlen, "胆汁");     return; }
     if (StrEqual(weapon, "grenade_launcher"))    { strcopy(buffer, maxlen, "榴弹");     return; }
+    // v1.7.50: 引擎对 GL 击杀事件报 WeaponType 值 "grenadelauncher"（无下划线，
+    // 见 left4dhooks g_sWeaponTypes[WEAPONTYPE_GRENADELAUNCHER]），不是 classname
+    // 后缀 "grenade_launcher" —— 缺这条击杀卡一直 fallback 显示英文。
+    if (StrEqual(weapon, "grenadelauncher"))     { strcopy(buffer, maxlen, "榴弹");     return; }
     if (StrEqual(weapon, "prop_minigun"))        { strcopy(buffer, maxlen, "固定机枪"); return; }
     if (StrEqual(weapon, "prop_mounted_machine_gun")) { strcopy(buffer, maxlen, "固定机枪"); return; }
     if (StrEqual(weapon, "rifle_m60"))           { strcopy(buffer, maxlen, "M60");      return; }
