@@ -86,6 +86,7 @@
 | `l4dmultislots.smx` | 多人生存者 — 最多 10 人，最少 4 人，免大厅等待 |
 | `l4d2_chainsaw_fuel.smx` | 电锯燃料量控制 |
 | `l4d2_loot_drop.smx` | 击杀掉落战利品 — Tank/Witch/特感/小僵尸概率掉落 |
+| `l4d2_give_items.smx` | 右键递物 — 手持投掷物对队友右键递出（对方槽位空才给）；医疗包/药/电击器 cvar 开关默认关 |
 | `l4d2_common_kill_reward.smx` | 击杀小僵尸奖励 |
 | `survivor_chat_select.smx` | 聊天指令选择幸存者角色/皮肤 |
 | `survivor_legs.smx` | 第一人称可见幸存者双腿（沉浸感增强） |
