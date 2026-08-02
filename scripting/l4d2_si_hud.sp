@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.76"
+#define PLUGIN_VERSION "1.7.77"
 
 // ============================================================================
 // ConVar handles
@@ -3272,10 +3272,10 @@ int SpawnMelee(const char[] meleeName, float pos[3])
     if (ent == -1)
         return -1;
 
-    // v1.7.76: 双保险——keyvalue + networked prop 都写（任一路径生效都行；
-    // 都不生效引擎默认 baseball_bat，用户实测"全是棒球棍"）
+    // v1.7.77 FIX: 只用 melee_script_name keyvalue（v1.7.76 加的双保险
+    // SetEntPropString m_MeleeWeaponName 在 spawn 前不存在该 prop →
+    // 抛异常：不生成 + 购买后菜单不重开，日志实锤 "Property not found"）
     DispatchKeyValue(ent, "melee_script_name", meleeName);
-    SetEntPropString(ent, Prop_Send, "m_MeleeWeaponName", meleeName);
     LogMessage("[melee-box] spawn melee=%s ent=%d", meleeName, ent);
 
     float from[3], to[3];
@@ -3592,16 +3592,9 @@ public Action Cmd_Shop(int client, int args)
 {
     if (client < 1 || !IsClientInGame(client))
         return Plugin_Handled;
-    // v1.7.64: 再输入一次 !buy/!shop → 关闭当前商店菜单（用户需求）
-    // FIX v1.7.65: 先置空再 CancelClientMenu——它同步触发菜单 Cancel→End，
-    // handler 里 delete menu 会杀死句柄，回头再 CancelMenu 就是 "Menu handle 0"
-    if (g_hShopMenu[client] != null)
-    {
-        g_hShopMenu[client] = null;
-        CancelClientMenu(client);
-        PrintToChat(client, "\x04[商店]\x01 商店菜单已关闭");
-        return Plugin_Handled;
-    }
+    // v1.7.77: 关闭方式定稿——数字 9 关闭键（原生 ExitButton，与其他服务器
+    // 一致）+ 20s 超时自动关。!buy 二次输入关不掉面板（L4D2 vgui 实测），
+    // 废弃"二次输入关闭"（原 CancelClientMenu 方案），重复输入只重开菜单
     if (!g_cvEnable.BoolValue || !g_cvShopEnable.BoolValue)
     {
         PrintToChat(client, "\x04[商店]\x01 商店未开启");
