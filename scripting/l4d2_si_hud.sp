@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.78"
+#define PLUGIN_VERSION "1.7.79"
 
 // ============================================================================
 // ConVar handles
@@ -833,13 +833,13 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "肾上腺素",    "weapon_adrenaline",             2000,  0,  2 },
     { "电击器",      "weapon_defibrillator",          4000,  0,  2 },
     { "医疗包",      "weapon_first_aid_kit",          4000,  0,  2 },
-    { "激光瞄准",    "weapon_upgradepack_laser_sight", 1,  0,  0 },   // TEMP-TEST 1 分（测完恢复 3500）
+    { "激光瞄准",    "weapon_upgradepack_laser_sight", 3500,  0,  0 },   // v1.7.79: 恢复正式价 3500
     { "M60 轻机枪",  "weapon_rifle_m60",              5000,  0,  0 },
     { "电锯",        "weapon_chainsaw",               5000,  0,  0 },   // v1.7.44
     { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0,  0 },
     { "复活币",      "",                              12000,  0,  3 },
-    { "透视特感",    "wallhack",                      1,      0,  3 },   // v1.7.67: 全局蓝色高亮 3 分钟（用户定稿 6000）；TEMP-TEST 1 分（测完恢复 6000）
-    { "近战盲盒",    "melee_box",                     1,      0,  0 },   // v1.7.72: 随机一把非电锯近战（用户定稿 3000）；TEMP-TEST 1 分（测完恢复 3000）
+    { "透视特感",    "wallhack",                      6000,   0,  3 },   // v1.7.79: 恢复正式价 6000（全局蓝色高亮 3 分钟，可续费至 15 分钟）
+    { "近战盲盒",    "melee_box",                     3000,   0,  0 },   // v1.7.79: 恢复正式价 3000（随机一把非电锯近战）
     { "烟花",        "weapon_fireworkcrate",          2500,   0,  1 }    // v1.7.72: 道具类（用户定稿 2500）
 };
 
