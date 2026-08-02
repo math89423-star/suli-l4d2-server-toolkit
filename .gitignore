@@ -28,3 +28,12 @@ bin/*.x86.so
 
 # Test/temp files
 test_write
+
+# Plugin backups
+*.bak*
+plugins/backup/
+
+# Runtime data (regenerated on every play session)
+data/last_map.txt
+data/si_hud_scores.txt
+data/sqlite/*.sq3
