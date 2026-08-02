@@ -11,6 +11,11 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.48:
+ *   - 通道实验 (user 反馈 v1.7.47 的 1.5 反而更小): 引擎对 volume>1.0 处理
+ *     异常 → 上限收回 1.0。SNDCHAN_STATIC 疑似走客户端音乐/UI 总线（受玩家
+ *     音乐音量衰减）→ PlayStreakSound + PlayClientSound 均换 SNDCHAN_AUTO。
+ *
  * Changelog v1.7.47:
  *   - 连杀结算音效调大 (user): 音量上限 1.0 → 2.0，默认 1.0 → 1.5。
  *     原代码把 EmitSoundToClient 音量钳制在 1.0（vol >= 1.0 ? 1.0 : vol），
@@ -543,7 +548,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.47"
+#define PLUGIN_VERSION "1.7.48"
 
 // ============================================================================
 // ConVar handles
@@ -940,12 +945,12 @@ public void OnPluginStart()
     g_cvStreakEnable = CreateConVar("si_hud_streak_sound_enable", "1",
         "Play the BF1 award sound when a kill streak settles (streak >= 2).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvStreakVol = CreateConVar("si_hud_streak_sound_volume", "1.5",
-        "Streak award sound volume, independent of si_hud_sound_volume. >1.0 boosts gain (mp3s mastered ~-15 dB, no clipping below 2.0).", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+    g_cvStreakVol = CreateConVar("si_hud_streak_sound_volume", "1.0",
+        "Streak award sound volume, independent of si_hud_sound_volume. Keep ≤ 1.0 — engine handles >1.0 unpredictably.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     // v1.7.47 FIX (engine-residue cvar): a cfg exec once auto-created this cvar
     // in the engine before the plugin loaded; CreateConVar returns the existing
     // cvar WITHOUT updating bounds — force them (no server restart).
-    g_cvStreakVol.SetBounds(ConVarBound_Upper, true, 2.0);
+    g_cvStreakVol.SetBounds(ConVarBound_Upper, true, 1.0);
 
     // v1.7.2: all six awards re-mastered to a uniform loudness (loudnorm,
     // mean ≈ -15 dB) and re-shipped under the bf_award_* names so clients
@@ -2634,9 +2639,12 @@ void PlayStreakSound(int client, const char[] sound)
 
     // v1.7.1 FIX: full path (with .mp3) — bare names resolve to .wav only.
     // SOUND_FROM_PLAYER = non-spatialized UI sound, same as bf_killfeedback.
-    // v1.7.47: volume may exceed 1.0 (gain boost, up to si_hud_streak_sound_volume
-    // max 2.0) — award mp3s are mastered at ~-15 dB, so 1.5x has no clipping.
-    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_STATIC,
+    // v1.7.48 CHANNEL TEST: SNDCHAN_STATIC → SNDCHAN_AUTO — STATIC rides the
+    // client music/UI bus (attenuated by the player's music volume slider),
+    // which is why peak-0dB files still sounded quiet. AUTO = main FX bus.
+    // Volume stays ≤ 1.0: engine handles >1.0 unpredictably (实测 1.5 played
+    // QUIETER than 1.0, user-confirmed).
+    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_AUTO,
         SNDLEVEL_NORMAL, SND_NOFLAGS, vol);
 }
 
@@ -2700,7 +2708,8 @@ void PlayClientSound(int client, const char[] sound)
         return;
 
     // v1.7.1 FIX: full path (with .mp3) — bare names resolve to .wav only.
-    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_STATIC,
+    // v1.7.48: SNDCHAN_STATIC → AUTO (same reason as PlayStreakSound).
+    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_AUTO,
         SNDLEVEL_NORMAL, SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
 }
 

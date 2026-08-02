@@ -80,7 +80,7 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "4.4.1"
+#define PLUGIN_VERSION "4.4.2"
 
 // ============================================================================
 // ConVars — hold file paths relative to sound/ (WITH extension)
@@ -158,12 +158,12 @@ public void OnPluginStart()
     g_cvSoundCommonHS = CreateConVar("bf_kill_sound_common_hs", "battlefield/csgo_kill_headshot.mp3",
         "Common infected headshot sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
 
-    g_cvVolume = CreateConVar("bf_kill_volume", "1.2",
-        "Sound volume. >1.0 boosts gain (kill mp3s mastered well below 0 dB, no clipping under 2.0).", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+    g_cvVolume = CreateConVar("bf_kill_volume", "1.0",
+        "Sound volume (0.0 – 1.0). Keep ≤ 1.0 — engine handles >1.0 unpredictably.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     // v4.4.1 FIX (engine-residue cvar): if a cfg exec auto-created this cvar
     // before the plugin loaded, CreateConVar returns it WITHOUT updating
-    // bounds — force them so >1.0 actually passes through.
-    g_cvVolume.SetBounds(ConVarBound_Upper, true, 2.0);
+    // bounds — force them so the configured value actually passes through.
+    g_cvVolume.SetBounds(ConVarBound_Upper, true, 1.0);
     g_cvCooldown = CreateConVar("bf_kill_cooldown", "0.1",
         "Min seconds between sounds.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
@@ -323,10 +323,13 @@ void PlayClientSound(int client, const char[] sound)
     float vol = g_cvVolume.FloatValue;
     if (vol <= 0.0) return;
 
-    // SOUND_FROM_PLAYER (-2) = non-spatialized UI sound; SNDCHAN_STATIC = menu
-    // channel, does not compete with game audio channels.
-    // v4.4.1: volume may exceed 1.0 (gain boost, up to bf_kill_volume max 2.0).
-    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_STATIC,
+    // SOUND_FROM_PLAYER (-2) = non-spatialized UI sound.
+    // v4.4.2 CHANNEL TEST: SNDCHAN_STATIC → SNDCHAN_AUTO — STATIC rides the
+    // client music/UI bus (attenuated by the player's music volume slider),
+    // which is why peak-0dB files still sounded quiet. AUTO = main FX bus.
+    // volume must stay ≤ 1.0: the engine handles >1.0 unpredictably (实测 1.5
+    // played QUIETER than 1.0, user-confirmed).
+    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_AUTO,
         SNDLEVEL_NORMAL, SND_NOFLAGS, vol);
 }
 
