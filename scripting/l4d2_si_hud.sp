@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.63"
+#define PLUGIN_VERSION "1.7.64"
 
 // ============================================================================
 // ConVar handles
@@ -811,7 +811,7 @@ int       g_iLastCommonEnt[MAXPLAYERS + 1];
 // 价格/限购写死在此表（改价格需重编译）；掉落（loot_drop v1.7.0）出小件。
 // ============================================================================
 
-#define SHOP_SLOTS      12
+#define SHOP_SLOTS      13
 
 enum struct ShopItem
 {
@@ -819,27 +819,44 @@ enum struct ShopItem
     char classname[64]; // 实体 classname（空 = 特殊商品：复活币）
     int  price;         // 价格（当前积分）
     int  limit;         // 每图限购次数（0 = 无限）
+    int  cat;           // v1.7.64: 菜单分类 0=武器 1=道具 2=医疗 3=其他
 }
 
 // 商品表（价格用户定稿 2026-08-01 修订：电击器/医疗包 4000, 复活币 12000 无限购）
 ShopItem g_ShopTable[SHOP_SLOTS] = {
     // v1.7.36 (user): 全部商品不限购（limit 0）——只有复活币受持有上限
     // (si_hud_respawn_coin_max 5) 约束
-    { "瓦斯罐",      "weapon_propanetank",             800,  0 },
-    { "煤气罐",      "weapon_oxygentank",              800,  0 },
-    { "汽油桶",      "weapon_gascan",                 2000,  0 },
-    { "止痛药",      "weapon_pain_pills",             2000,  0 },
-    { "肾上腺素",    "weapon_adrenaline",             2000,  0 },
-    { "电击器",      "weapon_defibrillator",          4000,  0 },
-    { "医疗包",      "weapon_first_aid_kit",          4000,  0 },
-    { "激光瞄准",    "weapon_upgradepack_laser_sight", 1,  0 },   // TEMP-TEST 1 分（测完恢复 3500）
-    { "M60 轻机枪",  "weapon_rifle_m60",              5000,  0 },
-    { "电锯",        "weapon_chainsaw",               5000,  0 },   // v1.7.44
-    { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0 },
-    { "复活币",      "",                              12000,  0 }
+    { "瓦斯罐",      "weapon_propanetank",             800,  0,  1 },
+    { "煤气罐",      "weapon_oxygentank",              800,  0,  1 },
+    { "汽油桶",      "weapon_gascan",                 2000,  0,  1 },
+    { "止痛药",      "weapon_pain_pills",             2000,  0,  2 },
+    { "肾上腺素",    "weapon_adrenaline",             2000,  0,  2 },
+    { "电击器",      "weapon_defibrillator",          4000,  0,  2 },
+    { "医疗包",      "weapon_first_aid_kit",          4000,  0,  2 },
+    { "激光瞄准",    "weapon_upgradepack_laser_sight", 1,  0,  0 },   // TEMP-TEST 1 分（测完恢复 3500）
+    { "M60 轻机枪",  "weapon_rifle_m60",              5000,  0,  0 },
+    { "电锯",        "weapon_chainsaw",               5000,  0,  0 },   // v1.7.44
+    { "榴弹发射器",  "weapon_grenade_launcher",       8000,  0,  0 },
+    { "复活币",      "",                              12000,  0,  3 },
+    { "透视特感",    "wallhack",                      1,      0,  3 }    // v1.7.64: 特殊商品（WallhackStart 激活，生效期间禁购）；TEMP-TEST 1 分（测完恢复 5000）
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
+
+// v1.7.64: 透视特感（!shop 特殊商品）——购买者独占的克隆轮廓透视
+#define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
+#define WALLHACK_DURATION   300.0   // 5 分钟效果
+enum struct WallClone
+{
+    int clone;      // prop_dynamic_override 克隆（alpha 0 隐形，仅发光）
+    int target;     // 目标实体（SI 玩家 index 或 Witch entity）
+}
+bool      g_bWallhack[MAXPLAYERS + 1];          // 透视生效中
+Handle    g_hWallhackTimer[MAXPLAYERS + 1];     // 5 分钟到期计时器
+Handle    g_hWallhackSyncTimer;                 // 克隆位置同步（0.033s，无购买者自动停）
+ArrayList g_hWallClones[MAXPLAYERS + 1];        // 购买者的克隆表 {clone, target}
+ArrayList g_hWitchList;                         // 当前 Witch 实体索引（OnEntityCreated 维护）
+Handle    g_hShopMenu[MAXPLAYERS + 1];          // 当前打开的商店菜单（!buy 切换用）
 
 // v1.7.34: 持久化——钱包/复活币按 SteamID 存 KeyValues（data/si_hud_scores.txt），
 // reload/重启不丢；保存时机: 断线 / OnPluginEnd(reload) / 60s 周期 / 新战役清零后
@@ -1114,6 +1131,7 @@ public void OnPluginStart()
     HookEvent("revive_success", Event_ReviveSuccess);   // v1.7.51: 救援算分
     HookEvent("round_end",      Event_RoundEnd);
     HookEvent("round_start",    Event_RoundStart);      // v1.7.30: 团灭重开判定
+    HookEvent("player_team",    Event_PlayerTeam);      // v1.7.64: 闲置/换队 → 透视失效
     HookEvent("map_transition", Event_MapTransition);   // v1.7.9
 
     RegAdminCmd("sm_streak_test", Cmd_StreakTest, ADMFLAG_ROOT,
@@ -1140,6 +1158,7 @@ public void OnPluginStart()
     // 复活次数/复活币/钱包全是 0（reload 清零副作用）。补全初始化：
     // 复活次数回 base，钱包/复活币从持久化文件恢复（v1.7.34）。
     ScoreSave_Init();
+    g_hWitchList = new ArrayList();          // v1.7.64: 透视特感 Witch 实体表
     for (int i = 1; i <= MaxClients; i++)
     {
         if (IsClientInGame(i) && !IsFakeClient(i))
@@ -1191,6 +1210,7 @@ public void OnPluginEnd()
     // 必须先重新 Init（BuildPath 纯函数可重复调用）。
     ScoreSave_Init();
     ScoreSave_All();
+    WallhackEndAll();                        // v1.7.64: 卸载/reload 清理透视克隆
 }
 
 void ScoreSave_Init()
@@ -1624,6 +1644,7 @@ public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 // 回滚本关积分到地图开局快照（用户："这个map团灭了，要回到map初始时积分状态"）
 public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
+    WallhackEndAll();                        // v1.7.64: 换图/团灭重开 → 透视效果失效（静默）
     if (!g_bFreshMapStart)
     {
         RestoreScoreState();
@@ -1656,6 +1677,7 @@ public void OnClientPutInServer(int client)
     // v1.7.31 (user): 新加入玩家 = 全默认状态 —— 0 可用积分 + start 复活币 + base 复活次数
     // v1.7.34: 钱包/复活币恢复移到 OnClientPostAdminCheck（此时 Steam auth 才可用）
     g_iRevivesLeft[client] = g_cvRespawnBase.IntValue;
+    g_bWallhack[client] = false;             // v1.7.64
     g_iTotalScore[client] = 0;
     g_iSIKills[client] = 0;
     g_iDeaths[client] = 0;
@@ -1715,6 +1737,8 @@ public void OnClientDisconnect(int client)
     g_iRevivesLeft[client] = 0;            // v1.7.28
     g_iReviveCoins[client] = 0;            // v1.7.28
     KillRespawnTimer(client);              // v1.7.28
+    WallhackEnd(client, true);             // v1.7.64: 断线清理透视（克隆/计时器）
+    g_hShopMenu[client] = null;            // v1.7.64: 断线菜单句柄失效
     // v1.7.31b fix: 限购计数断线清零（否则下个进服玩家继承"已购满"）
     for (int j = 0; j < SHOP_SLOTS; j++)
         g_iShopBought[client][j] = 0;
@@ -1864,6 +1888,20 @@ public void OnEntityCreated(int entity, const char[] classname)
     if (StrContains(classname, "witch") == -1)
         return;
     SDKHook(entity, SDKHook_OnTakeDamage, WitchTakeDamage);
+    // v1.7.64: 记录 Witch 实体（透视克隆目标；脏条目由同步计时器校验剔除）
+    if (g_hWitchList != null && g_hWitchList.FindValue(entity) == -1)
+        g_hWitchList.Push(entity);
+}
+
+// v1.7.64: Witch 实体销毁时从表剔除（同步计时器每 tick 也会懒校验）
+public void OnEntityDestroyed(int entity)
+{
+    if (g_hWitchList != null)
+    {
+        int idx = g_hWitchList.FindValue(entity);
+        if (idx != -1)
+            g_hWitchList.Erase(idx);
+    }
 }
 
 // v1.7.2: SI (re)spawn resets the hurt tracker — a fresh SI starts as
@@ -1901,6 +1939,7 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
         else
             SISystemDeath(victim, event);
 
+        WallhackRemoveTarget(victim);        // v1.7.64: 特感死亡 → 清它的透视克隆
         return Plugin_Continue;
     }
 
@@ -1914,6 +1953,7 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
         {
             SurvivorKilledWitch(attacker, event, entityid);
         }
+        WallhackRemoveTarget(entityid);      // v1.7.64: Witch 死亡 → 清它的透视克隆
         return Plugin_Continue;
     }
 
@@ -1923,6 +1963,8 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
         && IsClientInGame(victim) && GetClientTeam(victim) == 2)
     {
         g_iDeaths[victim]++;
+        if (g_bWallhack[victim])             // v1.7.64: 死亡 → 透视效果丢失（用户规则）
+            WallhackEnd(victim);
         if (attacker >= 1 && attacker <= MaxClients
             && attacker != victim && IsClientInGame(attacker)
             && GetClientTeam(attacker) == 2)
@@ -3227,6 +3269,13 @@ void ShopBuy(int client, int slot)
         return;
     }
 
+    // v1.7.64: 透视特感——生效期间不可重复购买（用户：不限购，效果结束可再买）
+    if (StrEqual(g_ShopTable[slot].classname, "wallhack") && g_bWallhack[client])
+    {
+        PrintToChat(client, "\x04[商店]\x01 透视特感已生效，生效期间不可重复购买");
+        return;
+    }
+
     g_iWallet[client] -= price;
     g_iShopBought[client][slot]++;
 
@@ -3296,6 +3345,13 @@ void ShopBuy(int client, int slot)
         return;
     }
 
+    // v1.7.64: 透视特感——不 spawn 物品，直接激活购买者视角（5 分钟）
+    if (StrEqual(g_ShopTable[slot].classname, "wallhack"))
+    {
+        WallhackStart(client, price);
+        return;
+    }
+
     // 落点：玩家面前 70 单位（购买时刻的方向）
     float pos[3], ang[3], fwd[3];
     GetClientEyePosition(client, pos);
@@ -3311,21 +3367,50 @@ void ShopBuy(int client, int slot)
         g_ShopTable[slot].name, price, g_iWallet[client]);
 }
 
+// v1.7.64: 商店菜单分类（武器/道具/医疗/其他）——分类菜单 → 商品菜单；
+// 再输入一次 !buy/!shop → 关闭当前菜单（用户需求）
+int    g_iShopCat[MAXPLAYERS + 1];    // 当前打开的商品分类（购买后重开同分类刷新）
+
 void OpenShopMenu(int client)
 {
-    Menu menu = new Menu(ShopMenuHandler);
+    Menu menu = new Menu(ShopCatMenuHandler);
     // v1.7.32c FIX: title 必须单行 — L4D2 VguiMenu 标题不支持 \n，
     // 多行标题 → 整个菜单不渲染（用户实测 !buy 无反应，!csm 的 Panel 单行正常）
     menu.SetTitle("商店: 可用 %d / 本关 %d / 复活币 %d 枚",
         g_iWallet[client], g_iTotalScore[client], g_iReviveCoins[client]);
+    menu.AddItem("0", "武器类");
+    menu.AddItem("1", "道具类");
+    menu.AddItem("2", "医疗类");
+    menu.AddItem("3", "其他");
+    menu.ExitButton = true;
+    g_hShopMenu[client] = menu;
+    menu.Display(client, 20);
+}
+
+void ShopCategoryMenu(int client, int cat)
+{
+    if (cat < 0 || cat > 3) cat = 3;
+    g_iShopCat[client] = cat;
+    char catNames[4][16] = { "武器类", "道具类", "医疗类", "其他" };
+    Menu menu = new Menu(ShopItemMenuHandler);
+    char title[96];
+    Format(title, sizeof(title), "%s: 可用 %d / 本关 %d / 复活币 %d 枚",
+        catNames[cat], g_iWallet[client], g_iTotalScore[client], g_iReviveCoins[client]);
+    menu.SetTitle(title);
 
     char info[4];
     char line[96];
     for (int i = 0; i < SHOP_SLOTS; i++)
     {
+        if (g_ShopTable[i].cat != cat)
+            continue;
         int price = g_ShopTable[i].price;
         int limit = g_ShopTable[i].limit;
-        if (limit <= 0)
+        if (i == WALLHACK_SLOT && g_bWallhack[client])
+        {
+            Format(line, sizeof(line), "%s (%d分) [透视生效中]", g_ShopTable[i].name, price);
+        }
+        else if (limit <= 0)
         {
             if (g_iWallet[client] < price)
                 Format(line, sizeof(line), "%s (%d分) [积分不足]", g_ShopTable[i].name, price);
@@ -3347,10 +3432,28 @@ void OpenShopMenu(int client)
         menu.AddItem(info, line);
     }
     menu.ExitButton = true;
+    g_hShopMenu[client] = menu;
     menu.Display(client, 20);
 }
 
-public int ShopMenuHandler(Menu menu, MenuAction action, int client, int item)
+public int ShopCatMenuHandler(Menu menu, MenuAction action, int client, int item)
+{
+    if (action == MenuAction_Select)
+    {
+        char info[4];
+        menu.GetItem(item, info, sizeof(info));
+        ShopCategoryMenu(client, StringToInt(info));
+    }
+    else if (action == MenuAction_End)
+    {
+        if (g_hShopMenu[client] == menu)   // 只清自己（旧菜单 End 不覆盖新菜单句柄）
+            g_hShopMenu[client] = null;
+        delete menu;
+    }
+    return 0;
+}
+
+public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int item)
 {
     if (action == MenuAction_Select)
     {
@@ -3358,10 +3461,12 @@ public int ShopMenuHandler(Menu menu, MenuAction action, int client, int item)
         menu.GetItem(item, info, sizeof(info));
         ShopBuy(client, StringToInt(info));
         if (IsClientInGame(client))
-            OpenShopMenu(client);   // 刷新余额/状态
+            ShopCategoryMenu(client, g_iShopCat[client]);   // 刷新余额/状态（留在当前分类）
     }
     else if (action == MenuAction_End)
     {
+        if (g_hShopMenu[client] == menu)   // 只清自己（旧菜单 End 不覆盖新菜单句柄）
+            g_hShopMenu[client] = null;
         delete menu;
     }
     return 0;
@@ -3371,6 +3476,14 @@ public Action Cmd_Shop(int client, int args)
 {
     if (client < 1 || !IsClientInGame(client))
         return Plugin_Handled;
+    // v1.7.64: 再输入一次 !buy/!shop → 关闭当前商店菜单（用户需求）
+    if (g_hShopMenu[client] != null)
+    {
+        CancelMenu(g_hShopMenu[client]);
+        g_hShopMenu[client] = null;
+        PrintToChat(client, "\x04[商店]\x01 商店菜单已关闭");
+        return Plugin_Handled;
+    }
     if (!g_cvEnable.BoolValue || !g_cvShopEnable.BoolValue)
     {
         PrintToChat(client, "\x04[商店]\x01 商店未开启");
@@ -3383,6 +3496,280 @@ public Action Cmd_Shop(int client, int args)
     }
     OpenShopMenu(client);
     return Plugin_Handled;
+}
+
+// ============================================================================
+// v1.7.64: 透视特感（!shop 特殊商品）——购买者独占的克隆轮廓透视
+// 原理（社区验证方案）：每个特感/Witch 建一个 prop_dynamic_override 克隆，
+// RENDER_TRANSCOLOR + alpha 0 隐藏网格（轮廓保留），m_iGlowType 3 恒定穿墙
+// 发光；SDKHook_SetTransmit 只让购买者收到克隆 → 只有购买者看到穿墙轮廓。
+// 同步：0.033s 全局计时器把克隆位置/朝向吸到目标身上（不 parent，避免
+// 父实体被 PVS 裁剪导致发光消失）。
+// ============================================================================
+
+void WallhackStart(int client, int price)
+{
+    g_bWallhack[client] = true;
+    if (g_hWallClones[client] == null)
+        g_hWallClones[client] = new ArrayList();
+    g_hWallhackTimer[client] = CreateTimer(WALLHACK_DURATION, Timer_WallhackExpire,
+        GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+    if (g_hWallhackSyncTimer == null)
+        g_hWallhackSyncTimer = CreateTimer(0.033, Timer_WallhackSync, INVALID_HANDLE, TIMER_REPEAT);
+    PrintToChat(client, "\x04[商店]\x01 已购买 \x05透视特感\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：特感穿墙轮廓生效 \x035 分钟\x01（死亡/切图/重开/闲置后失效）",
+        price, g_iWallet[client]);
+}
+
+void WallhackEnd(int client, bool silent = false)
+{
+    g_bWallhack[client] = false;
+    if (g_hWallhackTimer[client] != null)
+    {
+        KillTimer(g_hWallhackTimer[client]);
+        g_hWallhackTimer[client] = null;
+    }
+    if (g_hWallClones[client] != null)
+    {
+        for (int i = 0; i < g_hWallClones[client].Length; i++)
+        {
+            WallClone wc;
+            g_hWallClones[client].GetArray(i, wc);
+            if (IsValidEntity(wc.clone))
+                RemoveEntity(wc.clone);
+        }
+        g_hWallClones[client].Clear();
+    }
+    if (!silent && IsClientInGame(client))
+        PrintToChat(client, "\x04[商店]\x01 透视特感效果已结束");
+}
+
+void WallhackEndAll()
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (g_bWallhack[i])
+            WallhackEnd(i, true);
+    }
+}
+
+bool WallhackTargetValid(int target)
+{
+    if (target <= MaxClients)
+        return IsClientInGame(target) && IsPlayerAlive(target) && GetClientTeam(target) == 3;
+    return IsValidEntity(target) && IsWitchEntity(target);
+}
+
+bool WallhackHasClone(int buyer, int target)
+{
+    if (g_hWallClones[buyer] == null) return false;
+    for (int i = 0; i < g_hWallClones[buyer].Length; i++)
+    {
+        WallClone wc;
+        g_hWallClones[buyer].GetArray(i, wc);
+        if (wc.target == target) return true;
+    }
+    return false;
+}
+
+int WallhackCreateClone(int target)
+{
+    char model[192];
+    if (target <= MaxClients)
+        GetClientModel(target, model, sizeof(model));               // "infected/hunter.mdl"
+    else
+        GetEntPropString(target, Prop_Data, "m_ModelName", model, sizeof(model));  // "models/infected/witch.mdl"
+    if (StrContains(model, "models/") != 0)
+    {
+        char full[192];
+        Format(full, sizeof(full), "models/%s", model);
+        strcopy(model, sizeof(model), full);
+    }
+    PrecacheModel(model);
+
+    int clone = CreateEntityByName("prop_dynamic_override");
+    if (clone == -1)
+        return -1;
+
+    DispatchKeyValue(clone, "model", model);
+    DispatchKeyValue(clone, "solid", "0");
+    DispatchSpawn(clone);
+
+    // 穿墙恒定发光（0 = 无限距离）
+    SetEntProp(clone, Prop_Send, "m_iGlowType", 3);
+    SetEntProp(clone, Prop_Send, "m_nGlowRange", 0);
+    SetEntProp(clone, Prop_Send, "m_nGlowRangeMin", 0);
+    SetEntProp(clone, Prop_Send, "m_glowColorOverride", 255 | (0 << 8) | (0 << 16) | (255 << 24));  // 红
+
+    // 网格隐形（轮廓保留）——必须 RENDER_TRANSCOLOR，纯 SetEntityRenderColor 无效
+    SetEntityRenderMode(clone, RENDER_TRANSCOLOR);
+    SetEntityRenderColor(clone, 0, 0, 0, 0);
+
+    // 无碰撞（穿墙传送不会卡/推实体）——0 = SOLID_NONE / COLLISION_GROUP_NONE
+    SetEntProp(clone, Prop_Data, "m_nSolidType", 0);
+    SetEntProp(clone, Prop_Data, "m_CollisionGroup", 0);
+
+    SDKHook(clone, SDKHook_SetTransmit, WallhackTransmit);
+    return clone;
+}
+
+// 只有购买者能收到克隆实体 → 只有他看到发光轮廓
+public Action WallhackTransmit(int entity, int client)
+{
+    for (int b = 1; b <= MaxClients; b++)
+    {
+        if (!g_bWallhack[b] || g_hWallClones[b] == null) continue;
+        if (WallhackHasClone(b, entity))
+        {
+            if (b != client)
+                return Plugin_Handled;
+            return Plugin_Continue;
+        }
+    }
+    return Plugin_Continue;   // 不是我们的克隆，放行
+}
+
+void WallhackSyncClone(int clone, int target)
+{
+    float origin[3], ang[3];
+    if (target <= MaxClients)
+    {
+        GetClientAbsOrigin(target, origin);
+        GetClientAbsAngles(target, ang);
+    }
+    else
+    {
+        GetEntPropVector(target, Prop_Data, "m_vecAbsOrigin", origin);
+        GetEntPropVector(target, Prop_Data, "m_angRotation", ang);
+    }
+    TeleportEntity(clone, origin, ang, NULL_VECTOR);
+
+    // Witch 双形态（普通/怒）模型不同——同步模型保证轮廓贴合
+    if (target > MaxClients)
+    {
+        char model[192], cur[192];
+        GetEntPropString(target, Prop_Data, "m_ModelName", model, sizeof(model));
+        GetEntPropString(clone, Prop_Data, "m_ModelName", cur, sizeof(cur));
+        if (!StrEqual(model, cur))
+            SetEntityModel(clone, model);
+    }
+}
+
+void WallhackSyncBuyer(int buyer)
+{
+    if (g_hWallClones[buyer] == null)
+        return;
+
+    // 1) 清理失效克隆（目标死亡/消失）
+    for (int i = g_hWallClones[buyer].Length - 1; i >= 0; i--)
+    {
+        WallClone wc;
+        g_hWallClones[buyer].GetArray(i, wc);
+        if (!WallhackTargetValid(wc.target) || !IsValidEntity(wc.clone))
+        {
+            if (IsValidEntity(wc.clone))
+                RemoveEntity(wc.clone);
+            g_hWallClones[buyer].Erase(i);
+        }
+    }
+
+    // 2) 补齐新刷新的特感 / Witch
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != 3)
+            continue;
+        if (WallhackHasClone(buyer, i))
+            continue;
+        int clone = WallhackCreateClone(i);
+        if (clone <= 0) continue;
+        WallClone wc;
+        wc.clone = clone;
+        wc.target = i;
+        g_hWallClones[buyer].PushArray(wc);
+    }
+    for (int i = 0; i < g_hWitchList.Length; i++)
+    {
+        int w = g_hWitchList.Get(i);
+        if (!WallhackTargetValid(w))
+        {
+            g_hWitchList.Erase(i--);
+            continue;
+        }
+        if (WallhackHasClone(buyer, w))
+            continue;
+        int clone = WallhackCreateClone(w);
+        if (clone <= 0) continue;
+        WallClone wc;
+        wc.clone = clone;
+        wc.target = w;
+        g_hWallClones[buyer].PushArray(wc);
+    }
+
+    // 3) 位置/朝向同步
+    for (int i = 0; i < g_hWallClones[buyer].Length; i++)
+    {
+        WallClone wc;
+        g_hWallClones[buyer].GetArray(i, wc);
+        WallhackSyncClone(wc.clone, wc.target);
+    }
+}
+
+Action Timer_WallhackSync(Handle timer)
+{
+    bool any = false;
+    for (int b = 1; b <= MaxClients; b++)
+    {
+        if (!g_bWallhack[b] || !IsClientInGame(b))
+            continue;
+        any = true;
+        WallhackSyncBuyer(b);
+    }
+    if (!any)
+    {
+        g_hWallhackSyncTimer = null;
+        return Plugin_Stop;   // 无购买者 → 停表
+    }
+    return Plugin_Continue;
+}
+
+Action Timer_WallhackExpire(Handle timer, int userId)
+{
+    int client = GetClientOfUserId(userId);
+    if (client >= 1 && client <= MaxClients)
+    {
+        g_hWallhackTimer[client] = null;   // 先置空，避免 WallhackEnd 自杀计时器
+        WallhackEnd(client);
+    }
+    return Plugin_Continue;
+}
+
+void WallhackRemoveTarget(int target)
+{
+    for (int b = 1; b <= MaxClients; b++)
+    {
+        if (!g_bWallhack[b] || g_hWallClones[b] == null)
+            continue;
+        for (int i = g_hWallClones[b].Length - 1; i >= 0; i--)
+        {
+            WallClone wc;
+            g_hWallClones[b].GetArray(i, wc);
+            if (wc.target == target)
+            {
+                if (IsValidEntity(wc.clone))
+                    RemoveEntity(wc.clone);
+                g_hWallClones[b].Erase(i);
+            }
+        }
+    }
+}
+
+public Action Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
+{
+    int client = GetClientOfUserId(event.GetInt("userid"));
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+        return Plugin_Continue;
+    if (event.GetInt("team") != 2 && g_bWallhack[client])   // 闲置/旁观/换队 → 透视失效
+        WallhackEnd(client);
+    return Plugin_Continue;
 }
 
 public Action Cmd_LaserTest(int client, int args)
