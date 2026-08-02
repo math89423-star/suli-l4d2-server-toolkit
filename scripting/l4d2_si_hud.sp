@@ -670,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.68"
+#define PLUGIN_VERSION "1.7.69"
 
 // ============================================================================
 // ConVar handles
@@ -846,7 +846,9 @@ int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（O
 // v1.7.64: 透视特感（!shop 特殊商品）——购买者独占的克隆轮廓透视
 #define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
 #define WALLHACK_DURATION   180.0   // v1.7.67: 3 分钟（用户定稿，原 300=5 分钟）
+#define WALLHACK_CAP        900.0   // v1.7.69: 可续费，单次效果累计上限 15 分钟（用户定稿）
 bool      g_bWallhack[MAXPLAYERS + 1];          // 透视生效中
+float     g_fWallhackEnd[MAXPLAYERS + 1];       // v1.7.69: 效果结束的 GameTime（续费累计）
 Handle    g_hWallhackTimer[MAXPLAYERS + 1];     // 到期计时器
 Handle    g_hWallhackWarnTimer[MAXPLAYERS + 1]; // v1.7.68: 结束前 30 秒提醒计时器
 Handle    g_hWallhackSyncTimer;                 // 补光心跳（0.5s，无购买者自动停）
@@ -3265,11 +3267,15 @@ void ShopBuy(int client, int slot)
         return;
     }
 
-    // v1.7.64: 透视特感——生效期间不可重复购买（用户：不限购，效果结束可再买）
+    // v1.7.69: 透视特感——生效期间可续费，累计上限 15 分钟（900 秒）
     if (StrEqual(g_ShopTable[slot].classname, "wallhack") && g_bWallhack[client])
     {
-        PrintToChat(client, "\x04[商店]\x01 透视特感已生效，生效期间不可重复购买");
-        return;
+        float now = GetGameTime();
+        if (g_fWallhackEnd[client] - now >= WALLHACK_CAP)
+        {
+            PrintToChat(client, "\x04[商店]\x01 特感透视已达上限 \x0315 分钟\x01（900 秒），无法继续续费");
+            return;
+        }
     }
 
     g_iWallet[client] -= price;
@@ -3404,7 +3410,7 @@ void ShopCategoryMenu(int client, int cat)
         int limit = g_ShopTable[i].limit;
         if (i == WALLHACK_SLOT && g_bWallhack[client])
         {
-            Format(line, sizeof(line), "%s (%d分) [透视生效中]", g_ShopTable[i].name, price);
+            Format(line, sizeof(line), "%s (%d分) [透视生效中·可续费]", g_ShopTable[i].name, price);
         }
         else if (limit <= 0)
         {
@@ -3511,20 +3517,54 @@ public Action Cmd_Shop(int client, int args)
 
 void WallhackStart(int client, int price)
 {
+    // v1.7.69: 续费逻辑——已有剩余时长 + 180s，封顶 WALLHACK_CAP（900s）
+    bool renew = g_bWallhack[client];
+    float now = GetGameTime();
+    float remaining = (renew && g_fWallhackEnd[client] > now) ? g_fWallhackEnd[client] - now : 0.0;
+    float total = remaining + WALLHACK_DURATION;
+    if (total > WALLHACK_CAP)
+        total = WALLHACK_CAP;
+
     g_bWallhack[client] = true;
-    g_hWallhackTimer[client] = CreateTimer(WALLHACK_DURATION, Timer_WallhackExpire,
+    g_fWallhackEnd[client] = now + total;
+
+    // 重启到期计时器（续费时旧计时器作废重排）
+    if (g_hWallhackTimer[client] != null)
+    {
+        KillTimer(g_hWallhackTimer[client]);
+        g_hWallhackTimer[client] = null;
+    }
+    g_hWallhackTimer[client] = CreateTimer(total, Timer_WallhackExpire,
         GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
-    // v1.7.68: 结束前 30 秒提醒（一次性）
-    g_hWallhackWarnTimer[client] = CreateTimer(WALLHACK_DURATION - 30.0, Timer_WallhackWarn,
-        GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+    // v1.7.68: 结束前 30 秒提醒（一次性；剩余不足 30s 不排）
+    if (g_hWallhackWarnTimer[client] != null)
+    {
+        KillTimer(g_hWallhackWarnTimer[client]);
+        g_hWallhackWarnTimer[client] = null;
+    }
+    if (total > 30.0)
+        g_hWallhackWarnTimer[client] = CreateTimer(total - 30.0, Timer_WallhackWarn,
+            GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+
     if (g_hWallhackSyncTimer == null)
         g_hWallhackSyncTimer = CreateTimer(0.5, Timer_WallhackSync, INVALID_HANDLE, TIMER_REPEAT);
-    LogMessage("[wallhack] start client=%N wallet=%d", client, g_iWallet[client]);
-    PrintToChat(client, "\x04[商店]\x01 已购买 \x05透视特感\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：特感蓝色高亮生效 \x033 分钟\x01（全队可见；死亡/切图/重开/闲置后失效）",
-        price, g_iWallet[client]);
-    // v1.7.68: 全服播报购买（y 键聊天可见）
+
+    LogMessage("[wallhack] %s client=%N wallet=%d total=%.0fs", renew ? "renew" : "start",
+        client, g_iWallet[client], total);
+    int secs = RoundToNearest(total);
+    if (renew)
+    {
+        PrintToChat(client, "\x04[商店]\x01 已续费 \x05透视特感\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），剩余生效时长：\x03%d\x01 秒",
+            price, g_iWallet[client], secs);
+    }
+    else
+    {
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05透视特感\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：特感蓝色高亮生效，剩余生效时长：\x03%d\x01 秒（全队可见；死亡/切图/重开/闲置后失效）",
+            price, g_iWallet[client], secs);
+    }
+    // v1.7.68: 全服播报购买/续费（y 键聊天可见）
     PrintToChatAll("\x04[商店]\x01 \x05%N\x01 购买了特感透视，剩余生效时长：\x03%d\x01 秒",
-        client, RoundToNearest(WALLHACK_DURATION));
+        client, secs);
     WallhackApplyGlow();   // 立即上光（不等首 tick）
 }
 
@@ -3574,6 +3614,7 @@ void WallhackClearGlow()
 void WallhackEnd(int client, bool silent = false)
 {
     g_bWallhack[client] = false;
+    g_fWallhackEnd[client] = 0.0;   // v1.7.69: 累计清零
     if (g_hWallhackTimer[client] != null)
     {
         KillTimer(g_hWallhackTimer[client]);
