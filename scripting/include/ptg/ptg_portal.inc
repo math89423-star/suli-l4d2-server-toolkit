@@ -49,6 +49,9 @@ stock void Portal_InitBuild()
     g_hPortalExcluded = new StringMap();
     delete g_hCornerCache;
     g_hCornerCache = new ArrayList(PORTAL_STRIDE);
+    g_iPortalDiagNeighbors = 0;
+    g_iPortalDiagLookupMiss = 0;
+    g_iPortalDiagClassified = 0;
 }
 
 stock void Portal_Clear()
@@ -78,6 +81,9 @@ stock void Portal_FinishBuild()
     if (g_hPortalExcluded != null) excluded = g_hPortalExcluded.Size;
     LogMessage("[PTG] Portal classification: %d walkable / %d excluded pairs (%d nav areas) — portal waypoints + human-capability edge filter active",
         walkable, excluded, (g_hAStarNodes != null) ? g_hAStarNodes.Length : 0);
+    // v4.7.1 diagnostic counters — remove once the build is verified
+    LogMessage("[PTG] Portal diag: enumerated=%d lookupMiss=%d classified=%d (cache=%d excluded=%d)",
+        g_iPortalDiagNeighbors, g_iPortalDiagLookupMiss, g_iPortalDiagClassified, walkable, excluded);
 }
 
 // Cache the 4 corners of one nav area (4 GetCorner native calls).
@@ -342,10 +348,11 @@ stock bool Portal_ComputeBatch(int count)
     int neighborInt = 0;
     int neighborIdx = 0;
     char key[16];
+    int processedInBatch = 0; // v4.7.1: local counter — (i-cursor) was always -1
 
     for (int i = g_iPortalBatchIdx; i < endIdx; i++)
     {
-        if ((i - g_iPortalBatchIdx) % 25 == 0 && i != g_iPortalBatchIdx)
+        if (processedInBatch > 0 && processedInBatch % 25 == 0)
         {
             if ((GetEngineTime() - t0) * 1000.0 >= maxMs)
             {
@@ -365,20 +372,34 @@ stock bool Portal_ComputeBatch(int count)
         {
             adjScratch.Clear();
             L4D_NavArea_GetAdjacentAreas(areaAddr, dir, adjScratch);
+            g_iPortalDiagNeighbors += adjScratch.Length;
             for (int n = 0; n < adjScratch.Length; n++)
             {
                 neighborInt = adjScratch.Get(n);
                 if (neighborInt == 0 || neighborInt == areaInt) continue;
                 IntToString(neighborInt, key, sizeof(key));
-                if (!g_hAStarAreaToIndex.GetValue(key, neighborIdx)) continue;
+                if (!g_hAStarAreaToIndex.GetValue(key, neighborIdx))
+                {
+                    g_iPortalDiagLookupMiss++;
+                    continue;
+                }
                 if (neighborIdx >= i) continue; // classified when the max index is processed
                 Portal_ClassifyPair(neighborIdx, i);
+                g_iPortalDiagClassified++;
             }
         }
         g_iPortalBatchIdx = i + 1;
+        processedInBatch++;
     }
     delete adjScratch;
-    g_iPortalBatchIdx = nodeCount; // fully done
+    // v4.7.2: the loop only ran `count` areas (endIdx = cursor + count), so a
+    // clean loop exit does NOT mean the build is done. Declaring completion
+    // here skipped every area past the first batch — on a fast machine the
+    // first 100 areas finished inside the budget, g_iPortalBatchIdx jumped to
+    // nodeCount, and 1152/1252 areas were never classified (diag showed
+    // enumerated=310 classified=13 for a 1252-area map).
+    if (g_iPortalBatchIdx < nodeCount)
+        return false; // more areas remain — caller resumes next frame
     return true;
 }
 

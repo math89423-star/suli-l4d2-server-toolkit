@@ -187,8 +187,8 @@ public void OnPluginStart()
     g_hCvarPortals = CreateConVar("l4d_path_to_goal_portals", "1",
     "Shared-edge portal waypoints + human-capability edge filter (requires left4dhooks L4D_NavArea_GetCorner). 0=legacy nav-center waypoints.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_hCvarPortalMinOverlap = CreateConVar("l4d_path_to_goal_portal_min_overlap", "12.0",
-    "Minimum shared-edge overlap (units) for a portal to count as a walkable boundary. Below this the pair is a jump link / gap.",FCVAR_NOTIFY, true, 4.0, true, 64.0);
+    g_hCvarPortalMinOverlap = CreateConVar("l4d_path_to_goal_portal_min_overlap", "24.0",
+    "Minimum shared-edge overlap (units) for a portal to count as a walkable boundary. Below this the pair is a jump link / gap. v4.7.3: 12→24 — a 12u seam is narrower than the player hull (32u), portal centers sat on walls (side:2-3 + blocked segments).",FCVAR_NOTIFY, true, 4.0, true, 64.0);
 
     g_hCvarPortalMaxDz = CreateConVar("l4d_path_to_goal_portal_max_dz", "48.0",
     "Max Z delta (units) across a shared edge treated as plain walking. Above this the edge is classified as vault (arc-validated) or excluded.",FCVAR_NOTIFY, true, 16.0, true, 120.0);

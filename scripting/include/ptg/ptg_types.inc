@@ -225,6 +225,11 @@ int g_iPullLastSrc = 0;           // string-pull source index of the last commit
 ArrayList g_hSSFAPortals = null;  // SSFA: PortalInfo chain between consecutive cells
 ArrayList g_hSSFAPath = null;     // SSFA: output waypoints (float[3])
 
+// v4.7.1: portal build diagnostics (temporary counters — see FinishBuild log)
+int g_iPortalDiagNeighbors = 0;   // raw adjacent areas enumerated
+int g_iPortalDiagLookupMiss = 0;  // areaToIndex lookups that missed
+int g_iPortalDiagClassified = 0;  // pairs actually classified
+
 // GetNavConnections filter
 #define CON_KEEP_ALL 0 // keep all adjacent connections
 #define CON_KEEP_FORWARD 1 // keep only forward-going adjacent connections

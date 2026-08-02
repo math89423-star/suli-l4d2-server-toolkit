@@ -689,6 +689,9 @@ void OnFramePrep(bool new_frame = true)
 
             if (g_bFoundRescueVehicle)
             {
+                // v4.7.4 FIX: dirty rebuild 时 STAGE_SMOOTH 的初始化被 g_bFoundRescueVehicle 包裹，
+                // 可能没执行 → 这里 null 崩溃（Invalid Handle 0, 实测 c3m4 10:01:55）→ 管线卡死 please wait
+                if (explored_finale == null) explored_finale = new ArrayList();
                 RescueVehicleCells.GetArray(RescueVehicleCells.Length-1, cell, sizeof(Cell));
                 static float pos_curr[3];
                 float flow_curr = cell.flow;
@@ -788,6 +791,9 @@ void OnFramePrep(bool new_frame = true)
             // background. Only when the portal build is active (the refined
             // center path is already fast to validate without it). The busy
             // gate makes drawers snapshot while STAGE_VALIDATE mutates cells.
+            // NOTE: guide_ready must NOT be set here — OnFramePrep's abort
+            // guard (pipeline.inc:194) kills the pipeline the next tick when
+            // guide_ready flips true early; the pipeline-done branch sets it.
             if (g_hCvarCoarseFirst != null && g_hCvarCoarseFirst.BoolValue
                 && Portal_Active() && !g_bCoarseDrawn
                 && g_GuideCells != null && g_GuideCells.Length >= 2
@@ -795,7 +801,6 @@ void OnFramePrep(bool new_frame = true)
             {
                 g_bCoarseDrawn = true;
                 g_bGuideCellsBusy = true;
-                guide_ready = true;
                 g_iPathGen++;
                 Guide_RedrawAllToggled();
                 LogMessage("[PTG] Coarse portal line drawn (%d cells) — validating in background", g_GuideCells.Length);

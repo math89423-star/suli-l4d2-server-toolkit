@@ -56,6 +56,13 @@ void Guide_ValidateWalkable_Frame(any unused)
                     g_GuideCells.GetArray(b, bc1, sizeof(Cell));
                     g_GuideCells.GetArray(b + 1, bc2, sizeof(Cell));
                     if (bc1.navArea == Address_Null || bc2.navArea == Address_Null) continue;
+                    // v4.7.3 diag: locate each blocked beam (temporary — remove
+                    // after the blocked-pair mystery is solved)
+                    LogMessage("[PTG] HV-blocked[%d] len=%.0f dz=%.0f p1=(%.0f,%.0f,%.0f) a1=%d p2=(%.0f,%.0f,%.0f) a2=%d",
+                        b, GetVectorDistance(bc1.center, bc2.center),
+                        bc2.center[2] - bc1.center[2],
+                        bc1.center[0], bc1.center[1], bc1.center[2], view_as<int>(bc1.navArea),
+                        bc2.center[0], bc2.center[1], bc2.center[2], view_as<int>(bc2.navArea));
                     char ekey[48];
                     Format(ekey, sizeof(ekey), "%d|%d", view_as<int>(bc1.navArea), view_as<int>(bc2.navArea));
                     g_hBlockedEdges.SetValue(ekey, 1);
