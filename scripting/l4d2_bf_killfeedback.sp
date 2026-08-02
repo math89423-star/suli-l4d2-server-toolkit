@@ -80,7 +80,7 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "4.4.2"
+#define PLUGIN_VERSION "4.4.3"
 
 // ============================================================================
 // ConVars — hold file paths relative to sound/ (WITH extension)
@@ -323,13 +323,12 @@ void PlayClientSound(int client, const char[] sound)
     float vol = g_cvVolume.FloatValue;
     if (vol <= 0.0) return;
 
-    // SOUND_FROM_PLAYER (-2) = non-spatialized UI sound.
-    // v4.4.2 CHANNEL TEST: SNDCHAN_STATIC → SNDCHAN_AUTO — STATIC rides the
-    // client music/UI bus (attenuated by the player's music volume slider),
-    // which is why peak-0dB files still sounded quiet. AUTO = main FX bus.
-    // volume must stay ≤ 1.0: the engine handles >1.0 unpredictably (实测 1.5
-    // played QUIETER than 1.0, user-confirmed).
-    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_AUTO,
+    // v4.4.3 SPATIAL TEST: SOUND_FROM_PLAYER (non-spatialized) → entity=client
+    // (spatialized). Engine sounds that players hear as LOUD (e.g. the incap
+    // thud) are spatialized from entities — non-spatialized UI sounds suffer a
+    // fixed attenuation. Listener = source (distance 0) → attenuation ≈ 1.0.
+    // volume stays ≤ 1.0: engine handles >1.0 unpredictably (实测, user-confirmed).
+    EmitSoundToClient(client, sound, client, SNDCHAN_AUTO,
         SNDLEVEL_NORMAL, SND_NOFLAGS, vol);
 }
 

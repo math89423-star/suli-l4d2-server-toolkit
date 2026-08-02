@@ -548,7 +548,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.48"
+#define PLUGIN_VERSION "1.7.49"
 
 // ============================================================================
 // ConVar handles
@@ -2638,13 +2638,12 @@ void PlayStreakSound(int client, const char[] sound)
         return;
 
     // v1.7.1 FIX: full path (with .mp3) — bare names resolve to .wav only.
-    // SOUND_FROM_PLAYER = non-spatialized UI sound, same as bf_killfeedback.
-    // v1.7.48 CHANNEL TEST: SNDCHAN_STATIC → SNDCHAN_AUTO — STATIC rides the
-    // client music/UI bus (attenuated by the player's music volume slider),
-    // which is why peak-0dB files still sounded quiet. AUTO = main FX bus.
-    // Volume stays ≤ 1.0: engine handles >1.0 unpredictably (实测 1.5 played
-    // QUIETER than 1.0, user-confirmed).
-    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_AUTO,
+    // v1.7.49 SPATIAL TEST: SOUND_FROM_PLAYER (non-spatialized) → entity=client
+    // (spatialized). Engine sounds that players hear as LOUD (e.g. the incap
+    // thud) are spatialized from entities — non-spatialized UI sounds suffer a
+    // fixed attenuation. Listener = source (distance 0) → attenuation ≈ 1.0.
+    // Volume stays ≤ 1.0: engine handles >1.0 unpredictably (实测, user-confirmed).
+    EmitSoundToClient(client, sound, client, SNDCHAN_AUTO,
         SNDLEVEL_NORMAL, SND_NOFLAGS, vol);
 }
 
@@ -2708,8 +2707,9 @@ void PlayClientSound(int client, const char[] sound)
         return;
 
     // v1.7.1 FIX: full path (with .mp3) — bare names resolve to .wav only.
-    // v1.7.48: SNDCHAN_STATIC → AUTO (same reason as PlayStreakSound).
-    EmitSoundToClient(client, sound, SOUND_FROM_PLAYER, SNDCHAN_AUTO,
+    // v1.7.49: SOUND_FROM_PLAYER → entity=client (spatialized, same as
+    // PlayStreakSound — non-spatialized UI sounds attenuate).
+    EmitSoundToClient(client, sound, client, SNDCHAN_AUTO,
         SNDLEVEL_NORMAL, SND_NOFLAGS, vol >= 1.0 ? 1.0 : vol);
 }
 
