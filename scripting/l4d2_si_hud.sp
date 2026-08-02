@@ -11,6 +11,27 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.7.63:
+ *   - 奖励倍率改每档手配，加速曲线 (user 拍板): 旧 mult_step 每档 +1.5
+ *     线性步进导致各段奖励增量近似持平（+299/+254/+283/+312/+341），
+ *     杀 20 头和杀 100 头每档多拿的钱差不多，高段无激励。现在每档独立
+ *     配置倍率 10/14/19/25/32/40（si_hud_streak_bonus_mult_l1..l6，
+ *     删除 si_hud_streak_bonus_mult_step）：满档奖励 260/624/995/1483/
+ *     2107/2887，增量逐段放大 +260/+364/+371/+488/+624/+780。
+ *     段边界与音效档位不变（hw 20/40/55/70/85/100，音效自动跟随）。
+ *
+ * Changelog v1.7.62:
+ *   - 音效档位重构为 L1..L6，对齐人头阶梯 (user 拍板): 旧音效档
+ *     si_hud_streak_score_l2..l15（200/400/700/1100/1500/2000 分）是
+ *     历史遗留——编号源自更早的连杀数量档（2/4/6/9/12/15 杀），v1.7.4
+ *     改成按分数判定时没改名，导致"26 小僵尸 hw=26 落 20-40 段却播 400
+ *     档音效"的错位。现在音效档位与奖励共用同一把尺子（hw 段）：
+ *     L1=20-39 spotting、L2=40-54 purchase、L3=55-69 war_bonds、
+ *     L4=70-84 dogtag、L5=85-99 medal、L6=100+ rankup。删除全部
+ *     si_hud_streak_score_l2..l15 cvar；旧 si_hud_streak_sound_l2/l4/l6/
+ *     l9/l12/l15 更名 si_hud_streak_sound_l1..l6。v1.7.60 门控保证
+ *     hw>=20，结算必有音效（最低 L1），无静默档。
+ *
  * Changelog v1.7.61:
  *   - 音效档位改按结算总额判定 (user 实测): 26 小僵尸 (hw=26) 达标发 +350
  *     奖励、结算卡 +490，却因击杀分 140 < L2(200) 落在无声档——奖励已发
@@ -649,7 +670,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.7.61"
+#define PLUGIN_VERSION "1.7.63"
 
 // ============================================================================
 // ConVar handles
@@ -677,7 +698,11 @@ ConVar g_cvStreakHwL4;
 ConVar g_cvStreakHwL5;
 ConVar g_cvStreakHwL6;
 ConVar g_cvStreakBonusMultL1;      // v1.7.53: 一级档位倍率
-ConVar g_cvStreakBonusMultStep;    // v1.7.53: 每档倍率增量
+ConVar g_cvStreakBonusMultL2;      // v1.7.63: 每档手配倍率（替换 mult_step 步进）
+ConVar g_cvStreakBonusMultL3;
+ConVar g_cvStreakBonusMultL4;
+ConVar g_cvStreakBonusMultL5;
+ConVar g_cvStreakBonusMultL6;
 ConVar g_cvStreakBonusCoeff;       // v1.7.53: 奖励公式系数 1.3
 ConVar g_cvCommonEnable;
 ConVar g_cvCommonTime;
@@ -697,12 +722,6 @@ ConVar g_cvDmgMultAuto;
 ConVar g_cvDmgMultSniper;
 ConVar g_cvDmgMultOther;
 ConVar g_cvPointsRescue;                 // v1.7.51: 救援奖励分
-ConVar g_cvStreakScoreL2;
-ConVar g_cvStreakScoreL4;
-ConVar g_cvStreakScoreL6;
-ConVar g_cvStreakScoreL9;
-ConVar g_cvStreakScoreL12;
-ConVar g_cvStreakScoreL15;
 ConVar g_cvScoreboardEnable;
 ConVar g_cvScoreboardTop;
 ConVar g_cvScoreboardInterval;
@@ -725,12 +744,12 @@ ConVar g_cvSoundCooldown;
 
 ConVar g_cvStreakEnable;
 ConVar g_cvStreakVol;
+ConVar g_cvStreakSnd1;
 ConVar g_cvStreakSnd2;
+ConVar g_cvStreakSnd3;
 ConVar g_cvStreakSnd4;
+ConVar g_cvStreakSnd5;
 ConVar g_cvStreakSnd6;
-ConVar g_cvStreakSnd9;
-ConVar g_cvStreakSnd12;
-ConVar g_cvStreakSnd15;
 
 // ============================================================================
 // Global state
@@ -931,9 +950,20 @@ public void OnPluginStart()
     g_cvStreakHwL6 = CreateConVar("si_hud_streak_hw_l6", "100",
         "Weighted-head bonus tier 6 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
     g_cvStreakBonusMultL1 = CreateConVar("si_hud_streak_bonus_mult_l1", "10",
-        "Bonus formula: tier-1 multiplier (reward = threshold × coeff × mult).", FCVAR_NOTIFY, true, 1.0, true, 100.0);
-    g_cvStreakBonusMultStep = CreateConVar("si_hud_streak_bonus_mult_step", "1.5",
-        "Bonus formula: multiplier +this per extra tier.", FCVAR_NOTIFY, true, 0.0, true, 100.0);
+        "Bonus formula: tier-1 multiplier (reward = heads × coeff × mult).", FCVAR_NOTIFY, true, 1.0, true, 100.0);
+    // v1.7.63 (user 拍板): 每档手配倍率，加速曲线——10/14/19/25/32/40，
+    // 满档奖励 260/624/995/1483/2107/2887，高段增量逐段放大（+260/+364/
+    // +371/+488/+624/+780），替代旧 mult_step 线性步进。
+    g_cvStreakBonusMultL2 = CreateConVar("si_hud_streak_bonus_mult_l2", "14",
+        "Bonus formula: tier-2 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
+    g_cvStreakBonusMultL3 = CreateConVar("si_hud_streak_bonus_mult_l3", "19",
+        "Bonus formula: tier-3 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
+    g_cvStreakBonusMultL4 = CreateConVar("si_hud_streak_bonus_mult_l4", "25",
+        "Bonus formula: tier-4 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
+    g_cvStreakBonusMultL5 = CreateConVar("si_hud_streak_bonus_mult_l5", "32",
+        "Bonus formula: tier-5 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
+    g_cvStreakBonusMultL6 = CreateConVar("si_hud_streak_bonus_mult_l6", "40",
+        "Bonus formula: tier-6 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
     g_cvStreakBonusCoeff = CreateConVar("si_hud_streak_bonus_coeff", "1.3",
         "Bonus formula coefficient.", FCVAR_NOTIFY, true, 0.0, true, 100.0);
     // v1.7.51: 救援奖励分 (user)——救援队友计入连杀（刷新窗口+滚动分+结算卡）
@@ -986,21 +1016,9 @@ public void OnPluginStart()
     g_cvDmgMultOther = CreateConVar("si_hud_bf_damage_mult_other", "1.0",
         "Damage mult: everything else (pistol etc.).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
-    // v1.7.4: award tiers trigger on the SETTLED STREAK SCORE (not kill
-    // count) — commons score little, so spamming zombies cannot cheaply
-    // climb the tiers; a single Tank kill (500) lands in tier 4.
-    g_cvStreakScoreL2 = CreateConVar("si_hud_streak_score_l2", "200",
-        "Award tier score threshold: 200+ → spotting (was 2-3 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
-    g_cvStreakScoreL4 = CreateConVar("si_hud_streak_score_l4", "400",
-        "Award tier score threshold: 400+ → purchase (was 4-5 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
-    g_cvStreakScoreL6 = CreateConVar("si_hud_streak_score_l6", "700",
-        "Award tier score threshold: 700+ → war_bonds (was 6-8 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
-    g_cvStreakScoreL9 = CreateConVar("si_hud_streak_score_l9", "1100",
-        "Award tier score threshold: 1100+ → dogtag (was 9-11 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
-    g_cvStreakScoreL12 = CreateConVar("si_hud_streak_score_l12", "1500",
-        "Award tier score threshold: 1500+ → medal (was 12-14 streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
-    g_cvStreakScoreL15 = CreateConVar("si_hud_streak_score_l15", "2000",
-        "Award tier score threshold: 2000+ → rankup (was 15+ streak).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    // v1.7.62: score-based award tiers (si_hud_streak_score_l2..l15) REMOVED —
+    // sound tiers now follow the hw segments (L1..L6) directly, one ladder
+    // for both bonus amount and sound (user 拍板, 2026-08-02).
 
     // v1.7.6: Y-key chat scoreboard — !rank / !score / !top
     g_cvScoreboardEnable = CreateConVar("si_hud_scoreboard_enable", "1",
@@ -1068,18 +1086,21 @@ public void OnPluginStart()
     // v1.7.2: all six awards re-mastered to a uniform loudness (loudnorm,
     // mean ≈ -15 dB) and re-shipped under the bf_award_* names so clients
     // are forced to re-download them (old bf_streak_* files deleted).
-    g_cvStreakSnd2 = CreateConVar("si_hud_streak_sound_l2", "battlefield/bf_award_spotting.mp3",
-        "Streak 2-3 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd4 = CreateConVar("si_hud_streak_sound_l4", "battlefield/bf_award_purchase.mp3",
-        "Streak 4-5 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd6 = CreateConVar("si_hud_streak_sound_l6", "battlefield/bf_award_war_bonds.mp3",
-        "Streak 6-8 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd9 = CreateConVar("si_hud_streak_sound_l9", "battlefield/bf_award_dogtag.mp3",
-        "Streak 9-11 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd12 = CreateConVar("si_hud_streak_sound_l12", "battlefield/bf_award_medal.mp3",
-        "Streak 12-14 award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
-    g_cvStreakSnd15 = CreateConVar("si_hud_streak_sound_l15", "battlefield/bf_award_rankup.mp3",
-        "Streak 15+ award sound (file path relative to sound/, empty=off).", FCVAR_NOTIFY);
+    // v1.7.62 (user): 音效档位 = 人头阶梯段位 L1..L6（与奖励同一把尺子）。
+    // 段位编号直接对应 hw 段：L1=20-39、L2=40-54、L3=55-69、L4=70-84、
+    // L5=85-99、L6=100+。
+    g_cvStreakSnd1 = CreateConVar("si_hud_streak_sound_l1", "battlefield/bf_award_spotting.mp3",
+        "Award sound tier L1 (hw 20-39, smallest bonus) — file relative to sound/, empty=off.", FCVAR_NOTIFY);
+    g_cvStreakSnd2 = CreateConVar("si_hud_streak_sound_l2", "battlefield/bf_award_purchase.mp3",
+        "Award sound tier L2 (hw 40-54).", FCVAR_NOTIFY);
+    g_cvStreakSnd3 = CreateConVar("si_hud_streak_sound_l3", "battlefield/bf_award_war_bonds.mp3",
+        "Award sound tier L3 (hw 55-69).", FCVAR_NOTIFY);
+    g_cvStreakSnd4 = CreateConVar("si_hud_streak_sound_l4", "battlefield/bf_award_dogtag.mp3",
+        "Award sound tier L4 (hw 70-84).", FCVAR_NOTIFY);
+    g_cvStreakSnd5 = CreateConVar("si_hud_streak_sound_l5", "battlefield/bf_award_medal.mp3",
+        "Award sound tier L5 (hw 85-99).", FCVAR_NOTIFY);
+    g_cvStreakSnd6 = CreateConVar("si_hud_streak_sound_l6", "battlefield/bf_award_rankup.mp3",
+        "Award sound tier L6 (hw 100+, biggest bonus).", FCVAR_NOTIFY);
 
     AutoExecConfig(true, "l4d2_si_hud");
 
@@ -1271,15 +1292,15 @@ public Action Cmd_StreakTest(int client, int args)
     if (client < 1 || !IsClientInGame(client))
         return Plugin_Handled;
 
-    char l2[PLATFORM_MAX_PATH], si[PLATFORM_MAX_PATH];
-    g_cvStreakSnd2.GetString(l2, sizeof(l2));
+    char l1[PLATFORM_MAX_PATH], si[PLATFORM_MAX_PATH];
+    g_cvStreakSnd1.GetString(l1, sizeof(l1));
     g_cvSoundSI.GetString(si, sizeof(si));
 
-    PlayStreakSound(client, l2);
+    PlayStreakSound(client, l1);
     PlayClientSound(client, si);
 
-    LogMessage("[streak_test] L2='%s' SI='%s' emitted to %N", l2, si, client);
-    PrintToChat(client, "\x04[streak test]\x01 L2='%s'  SI='%s'", l2, si);
+    LogMessage("[streak_test] L1='%s' SI='%s' emitted to %N", l1, si, client);
+    PrintToChat(client, "\x04[streak test]\x01 L1='%s'  SI='%s'", l1, si);
     return Plugin_Handled;
 }
 
@@ -1429,12 +1450,12 @@ public void OnMapStart()
     PrecacheCvarSound(g_cvSoundWitch);
     PrecacheCvarSound(g_cvSoundMelee);
     PrecacheCvarSound(g_cvSoundCommonHS);
+    PrecacheCvarSound(g_cvStreakSnd1);
     PrecacheCvarSound(g_cvStreakSnd2);
+    PrecacheCvarSound(g_cvStreakSnd3);
     PrecacheCvarSound(g_cvStreakSnd4);
+    PrecacheCvarSound(g_cvStreakSnd5);
     PrecacheCvarSound(g_cvStreakSnd6);
-    PrecacheCvarSound(g_cvStreakSnd9);
-    PrecacheCvarSound(g_cvStreakSnd12);
-    PrecacheCvarSound(g_cvStreakSnd15);
 
     // v1.7.27: shop heavy weapons — precache models (non-campaign maps don't
     // precache M60 / grenade launcher; without this the items spawn invisible)
@@ -2780,7 +2801,15 @@ Action Timer_StreakSettle(Handle timer, int userId)
         segEdge[3] = g_cvStreakHwL4.FloatValue;
         segEdge[4] = g_cvStreakHwL5.FloatValue;
         segEdge[5] = g_cvStreakHwL6.FloatValue;
-        float mult = g_cvStreakBonusMultL1.FloatValue;
+        // v1.7.63: 每档手配倍率（10/14/19/25/32/40）——加速曲线，替代
+        // mult_step 线性步进（1.5/档 → 各段增量近似持平，高段无激励）。
+        float segMult[6];
+        segMult[0] = g_cvStreakBonusMultL1.FloatValue;
+        segMult[1] = g_cvStreakBonusMultL2.FloatValue;
+        segMult[2] = g_cvStreakBonusMultL3.FloatValue;
+        segMult[3] = g_cvStreakBonusMultL4.FloatValue;
+        segMult[4] = g_cvStreakBonusMultL5.FloatValue;
+        segMult[5] = g_cvStreakBonusMultL6.FloatValue;
         float coeff = g_cvStreakBonusCoeff.FloatValue;
         float prev = 0.0;
         float remain = float(hw);
@@ -2790,15 +2819,14 @@ Action Timer_StreakSettle(Handle timer, int userId)
             if (seg > segEdge[k] - prev)
                 seg = segEdge[k] - prev;        // 段内人头（本段上界截断）
             if (seg > 0.0)
-                bonus += RoundToCeil(seg * coeff * mult);
+                bonus += RoundToCeil(seg * coeff * segMult[k]);
             remain -= seg;
             if (remain <= 0.0)
                 break;
             prev = segEdge[k];
-            mult += g_cvStreakBonusMultStep.FloatValue;
         }
         if (remain > 0.0)                        // 超出最后一段上界
-            bonus += RoundToCeil(remain * coeff * mult);
+            bonus += RoundToCeil(remain * coeff * segMult[5]);
     }
     // v1.7.60 (user): 结算整体受阈值门控——hw < 20（3 特感 = 18、单只女巫 =
     // 6）窗口关闭时只静默重置连杀状态（上方已完成），不弹"连杀结算"卡、
@@ -2810,23 +2838,17 @@ Action Timer_StreakSettle(Handle timer, int userId)
     g_iWallet[client] += bonus;       // 当前积分（商店钱包）
     LogMessage("[streak] %N bonus +%d credited (hw=%d)", client, bonus, hw);
 
-    // v1.7.61 (user): 档位按结算总额 (score+bonus) 判定，与结算卡显示一致。
-    // 之前按击杀分 score 判：26 小僵尸 hw=26 发了 +350 奖励，但击杀分 140
-    // < L2(200) → 静默档，奖励发了没音效。v1.7.60 后结算整体已受 hw>=20
-    // 门控，v1.7.4 的"按击杀分防小僵尸刷档"已冗余，档位直接对应该次结算
-    // 的总收益（卡面数字 = 听觉档位）。
-    // v1.7.50: 音效与结算解耦 — 无声档位只跳过播放，结算卡照常显示（奖励已入账，
-    // 玩家需要看到去向）。
+    // v1.7.62 (user): 音效档位 = 人头阶梯段位 L1..L6——与奖励同一把尺子，
+    // 段位直接决定播哪首歌。v1.7.60 门控保证 hw >= L1，所以结算必有音效
+    // （最低 L1 spotting，无静默档）。26 小僵尸 (hw=26) → L1 段。
     char sound[PLATFORM_MAX_PATH];
     ConVar cv;
-    int settleTotal = score + bonus;
-    if (settleTotal >= g_cvStreakScoreL15.IntValue)      cv = g_cvStreakSnd15;
-    else if (settleTotal >= g_cvStreakScoreL12.IntValue) cv = g_cvStreakSnd12;
-    else if (settleTotal >= g_cvStreakScoreL9.IntValue)  cv = g_cvStreakSnd9;
-    else if (settleTotal >= g_cvStreakScoreL6.IntValue)  cv = g_cvStreakSnd6;
-    else if (settleTotal >= g_cvStreakScoreL4.IntValue)  cv = g_cvStreakSnd4;
-    else if (settleTotal >= g_cvStreakScoreL2.IntValue)  cv = g_cvStreakSnd2;
-    else                                                cv = null;   // below the lowest tier → silent
+    if (hw >= g_cvStreakHwL6.IntValue)      cv = g_cvStreakSnd6;
+    else if (hw >= g_cvStreakHwL5.IntValue) cv = g_cvStreakSnd5;
+    else if (hw >= g_cvStreakHwL4.IntValue) cv = g_cvStreakSnd4;
+    else if (hw >= g_cvStreakHwL3.IntValue) cv = g_cvStreakSnd3;
+    else if (hw >= g_cvStreakHwL2.IntValue) cv = g_cvStreakSnd2;
+    else                                    cv = g_cvStreakSnd1;   // hw 20-39
     if (cv != null)
     {
         cv.GetString(sound, sizeof(sound));

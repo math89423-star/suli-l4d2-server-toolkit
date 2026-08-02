@@ -20,6 +20,9 @@
  *    爆炸半径实际由引擎 cvar grenadelauncher_radius_kill/stumble 控制）
  *
  * 版本历史：
+ *  v2.1.26 (2026-08-02): 诊断版——用户要求高爆弹友伤同步调低。非 GL 弹头的
+ *    DMG_BLAST 对幸存者队友加日志（inflictor classname + engine 值），
+ *    确认高爆弹友伤路径后再加系数控制。
  *  v2.1.25 (2026-08-02): 用户拍板微调：sm_gl_engine_damage 225 → 270
  *    （线性 1.2 倍）→ 队友直击 18 / 溅射 10。
  *  v2.1.24 (2026-08-02): 定稿！m_flDamage=225 用户实测"预期了"（直击 15/溅射 8）。
@@ -157,7 +160,7 @@ public Plugin myinfo =
     name        = "GL Splash Damage Fix",
     author      = "suli",
     description = "Grenade launcher splash damage rewrite (self-damage fixed)",
-    version     = "2.1.25",
+    version     = "2.1.26",
     url         = ""
 };
 
@@ -273,7 +276,13 @@ public Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &dam
     char cls[32];
     GetEntityClassname(inflictor, cls, sizeof(cls));
     if (!StrEqual(cls, PROJECTILE_CLASS))
+    {
+        // v2.1.26 诊断：非 GL 弹头的爆炸伤害（高爆弹/爆炸物？）对幸存者队友，
+        // 用户要求高爆弹友伤同步调低——先拿引擎值 + inflictor 路径。
+        if (GetClientTeam(victim) == 2)
+            LogMessage("GL blast non-proj: %N engine %.0f inflictor %s dmgType %d weapon %d", victim, damage, cls, damagetype, weapon);
         return Plugin_Continue;
+    }
 
     // 自伤：受害者是这颗弹头的投掷者本人（引擎 attacker 字段或 m_hThrower 双轨判定）。
     // v2.1.4：引擎对投掷者自伤的 ~1/150 减伤在 TakeDamage 内部（hook 之后）应用，
