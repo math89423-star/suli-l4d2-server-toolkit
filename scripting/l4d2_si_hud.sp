@@ -728,7 +728,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.9.4"
+#define PLUGIN_VERSION "1.9.5"
 
 // ============================================================================
 // ConVar handles
@@ -1246,16 +1246,19 @@ public void OnPluginStart()
     ScoreSave_Init();
     for (int i = 1; i <= MaxClients; i++)
     {
-        if (IsClientInGame(i) && !IsFakeClient(i))
-        {
-            g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
-            g_iTotalScore[i] = 0;
-            g_iSIKills[i] = 0;
-            g_iDeaths[i] = 0;
-            g_iFFDamage[i] = 0;
-            g_iBlacked[i] = 0;
-            ScoreLoad_Player(i);   // v1.7.34: 恢复钱包/复活币
-        }
+        if (!IsClientInGame(i))
+            continue;
+        // v1.9.5: bot 也初始化复活次数——reload 后场上存活 bot 若被跳过，
+        // g_iRevivesLeft=0 → 本图内死亡永不复活（v1.7.32d 只给真人补初始化的
+        // 盲区，配合 Branch C 的 bot 接管一并修复）。
+        g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
+        g_iTotalScore[i] = 0;
+        g_iSIKills[i] = 0;
+        g_iDeaths[i] = 0;
+        g_iFFDamage[i] = 0;
+        g_iBlacked[i] = 0;
+        if (!IsFakeClient(i))
+            ScoreLoad_Player(i);   // v1.7.34: 恢复钱包/复活币（仅真人，bot 无存档）
     }
 
     // v1.7.34: 周期持久化（防崩溃丢数据 + 中途进服玩家恢复接近实时的值）
@@ -2084,8 +2087,13 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
         }
 
         // v1.7.28: 复活次数判定——次数用完且无复活币 → 躺尸等电击器/过关
-        // v1.7.32d: 跳过 bot（引擎有自己的 bot 重生逻辑，复活 bot 会干扰）
-        if (g_cvRespawnEnable.BoolValue && !IsFakeClient(victim))
+        // v1.9.5: bot 与玩家走同一套复活逻辑。v1.7.32d 曾跳过 bot（注释声称
+        // "引擎有自己的 bot 重生逻辑"）——但本服引擎不会自动复活幸存者 bot，
+        // 原 l4d2_auto_respawn（无条件复活 bot）已禁用【2026-08-02】，
+        // 该假设不成立 → bot 死亡后无人复活，永远躺尸。现在 bot 免费复活
+        // 次数每图 base=1（同玩家，reload 初始化见 OnPluginStart）；复活币
+        // 恒为 0 → 次数用完即躺尸等电击器/过关。
+        if (g_cvRespawnEnable.BoolValue)
         {
             if (g_iRevivesLeft[victim] > 0)
             {
