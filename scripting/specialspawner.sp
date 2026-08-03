@@ -33,9 +33,13 @@
 #define SPAWN_LARGE_VOLUME						9
 #define SPAWN_NEAR_POSITION						10
 
-// v1.3.8 贴脸修复：落点必须离所有存活生还者 ≥ ss_spawnrange_guard 才允许刷出；
-// 单只最多重掷 SPAWN_GUARD_MAX_TRIES 次（每次引擎内部还试 attempts 次），
-// 重掷耗尽仍无安全点 → 本只跳过等下波（绝不贴脸）。
+// v1.3.9 贴脸守卫 v2：参照点随机化 + 保底放行。
+// v1.3.8 的坑（实测 8 分钟 100% 全跳）：引擎 L4D_GetRandomPZSpawnPosition 生成点只围绕
+// "参照生还者"转，而 v1.3.8 固定用领跑者 → 多人队伍拉长/密集时，领跑者 200-900 环带
+// 全是队友 → 10 次重掷全灭 → 整波饿死 + 1s retry 死循环。
+// 修复：每只特感每次重掷随机换一个生还者做参照 → 候选点散布全队周边；优先
+// ≥ss_spawnrange_guard(400)，10 次耗尽改取 ≥ss_spawnrange_guard_min(250) 的最佳点保底
+// 放行，仍无 → 本只跳过等下波（绝不放行 <250）。
 #define SPAWN_GUARD_MAX_TRIES					10
 
 Handle
@@ -65,6 +69,7 @@ ConVar
 	g_cSpawnRangeMin,
 	g_cSpawnRangeMax,
 	g_cSpawnRangeGuard,
+	g_cSpawnRangeGuardMin,
 	g_cFirstSpawnTime,
 	g_cSpawnRange,
 	g_cDiscardRange,
@@ -149,7 +154,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "1.3.8",
+	version = "1.3.9",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -194,6 +199,9 @@ public void OnPluginStart() {
 	// 引擎 L4D_GetRandomPZSpawnPosition 只保证离"领跑者"≥ss_spawnrange_min，
 	// 队友完全没查 → 4人抱团时贴脸刷。本守卫对所有生还者生效，重掷+跳过兜底。
 	g_cSpawnRangeGuard =			CreateConVar("ss_spawnrange_guard",		"400.0",					"落点离所有生还者的最小距离(防贴脸, 0=关闭)", _, true, 0.0, true, 1500.0);
+	// v1.3.9: 保底阈值——重掷耗尽仍无 ≥guard 的点时，若存在离所有人 ≥ 本值的点则放行
+	// 最佳者（防整波饿死），必须 ≤ guard 才有意义，0=不保底（保持 v1.3.8 绝不放行）。
+	g_cSpawnRangeGuardMin =			CreateConVar("ss_spawnrange_guard_min",	"250.0",					"全跳保底:重掷耗尽后放行最近点≥该值的落点(须≤guard, 0=不保底)", _, true, 0.0, true, 1500.0);
 
 	g_cFirstSpawnTime = 			CreateConVar("ss_first_time",			"0.0",						"玩家离开安全区域后第一波特感的刷新时间", _, true, 0.0);
 
@@ -755,6 +763,19 @@ public void OnClientDisconnect(int client) {
 	CreateTimer(0.1, tmrTankDisconnect, _, TIMER_FLAG_NO_MAPCHANGE);
 }
 
+// v1.3.9: 热重载兜底——sm plugins reload 时 L4D_OnFirstSurvivorLeftSafeArea_Post
+// 不会重发，刷怪定时器链会断（特感停刷到换图）。引擎状态不受插件重载影响，
+// 用 L4D_HasAnySurvivorLeftSafeArea 检测 → 已离开安全区则重建链。
+public void OnMapStart() {
+	if (L4D_HasAnySurvivorLeftSafeArea()) {
+		g_bLeftSafeArea = true;
+		if (!g_hSpawnTimer)
+			StartCustomSpawnTimer(g_fFirstSpawnTime);
+		if (!g_hSuicideTimer)
+			g_hSuicideTimer = CreateTimer(2.5, tmrForceSuicide, _, TIMER_REPEAT);
+	}
+}
+
 public void OnMapEnd() {
 	g_bLeftSafeArea = false;
 	g_bFinaleStarted = false;
@@ -1046,16 +1067,21 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	aList.Sort(Sort_Descending, Sort_Float);
 
 	bool find;
-	int client = aList.Get(0, 1);
 	flow = aList.Get(0, 0);
 	float lastFlow = aList.Get(count - 1, 0);
 	if (flow - lastFlow > g_fRushDistance) {
 		#if DEBUG
-		PrintToServer("[SS] Rusher -> %N", client);
+		PrintToServer("[SS] Rusher -> %N", aList.Get(0, 1));
 		#endif
 
 		find = true;
 	}
+
+	// v1.3.9: 提前提取存活生还者数组（随机参照用，参照者=引擎生成点的中心）
+	int aLen = aList.Length;
+	int[] survivors = new int[aLen];
+	for (i = 0; i < aLen; i++)
+		survivors[i] = aList.Get(i, 1);
 
 	delete aList;
 	g_bInSpawnTime = true;
@@ -1067,28 +1093,48 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	int zombie;
 	float vPos[3];
 	int guardBlocked = 0;
+	int guardFallback = 0;
+	float guard = g_cSpawnRangeGuard.FloatValue;
+	float guardMin = g_cSpawnRangeGuardMin.FloatValue;
 	for (i = 0; i < spawnSize; i++) {
 		index = aQueue.Get(i) + 1;
-		// v1.3.8 贴脸修复：引擎 L4D_GetRandomPZSpawnPosition 只保证落点离"领跑者"
-		// ≥z_safe_spawn_range(200)，其余生还者完全没查 → 4人抱团时贴脸刷（实测）。
-		// 逐只重掷直到落点离【所有】存活生还者（含倒地）≥ss_spawnrange_guard；
-		// 重掷耗尽仍无安全点 → 本只跳过（count 不 +1，下波/重试再试），绝不贴脸。
-		// 顺带修复原 find 累积 bug：某只取点失败时 find 仍是上只的 true，
-		// vPos 残留上只坐标 → 两只刷在同一位置。
+		// v1.3.9 贴脸守卫 v2：引擎 L4D_GetRandomPZSpawnPosition 生成点只围绕"参照
+		// 生还者"转——v1.3.8 固定领跑者时，多人队伍拉长/密集 → 领跑者 200-900 环带
+		// 全是队友 → 10 次重掷全灭 → 整波饿死（实测）。修复：每只每次重掷随机换
+		// 参照者 → 候选点散布全队周边；优先 ≥guard(400)；10 次耗尽改取 ≥guard_min
+		// (250) 的最佳点保底放行（防饿死，仍远低于贴脸阈值）；仍无 → 本只跳过。
+		// （顺带保留 v1.3.8 的 find 重置：防止上只的 vPos 残留导致两只刷同一点）
 		find = false;
+		bool hasBestPos = false;
+		float bestDist = 0.0;
+		float bestPos[3];
 		for (int tries = 0; tries < SPAWN_GUARD_MAX_TRIES; tries++) {
-			if (!L4D_GetRandomPZSpawnPosition(client, index, 10, vPos))
+			int ref = survivors[GetRandomInt(0, aLen - 1)];
+			if (!L4D_GetRandomPZSpawnPosition(ref, index, 10, vPos))
 				continue;
-			if (g_cSpawnRangeGuard.FloatValue <= 0.0
-				|| IsSpawnPosClearOfSurvivors(vPos, g_cSpawnRangeGuard.FloatValue)) {
+			float d = DistanceToNearestSurvivor(vPos);
+			if (!hasBestPos || d > bestDist) {
+				hasBestPos = true;
+				bestDist = d;
+				bestPos = vPos;
+			}
+			if (guard <= 0.0 || d >= guard) {
 				find = true;
 				break;
 			}
 		}
 
 		if (!find) {
-			guardBlocked++;
-			continue;
+			// 保底：存在离所有人 ≥guard_min 的点就放行最佳者（不饿死整波）
+			if (hasBestPos && guard > 0.0 && guardMin > 0.0 && bestDist >= guardMin) {
+				vPos = bestPos;
+				find = true;
+				guardFallback++;
+			}
+			else {
+				guardBlocked++;
+				continue;
+			}
 		}
 
 		vPos[2] += 5.0;
@@ -1101,10 +1147,10 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 		vPos[2] -= 5.0;
 	}
 
-	// v1.3.8: 贴脸守卫命中统计（波内至少一只被跳时才记一条，防日志刷屏）
-	if (guardBlocked) {
-		LogMessage("[SS] spawn guard: %d/%d skipped (no spot >= %.0f from all survivors)",
-			guardBlocked, spawnSize, g_cSpawnRangeGuard.FloatValue);
+	// v1.3.9: 守卫统计（跳过 / 保底放行，波内有任何拦截才记一条，防日志刷屏）
+	if (guardBlocked || guardFallback) {
+		LogMessage("[SS] spawn guard: %d/%d skipped, %d fallback(>=%.0f), prefer >=%.0f",
+			guardBlocked, spawnSize, guardFallback, guardMin, guard);
 	}
 
 	g_bInSpawnTime = false;
@@ -1132,18 +1178,20 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	delete aQueue;
 }
 
-// v1.3.8: 落点是否离所有存活生还者（含倒地，IsPlayerAlive 对倒地返回 true）≥ minDist。
+// v1.3.9: 落点离最近存活生还者的距离（含倒地，IsPlayerAlive 对倒地返回 true）。
 // 3D 距离——垂直贴脸（头顶实体/高台正上方）同样拦截。
-bool IsSpawnPosClearOfSurvivors(const float pos[3], float minDist) {
+float DistanceToNearestSurvivor(const float pos[3]) {
+	float best = 999999.0;
 	for (int s = 1; s <= MaxClients; s++) {
 		if (!IsClientInGame(s) || GetClientTeam(s) != 2 || !IsPlayerAlive(s))
 			continue;
 		float o[3];
 		GetClientAbsOrigin(s, o);
-		if (GetVectorDistance(pos, o) < minDist)
-			return false;
+		float d = GetVectorDistance(pos, o);
+		if (d < best)
+			best = d;
 	}
-	return true;
+	return best;
 }
 
 Action tmrRetrySpawn(Handle timer, bool retry) {
