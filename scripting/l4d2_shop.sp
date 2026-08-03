@@ -200,7 +200,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.6.2"
+#define PLUGIN_VERSION "1.6.3"
 
 // ============================================================================
 // SH_ public API（l4d2_si_hud >= v1.9.0 导出；契约见 include/l4d2_si_hud.inc）
@@ -311,7 +311,7 @@ ConVar g_cvRespawnHealth;   // v1.5.1: 复活套装满血值（0=不动）
 #define MELEE_POOL_COUNT   12
 
 #define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
-#define WALLHACK_DURATION   300.0   // v1.8.1: 5 分钟（用户定稿，原 v1.7.67 定稿 180=3 分钟）
+#define WALLHACK_DURATION   180.0   // v1.8.2: 3 分钟（2026-08-03 用户改回，原 v1.8.1 定稿 300=5 分钟）
 // v1.0.10: 生效期间不可重复购买 → WALLHACK_CAP（900s 续费封顶）已删除
 
 // ============================================================================
@@ -1037,11 +1037,17 @@ int SpawnMelee(const char[] meleeName, float pos[3])
 // v1.5.1: 复活套装 — 监听 si_hud v1.9.2 的 SH_OnClientRespawned 全局 forward
 // （复活币死亡复活完成、确认存活后触发；闲置/接管引擎自管不在此列）。
 // 用户拍板固定配置：M60 + 消防斧 + 止痛药 + 土质炸弹，复活满血 100。
+// v1.6.3: 排除 bot —— si_hud v1.9.5 起该 forward 也会为 bot 触发（bot 与
+// 玩家同由 si_hud 接管复活）。复活套装是"复活币消费"的奖励，而 bot 每图
+// 免费复活一次、复活币恒为 0 —— 发套装 = 玩家接管 bot 白嫖 M60/斧/药/雷。
+// 若用户后续要求 bot 也发套装，去掉本守卫即可。
 // ============================================================================
 public void SH_OnClientRespawned(int client)
 {
     if (client < 1 || client > MaxClients || !IsClientInGame(client))
         return;
+    if (IsFakeClient(client))
+        return;                                    // v1.6.3: bot 不发复活套装
     if (GetClientTeam(client) != 2 || !IsPlayerAlive(client))
         return;
 
