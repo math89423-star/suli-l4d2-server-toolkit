@@ -33,13 +33,14 @@
 #define SPAWN_LARGE_VOLUME						9
 #define SPAWN_NEAR_POSITION						10
 
-// v1.3.9 贴脸守卫 v2：参照点随机化 + 保底放行。
-// v1.3.8 的坑（实测 8 分钟 100% 全跳）：引擎 L4D_GetRandomPZSpawnPosition 生成点只围绕
-// "参照生还者"转，而 v1.3.8 固定用领跑者 → 多人队伍拉长/密集时，领跑者 200-900 环带
-// 全是队友 → 10 次重掷全灭 → 整波饿死 + 1s retry 死循环。
-// 修复：每只特感每次重掷随机换一个生还者做参照 → 候选点散布全队周边；优先
-// ≥ss_spawnrange_guard(400)，10 次耗尽改取 ≥ss_spawnrange_guard_min(250) 的最佳点保底
-// 放行，仍无 → 本只跳过等下波（绝不放行 <250）。
+// v1.4.0 贴脸守卫 v3：分散刷 + LOS 过滤。
+// 引擎 L4D_GetRandomPZSpawnPosition 生成点只围绕"参照生还者"转。固定一个领跑者
+// （v1.3.8）→ 多人长队伍时领跑者 200-900 环带全是队友 → 重掷全灭整波饿死 + 堆怪；
+// 只随机参照者（v1.3.9）→ 分散了，但保底 250 点常刷在队伍侧后方 → 看不见人 →
+// 25s 自杀处决。v1.4.0：每只随机参照者（分散刷，每只独立）→ 候选点散布全队周边，
+// 且必须 LOS 可见至少一个生还者；优先 ≥ss_spawnrange_guard(400)，耗尽改取
+// ≥ss_spawnrange_guard_min(250) 且可见的最佳点，再兜底 250 不可见（窄室内防饿死），
+// 仍无 → 本只跳过等下波（绝不放行 <250）。
 #define SPAWN_GUARD_MAX_TRIES					10
 
 Handle
@@ -154,7 +155,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "1.3.9",
+	version = "1.4.0",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -1098,26 +1099,37 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	float guardMin = g_cSpawnRangeGuardMin.FloatValue;
 	for (i = 0; i < spawnSize; i++) {
 		index = aQueue.Get(i) + 1;
-		// v1.3.9 贴脸守卫 v2：引擎 L4D_GetRandomPZSpawnPosition 生成点只围绕"参照
-		// 生还者"转——v1.3.8 固定领跑者时，多人队伍拉长/密集 → 领跑者 200-900 环带
-		// 全是队友 → 10 次重掷全灭 → 整波饿死（实测）。修复：每只每次重掷随机换
-		// 参照者 → 候选点散布全队周边；优先 ≥guard(400)；10 次耗尽改取 ≥guard_min
-		// (250) 的最佳点保底放行（防饿死，仍远低于贴脸阈值）；仍无 → 本只跳过。
-		// （顺带保留 v1.3.8 的 find 重置：防止上只的 vPos 残留导致两只刷同一点）
+		// v1.4.0 贴脸守卫 v3：v1.3.9 已随机参照者（分散刷），但保底 250 点常在
+		// 队伍侧后方 → 看不见生还者 → m_hasVisibleThreats 恒 false → 25s 自杀
+		// 计时处决（玩家实测"刷新基本都被处决"）。修复：候选点必须 LOS 可见
+		// 至少一个生还者（看得见 → 有威胁 → 不处决，特感立刻投入进攻）。
+		// 分层：≥guard(400) 且可见 > 10 次耗尽取 ≥guard_min(250) 且可见的最佳
+		// > 再兜底 250 不可见（窄室内 AI 可自行转向找人，防饿死）> 跳过。
 		find = false;
 		bool hasBestPos = false;
 		float bestDist = 0.0;
 		float bestPos[3];
+		bool hasBestVisible = false;
+		float bestVisibleDist = 0.0;
+		float bestVisiblePos[3];
 		for (int tries = 0; tries < SPAWN_GUARD_MAX_TRIES; tries++) {
 			int ref = survivors[GetRandomInt(0, aLen - 1)];
 			if (!L4D_GetRandomPZSpawnPosition(ref, index, 10, vPos))
 				continue;
 			float d = DistanceToNearestSurvivor(vPos);
+			bool visible = IsPosVisibleToAnySurvivor(vPos);
 			if (!hasBestPos || d > bestDist) {
 				hasBestPos = true;
 				bestDist = d;
 				bestPos = vPos;
 			}
+			if (visible && (!hasBestVisible || d > bestVisibleDist)) {
+				hasBestVisible = true;
+				bestVisibleDist = d;
+				bestVisiblePos = vPos;
+			}
+			if (!visible)
+				continue;
 			if (guard <= 0.0 || d >= guard) {
 				find = true;
 				break;
@@ -1125,8 +1137,14 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 		}
 
 		if (!find) {
-			// 保底：存在离所有人 ≥guard_min 的点就放行最佳者（不饿死整波）
-			if (hasBestPos && guard > 0.0 && guardMin > 0.0 && bestDist >= guardMin) {
+			// 保底 1：可见 + ≥guard_min 的最佳点（防处决 + 防饿死）
+			if (hasBestVisible && guard > 0.0 && guardMin > 0.0 && bestVisibleDist >= guardMin) {
+				vPos = bestVisiblePos;
+				find = true;
+				guardFallback++;
+			}
+			// 保底 2：不可见但 ≥guard_min（极窄地形，AI 会自行转向找人）
+			else if (hasBestPos && guard > 0.0 && guardMin > 0.0 && bestDist >= guardMin) {
 				vPos = bestPos;
 				find = true;
 				guardFallback++;
@@ -1192,6 +1210,27 @@ float DistanceToNearestSurvivor(const float pos[3]) {
 			best = d;
 	}
 	return best;
+}
+
+// v1.4.0: 刷点是否至少能看见一个存活生还者（LOS 通畅）。
+// 看不见人的刷点 → m_hasVisibleThreats 恒 false → 25s 自杀计时处决（玩家实测
+// "刷新基本都被处决"）。MASK_VISIBLE + RayType_EndPoint，filter 跳过所有玩家
+// 实体（终点就是生还者 eye，不排除会被误判成遮挡）。
+bool IsPosVisibleToAnySurvivor(const float pos[3]) {
+	for (int s = 1; s <= MaxClients; s++) {
+		if (!IsClientInGame(s) || GetClientTeam(s) != 2 || !IsPlayerAlive(s))
+			continue;
+		float eye[3];
+		GetClientEyePosition(s, eye);
+		TR_TraceRayFilter(pos, eye, MASK_VISIBLE, RayType_EndPoint, TRFilter_SkipPlayers);
+		if (!TR_DidHit())
+			return true;
+	}
+	return false;
+}
+
+bool TRFilter_SkipPlayers(int entity, int contentsMask, any data) {
+	return entity < 1 || entity > MaxClients;
 }
 
 Action tmrRetrySpawn(Handle timer, bool retry) {
