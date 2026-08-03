@@ -63,48 +63,62 @@ public Plugin myinfo =
 public void OnPluginStart()
 {
 	Handle hGamedata = LoadGameConfigFile(GAMEDATA);
-	if(hGamedata == null) 
+	if(hGamedata == null)
 		SetFailState("Failed to load \"%s.txt\" gamedata.", GAMEDATA);
-	
-	hOnActionComplete = DHookCreateFromConf(hGamedata, "CItemDefibrillator::OnActionComplete");
+
+	// 2026-08-03 本地适配：SM 1.12 的 dhooks 无法从 gamedata 解析签名（引擎符号不导出、
+	// 字节模式搜索失效），改用 GameConfGetAddress（Addresses 节，已验证可解析）+ 全局 detour。
+
+	// CItemDefibrillator::OnActionComplete —— thiscall, 3 显式参数 (type, pPlayer, pDeathModel)
+	hOnActionComplete = DHookCreateDetour(GameConfGetAddress(hGamedata, "CItemDefibrillator::OnActionComplete"), CallConv_THISCALL, ReturnType_Int, ThisPointer_Ignore);
 	if(hOnActionComplete == null)
 		SetFailState("Failed to make hook for 'CItemDefibrillator::OnActionComplete'");
-	
-	hOnStartAction = DHookCreateFromConf(hGamedata, "CItemDefibrillator::OnStartAction");
+
+	DHookAddParam(hOnActionComplete, HookParamType_Int);          // type
+	DHookAddParam(hOnActionComplete, HookParamType_CBaseEntity);  // pPlayer → GetParam(2) = 死亡模型实体索引
+	DHookAddParam(hOnActionComplete, HookParamType_Int);          // pEntity（不读）
+
+	if(!DHookEnableDetour(hOnActionComplete, false, OnActionCompletePre))
+		SetFailState("Failed to detour 'CItemDefibrillator::OnActionComplete'");
+
+	if(!DHookEnableDetour(hOnActionComplete, true, OnActionCompletePost))
+		SetFailState("Failed to detour 'CItemDefibrillator::OnActionComplete'");
+
+	// CItemDefibrillator::OnStartAction —— thiscall, 回调不读参数
+	hOnStartAction = DHookCreateDetour(GameConfGetAddress(hGamedata, "CItemDefibrillator::OnStartAction"), CallConv_THISCALL, ReturnType_Int, ThisPointer_Ignore);
 	if(hOnStartAction == null)
 		SetFailState("Failed to make hook for 'CItemDefibrillator::OnStartAction'");
-	
+
+	if(!DHookEnableDetour(hOnStartAction, false, OnStartActionPre))
+		SetFailState("Failed to detour 'CItemDefibrillator::OnStartAction'");
+
+	// CTerrorPlayer::GetPlayerByCharacter —— thiscall, 1 参数 (SurvivorCharacterType)
 	Handle hDetour;
-	hDetour = DHookCreateFromConf(hGamedata, "CTerrorPlayer::GetPlayerByCharacter");
+	hDetour = DHookCreateDetour(GameConfGetAddress(hGamedata, "CTerrorPlayer::GetPlayerByCharacter"), CallConv_THISCALL, ReturnType_CBaseEntity, ThisPointer_Ignore);
 	if(!hDetour)
 		SetFailState("Failed to find 'CTerrorPlayer::GetPlayerByCharacter' signature");
-	
+
+	DHookAddParam(hDetour, HookParamType_Int);
+
 	if(!DHookEnableDetour(hDetour, false, GetPlayerByCharacter))
 		SetFailState("Failed to detour 'CTerrorPlayer::GetPlayerByCharacter'");
-	
-	hDetour = DHookCreateFromConf(hGamedata, "CSurvivorDeathModel::Create");
+
+	// CSurvivorDeathModel::Create —— 静态方法（CDECL），1 参数 (CTerrorPlayer*)
+	hDetour = DHookCreateDetour(GameConfGetAddress(hGamedata, "CSurvivorDeathModel::Create"), CallConv_CDECL, ReturnType_CBaseEntity, ThisPointer_Ignore);
 	if(!hDetour)
 		SetFailState("Failed to find 'CSurvivorDeathModel::Create' signature");
-	
+
+	DHookAddParam(hDetour, HookParamType_CBaseEntity);
+
 	if(!DHookEnableDetour(hDetour, false, DeathModelCreatePre))
 		SetFailState("Failed to detour 'CSurvivorDeathModel::Create'");
-	
+
 	if(!DHookEnableDetour(hDetour, true, DeathModelCreatePost))
 		SetFailState("Failed to detour 'CSurvivorDeathModel::Create'");
-	
-	delete hGamedata;
-	
-	CreateConVar("defib_fix_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-}
 
-public void OnEntityCreated(int iEntity, const char[] sClassname)
-{
-	if(sClassname[0] != 'w' || !StrEqual(sClassname, "weapon_defibrillator", false))
-	 	return;
-	
-	DHookEntity(hOnActionComplete, false, iEntity, _, OnActionCompletePre);
-	DHookEntity(hOnActionComplete, true, iEntity, _, OnActionCompletePost);
-	DHookEntity(hOnStartAction, false, iEntity, _, OnStartActionPre);
+	delete hGamedata;
+
+	CreateConVar("defib_fix_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 }
 
 public MRESReturn OnActionCompletePre(Handle hReturn, Handle hParams)
@@ -200,17 +214,17 @@ public MRESReturn OnStartActionPre(Handle hReturn, Handle hParams)
 }
 
 int g_iTempClient;
-public MRESReturn DeathModelCreatePost(int pThis, Handle hReturn)
+public MRESReturn DeathModelCreatePost(Handle hReturn, Handle hParams)
 {
 	int iDeathModel = DHookGetReturn(hReturn);
 	if(!iDeathModel)
 		return MRES_Ignored;
-	
+
 	float vPos[3];
 	GetClientAbsOrigin(g_iTempClient, vPos);
-	
+
 	TeleportEntity(iDeathModel, vPos, NULL_VECTOR, NULL_VECTOR);
-	
+
 	g_iDeathModelOwner[iDeathModel] = GetClientUserId(g_iTempClient);
 
 	Call_StartForward(g_hForward_SurvivorDeathModelCreated);
@@ -221,10 +235,10 @@ public MRESReturn DeathModelCreatePost(int pThis, Handle hReturn)
 	return MRES_Ignored;
 }
 
-public MRESReturn DeathModelCreatePre(int pThis)
+public MRESReturn DeathModelCreatePre(Handle hReturn, Handle hParams)
 {
-	g_iTempClient = pThis;
-	
+	g_iTempClient = DHookGetParam(hParams, 1);
+
 	return MRES_Ignored;
 }
 

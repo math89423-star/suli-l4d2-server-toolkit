@@ -33,7 +33,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.3.6"
+#define PLUGIN_VERSION "2.3.7"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -238,17 +238,22 @@ void CaptureSourceRange()
 }
 
 // Generate next interval and pin both cvars to it.
-// Returns the chosen interval so the caller can announce it.
+// v2.3.7: 返回值 = 钉值前的旧值（实际生效间隔），供播报使用。
+// specialspawner 在刷出帧先读 cvar 决定下次间隔（读到旧钉值），si_comp 在
+// 刷出事件里才钉新值 —— 播报新值会差一轮（实测偏差 0-15s）。播旧值后：
+// 播报 X 秒 → 实际 X 秒后刷下一波，完全对齐。回合重开（ResetTracking）
+// 打断波次导致的 15s 提前第一波不在本函数处理范围。
 float PinSpawnTiming()
 {
     // v2.3.4: use CAPTURED values, not live ConVar (feedback loop fix)
     float interval = GetRandomFloat(g_fCfgTimeMin, g_fCfgTimeMax);
+    float prev = (g_cvSsTimeMin != null) ? g_cvSsTimeMin.FloatValue : g_fCfgTimeMin;
     if (g_cvSsTimeMin != null) g_cvSsTimeMin.SetFloat(interval);
     if (g_cvSsTimeMax != null) g_cvSsTimeMax.SetFloat(interval);
 
     AdjustSpawnSize();  // re-scale per current survivor count
 
-    return interval;
+    return prev;
 }
 
 // ============================================================================

@@ -1,0 +1,48 @@
+"Games"
+{
+	"left4dead2"
+	{
+		"Addresses"
+		{
+			"CItemDefibrillator::OnActionComplete"
+			{
+				"signature"	"CItemDefibrillator::OnActionComplete"
+			}
+			"CItemDefibrillator::OnStartAction"
+			{
+				"signature"	"CItemDefibrillator::OnStartAction"
+			}
+			"CTerrorPlayer::GetPlayerByCharacter"
+			{
+				"signature"	"CTerrorPlayer::GetPlayerByCharacter"
+			}
+			"CSurvivorDeathModel::Create"
+			{
+				"signature"	"CSurvivorDeathModel::Create"
+			}
+		}
+		"Signatures"
+		{
+			"CItemDefibrillator::OnActionComplete"
+			{
+				"library"	"server"
+				"linux"		"@_ZN18CItemDefibrillator16OnActionCompleteEP13CTerrorPlayerP11CBaseEntity"
+			}
+			"CItemDefibrillator::OnStartAction"
+			{
+				"library"	"server"
+				"linux"		"@_ZN18CItemDefibrillator13OnStartActionEN17CBaseBackpackItem22BackpackItemActionTypeEP13CTerrorPlayerP11CBaseEntityf"
+			}
+			"CTerrorPlayer::GetPlayerByCharacter"
+			{
+				"library"	"server"
+				"linux"		"@_ZN13CTerrorPlayer20GetPlayerByCharacterE21SurvivorCharacterType"
+			}
+			"CSurvivorDeathModel::Create"
+			{
+				"library"	"server"
+				"linux"		"@_ZN19CSurvivorDeathModel6CreateEP13CTerrorPlayer"
+			}
+		}
+	}
+}
