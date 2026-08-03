@@ -1,6 +1,6 @@
 #include <sourcemod>
 
-#define PLUGIN_VERSION "1.1"
+#define PLUGIN_VERSION "1.2"
 
 public Plugin myinfo =
 {
@@ -31,8 +31,8 @@ public Action Timer_Welcome(Handle timer, int userid)
     PrintToChat(client, "\x04[粟藜L4D2] \x0124人困难多特战役服 · 60tick · 6特 · 45-60s波次");
     PrintToChat(client, "\x05直连 \x03connect 81.71.101.135:27015");
     PrintToChat(client, "\x05输入 \x04!motd\x05 查看完整服务器公告");
-    PrintToChat(client, "\x01QQ群: \x051051172300  · Steam组: \x05suli-l4d2-server");
-    PrintToChat(client, "\x05击杀掉落: Tank必掉3件 | Witch必掉1件 | 特感6+3+1 | 小僵尸2%");
+    PrintToChat(client, "\x01QQ群: \x05873133645  · Steam组: \x05suli-l4d2-server");
+    PrintToChat(client, "\x05击杀掉落: Tank必掉3件 | Witch必掉1件 | 特感约4% | 小僵尸1%");
 
     return Plugin_Stop;
 }
