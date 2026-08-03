@@ -1377,6 +1377,7 @@ stock bool AStar_IdentifyGoal_Frame(int maxNodes)
 {
     if (g_hIGQueue == null || g_iIGStage != 1) return true;
     if (ConAdj == null) ConAdj = new ArrayList(sizeof(NavConnection));
+    if (AdjNN == null) AdjNN = new ArrayList();
 
     int processed = 0;
     while (g_iIGQueueHead < g_hIGQueue.Length && g_hIGReachable.Size < g_iIGBfsLimit && processed < maxNodes)
@@ -1408,6 +1409,22 @@ stock bool AStar_IdentifyGoal_Frame(int maxNodes)
 
         Address area = view_as<Address>(areaInt);
         GetNavConnections(area, ConAdj, TEAM_SURVIVOR, true, true, true, CON_KEEP_ALL);
+
+        // v4.8: fold non-mesh edges (incl. cross-component bridges from
+        // DetectNavMeshBridges) into the reachability BFS. On third-party
+        // maps with a fragmented nav mesh the A* search itself traverses
+        // these bridges, but the goal BFS only walked raw nav connections —
+        // 3581/4567 nodes looked unreachable and the goal got locked into
+        // the start's component (observed: goal z=16 in a low basement while
+        // the real exit was in another component). With bridges folded in,
+        // the goal can land on the true exit component.
+        GetNonMeshConnections(areaInt, AdjNN);
+        NavConnection nmc;
+        for (int nm = 0; nm < AdjNN.Length; nm++)
+        {
+            AdjNN.GetArray(nm, nmc, sizeof(NavConnection));
+            ConAdj.PushArray(nmc, sizeof(NavConnection));
+        }
 
         char rkey[16];
         for (int n = 0; n < ConAdj.Length && g_hIGReachable.Size < g_iIGBfsLimit; n++)

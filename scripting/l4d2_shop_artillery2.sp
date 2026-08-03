@@ -52,7 +52,7 @@ forward Action SH_OnShopItemBuy(int client, int slot, const char[] classname, in
 native int  SH_GetWallet(int client);
 native void SH_AddWallet(int client, int amount);
 
-#define PLUGIN_VERSION "1.0.2"
+#define PLUGIN_VERSION "1.0.4"
 #define ART2_SLOT_CLASS  "ext_artillery2"     // si_hud g_ShopTable 里的 classname
 #define ART2_PROJECTILE  "grenade_launcher_projectile"
 #define ART2_SHELL_MODEL "models/weapons/gl_grenade.mdl"   // 候选，实测 m_ModelName 确认
@@ -847,9 +847,20 @@ public Action Timer_Art2SpawnShell(Handle timer, DataPack dp)
             SetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity", buyer);
     }
 
-    // 重力保险（引擎发射弹丸带 m_flGravity=1；直接生成不设也应有默认，防悬停）
-    if (HasEntProp(ent, Prop_Data, "m_flGravity"))
-        SetEntPropFloat(ent, Prop_Data, "m_flGravity", 1.0);
+    // v1.0.4 FIX（对照实锤）: ①不设 m_flGravity——引擎 GL 弹丸默认 0.4，
+    // 之前强制 1.0 是我引入的差异（对照日志 gravity 1.00 vs 0.40）。
+    // ②清 EFL_IN_BRUSH(0x4000)+EFL_IN_BOUNCE(0x8000)：CreateEntityByName 时
+    // 实体原点在 0,0,0，DispatchSpawn 在原点做 brush 包含检查（若原点在世界
+    // 几何内 → 打上 IN_BRUSH），Teleport 到落点后标志不清 → 引擎对带
+    // IN_BRUSH 的实体跳过世界 brush 碰撞 → Touch(世界) 永不触发 → 永不爆炸。
+    // 玩家发射的弹丸 spawn 在枪口（无 IN_BRUSH），对照日志 eflags
+    // 0x204c000(ours) vs 0x2040000(launched)。清标志后与发射态一致。
+    if (HasEntProp(ent, Prop_Data, "m_iEFlags"))
+    {
+        int flags = GetEntProp(ent, Prop_Data, "m_iEFlags");
+        if (flags & 0xC000)
+            SetEntProp(ent, Prop_Data, "m_iEFlags", flags & ~0xC000);
+    }
 
     float vel[3] = { 0.0, 0.0, ART2_SHELL_VEL_Z };   // 垂直下坠（落点零误差）
     TeleportEntity(ent, pos, NULL_VECTOR, vel);
@@ -877,7 +888,9 @@ public Action Timer_Art2SpawnShell(Handle timer, DataPack dp)
     return Plugin_Continue;
 }
 
-// 落地兜底：该爆没爆（弹丸还在）→ Kill 触发 gl_splash_fix 伤害注入
+// 落地兜底：该爆没爆（弹丸还在）→ 依次试引擎爆炸输入（Explode/Detonate/
+// SelfExplode——pipe bomb 有 SelfExplode 输入，GL 弹丸可能也有），全无效
+// 才 Kill（Kill 触发 gl_splash_fix 伤害注入，无特效音效）
 public Action Timer_Art2ShellCheck(Handle timer, DataPack dp)
 {
     dp.Reset();
@@ -890,10 +903,70 @@ public Action Timer_Art2ShellCheck(Handle timer, DataPack dp)
 
     float pos[3];
     GetEntPropVector(ent, Prop_Send, "m_vecOrigin", pos);
-    LogMessage("[art2] shell %d still alive at (%.0f %.0f %.0f) — kill fallback "
-        ... "(gl_splash_fix injects damage on destroy)", ent, pos[0], pos[1], pos[2]);
-    AcceptEntityInput(ent, "Kill");
+    LogMessage("[art2] shell %d still alive at (%.0f %.0f %.0f) — trying explode inputs",
+        ent, pos[0], pos[1], pos[2]);
+    AcceptEntityInput(ent, "Explode");
+    if (IsValidEntity(ent))
+        AcceptEntityInput(ent, "Detonate");
+    if (IsValidEntity(ent))
+        AcceptEntityInput(ent, "SelfExplode");
+    if (IsValidEntity(ent))
+    {
+        LogMessage("[art2] shell %d explode inputs ignored — kill fallback "
+            ... "(gl_splash_fix injects damage on destroy)", ent);
+        AcceptEntityInput(ent, "Kill");
+    }
     return Plugin_Continue;
+}
+
+// v1.0.3 诊断：hook 所有 GL 弹丸（玩家发射的 + 我们生成的）dump 属性到日志。
+// 对照"正常发射能爆的弹丸 vs 我们生成不爆的弹丸"的属性差异 → 找到缺的状态。
+// 用法：日志里找两行 [art2] dump ours=0（玩家发射，要爆的）和 ours=1（我们的）。
+public void OnEntityCreated(int entity, const char[] classname)
+{
+    if (entity < 1 || classname[0] != 'g')
+        return;
+    if (StrEqual(classname, ART2_PROJECTILE))
+        RequestFrame(Frame_Art2DumpShell, EntIndexToEntRef(entity));
+}
+
+void Frame_Art2DumpShell(int ref)
+{
+    int ent = EntRefToEntIndex(ref);
+    if (ent <= 0 || !IsValidEntity(ent))
+        return;
+
+    int ours = 0;
+    if (g_hShells != null && g_hShells.FindValue(EntIndexToEntRef(ent)) != -1)
+        ours = 1;
+
+    int movetype = -1, solid = -1, eflags = -1, spawnflags = -1, model = -1;
+    float gravity = -1.0, damage = -1.0;
+    int owner = -1, thrower = -1;
+    if (HasEntProp(ent, Prop_Data, "m_nMovetype"))
+        movetype = GetEntProp(ent, Prop_Data, "m_nMovetype");
+    if (HasEntProp(ent, Prop_Data, "m_nSolidType"))
+        solid = GetEntProp(ent, Prop_Data, "m_nSolidType");
+    if (HasEntProp(ent, Prop_Data, "m_iEFlags"))
+        eflags = GetEntProp(ent, Prop_Data, "m_iEFlags");
+    if (HasEntProp(ent, Prop_Data, "m_spawnflags"))
+        spawnflags = GetEntProp(ent, Prop_Data, "m_spawnflags");
+    if (HasEntProp(ent, Prop_Send, "m_nModelIndex"))
+        model = GetEntProp(ent, Prop_Send, "m_nModelIndex");
+    if (HasEntProp(ent, Prop_Data, "m_flGravity"))
+        gravity = GetEntPropFloat(ent, Prop_Data, "m_flGravity");
+    if (HasEntProp(ent, Prop_Send, "m_flDamage"))
+        damage = GetEntPropFloat(ent, Prop_Send, "m_flDamage");
+    if (HasEntProp(ent, Prop_Send, "m_hOwnerEntity"))
+        owner = GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity");
+    else if (HasEntProp(ent, Prop_Data, "m_hOwnerEntity"))
+        owner = GetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity");
+    if (HasEntProp(ent, Prop_Send, "m_hThrower"))
+        thrower = GetEntPropEnt(ent, Prop_Send, "m_hThrower");
+
+    LogMessage("[art2] dump ent=%d ours=%d movetype=%d solid=%d eflags=0x%x "
+        ... "spawnflags=%d model=%d gravity=%.2f damage=%.1f owner=%d thrower=%d",
+        ent, ours, movetype, solid, eflags, spawnflags, model, gravity, damage, owner, thrower);
 }
 
 // 超时兜底：长时间未爆（卡缝隙等）→ Kill 止损

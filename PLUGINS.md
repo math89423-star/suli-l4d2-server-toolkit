@@ -1,6 +1,6 @@
 # L4D2 服务器插件清单
 
-> 服务器: 81.71.101.135:27015 | 73 active / 0 disabled | 更新时间: 2026-07-29
+> 服务器: 81.71.101.135:27015 | 73 active / 0 disabled | 更新时间: 2026-08-03
 
 ## 🛠 核心依赖
 
@@ -44,7 +44,7 @@
 | `specialspawner.smx` | 特感生成控制器 — 刷新间隔/数量上限/安全区/各类权重 |
 | `spawn_infected_nolimit.smx` | 移除引擎层特感生成数量限制 |
 | `si_composition_manager.smx` | 特感刷新组合管理 — 6种战术模式轮换 + Tank协同，deficit-first 分配类型，动态 spawn_size 缩放 |
-| `AI_HardSI_bt.smx` | 特感 AI 强化 — 行为树 v3.0，精准扑击/冲锋/连跳/协同攻击 |
+| `AI_HardSI_bt.smx` | 特感 AI 强化 — 行为树 v4.0.2（BoomedProp 崩溃修复 + 冲锋距离 750 + 走廊站桩 + tick 4→2），精准扑击/冲锋/连跳/协同攻击 |
 | `l4d2_tank_unified.smx` | **Tank/Witch 统一核心** — HP 缩放（存活人数 × 3000）+ 播报 |
 | `l4d2_max_common.smx` | 普通感染者上限控制 |
 | `l4d_path_to_goal.smx` | PTG — SI 导航路径计算（A* 寻路） |
@@ -136,4 +136,5 @@
 - **关键配置**：武器属性、团灭换图阈值（4 次）、弹药量等在 `cfg/sourcemod/sourcemod.cfg` 中统一定义。
 - **Tank HP**：`l4d2_tank_unified.smx` → 存活人数（含 BOT）× 3000，最低 12,000 HP。
 - **SI 刷新链**：`specialspawner`（节奏/上限）→ `si_composition_manager`（类型分配）→ `AI_HardSI_bt`（行为决策），三层各司其职，无冲突。
+- **HardSI 源码布局**：源码在 `scripting/AI_HardSI_optimized/`（AI_HardSI.sp + 12 个 bt_*.inc 专属头文件 + hardcoop_util.sp，不混入全局 include/）。**约定：源码目录只放 .sp/.inc，编译产物只输出到 `compiled/`，运行版在 `plugins/`**（2026-08-03 已清理源码目录内过期 .smx 残留）。
 - **历史备份目录**：`all_plugins_disabled/`（10 个旧插件）、`disabled_crash/`（1 个）、`scripting/`（源码编译产物），这些目录中的 .smx 不会被 SourceMod 加载。

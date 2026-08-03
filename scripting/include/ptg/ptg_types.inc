@@ -230,6 +230,20 @@ int g_iPortalDiagNeighbors = 0;   // raw adjacent areas enumerated
 int g_iPortalDiagLookupMiss = 0;  // areaToIndex lookups that missed
 int g_iPortalDiagClassified = 0;  // pairs actually classified
 
+// ── v4.8 soft rebuild (卡顿修复) ──
+// Dirty rebuilds (blocked-cell detours, geom iterations) re-plan the SAME nav
+// mesh. Soft rebuild reuses the A* node index + portal classification + HPA
+// clusters + bridge detection from the previous build and only re-runs
+// post-build → A* → smooth → validate. On 4.5K-area third-party maps the full
+// portal re-classification alone costs ~1.3s of budgeted frames (18954 pairs);
+// soft cuts an entire rebuild to ~1/4 of that.
+bool g_bSoftRebuild = false;       // current Guide_Prep run reuses search data
+bool g_bForceFullRebuild = false;  // next dirty rebuild must be FULL (nav data changed)
+// v4.8: hull validation found few blocked beams — skip the geometry-iteration
+// rebuild entirely and let REPAIR fix/beacon them in place. Only above this
+// count (or 25% of beams) do we soft-rebuild with the edges penalized.
+#define GEOM_ITER_REPAIR_ONLY_MAX 8
+
 // GetNavConnections filter
 #define CON_KEEP_ALL 0 // keep all adjacent connections
 #define CON_KEEP_FORWARD 1 // keep only forward-going adjacent connections

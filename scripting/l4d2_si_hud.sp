@@ -11,6 +11,29 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.9.0:
+ *   - 商店解耦（user 拍板）: !shop/!buy 商店整体移出为独立插件 l4d2_shop.sp
+ *     （商品表/菜单/购买/透视特感/火炮支援 I/II + si_hud_shop_enable/
+ *     si_hud_art_* cvar）。本插件保留计分入账、钱包/复活币所有权与持久化、
+ *     复活系统、排行榜、HUD。新增 SH_ 公共 API（RegPluginLibrary
+ *     "l4d2_si_hud_api"：SH_GetWallet/SH_AddWallet/SH_GetReviveCoins/
+ *     SH_AddReviveCoins/SH_GetCoinMax；契约见 include/l4d2_si_hud.inc，
+ *     l4d2_shop 通过 GetNativeHandle 可选绑定）。respawn_coin_* 保留本插件。
+ *   - 删除死代码: gamedata SetHasLaserSight SDKCall（L4D2 无此符号，从未调用）
+ *     + sm_laser_test 调试命令 + gamedata/l4d2_si_hud.txt 文件。
+ *
+ * Changelog v1.8.2:
+ *   - FIX 换图可用积分被清 0 (user 实测): GetMapPrefix 从第一个 '_' 截断 →
+ *     "c1m1_hotel"→"c1m1"、"c1m2_streets"→"c1m2"，地图号混进战役前缀 →
+ *     每次换图都被判成"新战役"：OnMapStart 清可用积分/复活币 + ScoreLoad_Player
+ *     存档战役校验拒绝恢复（v1.7.28 跨图保留、v1.7.43 重连恢复均被此毒化，
+ *     官图从未真正生效）。重写 GetMapPrefix：截 "m<数字>" 标记
+ *     （"c1m2_streets"→"c1"、"zc1_m1"→"zc1"）或尾部 "分隔符+数字" 段
+ *     （"l4d_yama_1"→"l4d_yama"）；无标记独立图 → 整图名。缓冲 16→64。
+ *   - FIX 换图重连窗口过窄 (大三方图加载 >20s 必丢): 断线记录所在图，
+ *     重连时地图已变 = changelevel 自动重连 → 窗口放宽 180s；
+ *     同图重连（疑似主动退服）保持 20s 防带旧钱。
+ *
  * Changelog v1.7.93:
  *   - 可爆炸罐子最终方案（火炮 + 商店罐/桶/烟花）: 直接生成 prop_physics +
  *     罐模型（propanecanister001a / oxygentank01 / gascan001a / explosive_box001）
@@ -679,9 +702,8 @@
 #include <sdktools>
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
-#include <float>         // v1.7.80: 火炮 Sqrt/Cos/Sin
 
-#define PLUGIN_VERSION "1.8.1"
+#define PLUGIN_VERSION "1.9.0"
 
 // ============================================================================
 // ConVar handles
@@ -817,7 +839,7 @@ int       g_iWallet[MAXPLAYERS + 1];                  // v1.7.27: 可用积分 (
 int       g_iRevivesLeft[MAXPLAYERS + 1];             // 本图剩余自动复活次数（OnMapStart 重置 base）
 int       g_iReviveCoins[MAXPLAYERS + 1];             // 复活币余额（战役内保留，新战役清零，断线清零）
 Handle    g_hRespawnTimer[MAXPLAYERS + 1];            // 复活计时器
-char      g_sPrevCampaign[16];                        // 上一张图的战役前缀（前缀变化 = 新战役 → 清钱包/复活币）
+char      g_sPrevCampaign[64];                        // 上一张图的战役前缀（前缀变化 = 新战役 → 清钱包/复活币）
 // v1.7.30: 每图开始积分存档（团灭重开回滚到开局状态）
 // v1.7.35: 可用积分（钱包）一并存档回滚（用户实测团灭后 wallet 未重置）
 bool      g_bFreshMapStart;                           // OnMapStart 置 true，round_start 消费
@@ -930,9 +952,11 @@ void GetMapPrefix(const char[] map, char[] out, int maxlen);
 
 // v1.7.43: 换图重连识别——L4D2 changelevel 时客户端断线自动重连，
 // 会被 OnClientPostAdminCheck 当成"新加入"清空钱包。断线时记录
-// (SteamID, 时间)，重连时 20s 内同 ID 匹配 = 换图重连 → 恢复存档。
+// (SteamID, 时间, 所在图)，重连时同 ID 匹配 = 换图重连 → 恢复存档。
+// v1.8.2: 换图重连窗口放宽到 180s（大三方图加载慢，20s 必丢）；同图重连保持 20s。
 char      g_sDiscAuth[MAXPLAYERS + 1][32];
 float     g_fDiscTime[MAXPLAYERS + 1];
+char      g_sDiscMap[MAXPLAYERS + 1][64];             // v1.8.2: 断线时的地图（换图判定用）
 
 // v1.7.46: L4D2 激光无 networked prop（m_bHasLaserSight 是 CS 系列的，
 // 在 L4D2 上 SetEntProp 抛 "Invalid property"）——只能调用引擎虚函数
@@ -952,6 +976,59 @@ public Plugin myinfo =
     version     = PLUGIN_VERSION,
     url         = ""
 };
+
+// ============================================================================
+// v1.9.0: SH_ public API（l4d2_shop.sp 消费）——商店解耦
+// 钱包/复活币单源所有权在本插件（计分入账 + 持久化 + 复活消费）；
+// 消费方只经 natives 读写，不改内部状态。
+// ============================================================================
+
+public int Native_SH_GetWallet(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients)
+        return 0;
+    return g_iWallet[client];
+}
+
+public int Native_SH_AddWallet(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    int amount = GetNativeCell(2);
+    if (client >= 1 && client <= MaxClients)
+    {
+        int newVal = g_iWallet[client] + amount;
+        if (newVal < 0) newVal = 0;   // 结果钳制 >= 0
+        g_iWallet[client] = newVal;
+    }
+    return (client >= 1 && client <= MaxClients) ? g_iWallet[client] : 0;
+}
+
+public int Native_SH_GetReviveCoins(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients)
+        return 0;
+    return g_iReviveCoins[client];
+}
+
+public int Native_SH_AddReviveCoins(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    int amount = GetNativeCell(2);
+    if (client >= 1 && client <= MaxClients)
+    {
+        int newVal = g_iReviveCoins[client] + amount;
+        if (newVal < 0) newVal = 0;   // 结果钳制 >= 0
+        g_iReviveCoins[client] = newVal;
+    }
+    return (client >= 1 && client <= MaxClients) ? g_iReviveCoins[client] : 0;
+}
+
+public int Native_SH_GetCoinMax(Handle plugin, int numParams)
+{
+    return g_cvRespawnCoinMax.IntValue;
+}
 
 // ============================================================================
 // OnPluginStart
@@ -1213,6 +1290,14 @@ public void OnPluginStart()
 
     AutoExecConfig(true, "l4d2_si_hud");
 
+    // v1.9.0: SH_ public API（l4d2_shop.sp 消费）——商店解耦
+    RegPluginLibrary("l4d2_si_hud_api");
+    CreateNative("SH_GetWallet",      Native_SH_GetWallet);
+    CreateNative("SH_AddWallet",      Native_SH_AddWallet);
+    CreateNative("SH_GetReviveCoins", Native_SH_GetReviveCoins);
+    CreateNative("SH_AddReviveCoins", Native_SH_AddReviveCoins);
+    CreateNative("SH_GetCoinMax",     Native_SH_GetCoinMax);
+
     // ── Events ──────────────────────────────────────────
 
     HookEvent("player_hurt",    Event_PlayerHurt);
@@ -1373,10 +1458,10 @@ void ScoreLoad_Player(int client)
     }
 
     // v1.7.40: 存档战役校验——存档战役 ≠ 当前战役 → 不恢复（跨战役的钱作废）
-    char savedCampaign[16];
+    char savedCampaign[64];
     char curMap[64];
     GetCurrentMap(curMap, sizeof(curMap));
-    char curPrefix[16];
+    char curPrefix[64];
     GetMapPrefix(curMap, curPrefix, sizeof(curPrefix));
 
     if (kv.JumpToKey(auth))
@@ -1626,7 +1711,7 @@ public void OnMapStart()
     // （用户：可用积分不随 map 切换清理，只重新开始战役/切换新战役才清理）
     char map[64];
     GetCurrentMap(map, sizeof(map));
-    char prefix[16];
+    char prefix[64];
     GetMapPrefix(map, prefix, sizeof(prefix));
     // v1.7.41 (user): 战役首图（地图名含 m1，官图 cXm1 + 三方图 m1 命名）
     // → 一律清零（新战役起点；补上同前缀重开 c2m5→c2m1 的前缀判定漏洞）
@@ -1690,14 +1775,50 @@ void RestoreScoreState()
 
 public void GetMapPrefix(const char[] map, char[] out, int maxlen)
 {
-    int idx = FindCharInString(map, '_');
-    if (idx <= 0 || idx >= maxlen)
-        strcopy(out, maxlen, map);
-    else
+    // v1.8.2 FIX (user 实测): 旧实现从第一个 '_' 截断 → "c1m1_hotel"→"c1m1"、
+    // "c1m2_streets"→"c1m2"，地图号混进战役前缀 → 每次换图都被判成"新战役"，
+    // OnMapStart 清可用积分/复活币 + 存档校验拒绝恢复（v1.7.28 跨图保留从未生效）。
+    // 战役前缀 = 去掉地图号标记的部分：
+    //   官图风格 "c1m2_streets" → "c1"（截 "m<数字>" 标记）
+    //   三方图风格 "zc1_m1" → "zc1"、"l4d_yama_1" → "l4d_yama"（截尾部 "分隔符+数字" 段）
+    //   无标记（独立图 "l4d_sh01_oldsh" 等）→ 整图名作为自己的战役
+    int len = strlen(map);
+    int cut = len;
+
+    // 1) "m<数字>" 地图号标记（官图 + 部分三方图）：标记之前即战役
+    for (int i = 0; i < len - 1; i++)
     {
-        strcopy(out, maxlen, map);
-        out[idx] = '\0';
+        if (map[i] == 'm' && map[i + 1] >= '0' && map[i + 1] <= '9')
+        {
+            cut = i;
+            break;
+        }
     }
+
+    // 2) 无 m<数字> 标记：尾部 "分隔符+数字" 段（"l4d_yama_1" 的 "_1"）是地图号
+    if (cut == len)
+    {
+        for (int i = len - 1; i > 0; i--)
+        {
+            if ((map[i] == '_' || map[i] == '-') && map[i + 1] >= '0' && map[i + 1] <= '9')
+            {
+                cut = i;
+                break;
+            }
+        }
+    }
+
+    // 去尾部残留分隔符（"nanningcity_bridge_m6" 截出 "nanningcity_bridge_"）
+    while (cut > 0 && (map[cut - 1] == '_' || map[cut - 1] == '-'))
+        cut--;
+
+    if (cut <= 0)
+        cut = len;
+
+    if (cut >= maxlen)
+        cut = maxlen - 1;
+    strcopy(out, maxlen, map);
+    out[cut] = '\0';
 }
 
 public void OnMapEnd()
@@ -1818,21 +1939,29 @@ public void OnClientPutInServer(int client)
 
 public void OnClientPostAdminCheck(int client)
 {
-    // v1.7.43: 换图重连判定——20s 内同 SteamID 断线过 = changelevel 自动重连
+    // v1.7.43: 换图重连判定——同 SteamID 断线记录匹配 = changelevel 自动重连
     // → 恢复存档（同战役换图不丢钱）；否则 = 真实新加入 → 全默认 0
+    // v1.8.2: 断线后地图已变 = 换图重连（大三方图加载慢，窗口放宽 180s）；
+    // 同图重连 = 疑似主动退服，保持 20s 严格窗口（防中途进服带旧钱）
     char auth[32];
     bool reconnect = false;
     if (GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth), false))
     {
         float now = GetGameTime();
+        char curMap[64];
+        GetCurrentMap(curMap, sizeof(curMap));
         for (int i = 1; i <= MaxClients; i++)
         {
-            if (g_fDiscTime[i] > 0.0 && StrEqual(g_sDiscAuth[i], auth)
-                && now - g_fDiscTime[i] < 20.0)
+            if (g_fDiscTime[i] > 0.0 && StrEqual(g_sDiscAuth[i], auth))
             {
-                reconnect = true;
-                g_fDiscTime[i] = 0.0;   // 消费记录
-                break;
+                bool mapChanged = (strlen(g_sDiscMap[i]) > 0 && !StrEqual(g_sDiscMap[i], curMap));
+                float window = mapChanged ? 180.0 : 20.0;
+                if (now - g_fDiscTime[i] < window)
+                {
+                    reconnect = true;
+                    g_fDiscTime[i] = 0.0;   // 消费记录
+                    break;
+                }
             }
         }
     }
@@ -1855,10 +1984,17 @@ public void OnClientDisconnect(int client)
     ArtEndDesignate(client, true);          // v1.7.80: 断线取消火炮瞄准（退款，须在 ScoreSave 前）
     ScoreSave_Player(client);            // v1.7.34: 断线保存（必须在清零前）
     // v1.7.43: 记录断线 SteamID + 时间（换图重连识别用）
+    // v1.8.2: 顺带记录断线时的地图（重连时判断地图是否已变 → 放宽窗口）
     if (GetClientAuthId(client, AuthId_Steam2, g_sDiscAuth[client], sizeof(g_sDiscAuth[]), false))
+    {
         g_fDiscTime[client] = GetGameTime();
+        GetCurrentMap(g_sDiscMap[client], sizeof(g_sDiscMap[]));
+    }
     else
+    {
         g_fDiscTime[client] = 0.0;
+        g_sDiscMap[client][0] = '\0';
+    }
     g_fLastKillSoundTime[client] = 0.0;
     g_iKillStreak[client] = 0;
     g_iCommonStreak[client] = 0;           // v1.7.4

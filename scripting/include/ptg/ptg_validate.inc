@@ -56,24 +56,45 @@ void Guide_ValidateWalkable_Frame(any unused)
                     g_GuideCells.GetArray(b, bc1, sizeof(Cell));
                     g_GuideCells.GetArray(b + 1, bc2, sizeof(Cell));
                     if (bc1.navArea == Address_Null || bc2.navArea == Address_Null) continue;
-                    // v4.7.3 diag: locate each blocked beam (temporary — remove
-                    // after the blocked-pair mystery is solved)
-                    LogMessage("[PTG] HV-blocked[%d] len=%.0f dz=%.0f p1=(%.0f,%.0f,%.0f) a1=%d p2=(%.0f,%.0f,%.0f) a2=%d",
-                        b, GetVectorDistance(bc1.center, bc2.center),
-                        bc2.center[2] - bc1.center[2],
-                        bc1.center[0], bc1.center[1], bc1.center[2], view_as<int>(bc1.navArea),
-                        bc2.center[0], bc2.center[1], bc2.center[2], view_as<int>(bc2.navArea));
                     char ekey[48];
                     Format(ekey, sizeof(ekey), "%d|%d", view_as<int>(bc1.navArea), view_as<int>(bc2.navArea));
                     g_hBlockedEdges.SetValue(ekey, 1);
                     Format(ekey, sizeof(ekey), "%d|%d", view_as<int>(bc2.navArea), view_as<int>(bc1.navArea));
                     g_hBlockedEdges.SetValue(ekey, 1);
                 }
+
+                // v4.8: few blocked beams → REPAIR in place, no rebuild. The
+                // geometry-iteration rebuild existed so A* could re-plan around
+                // the blocked edges, but on large maps it cost a full pipeline
+                // re-run (~2-4s of budgeted frames) and the SAME walls blocked
+                // the re-validated path again (they are physical). REPAIR's
+                // Z-step/offset/subdivide/local-A*/beacon cascade fixes isolated
+                // clippers in a few frames. Above the threshold the blocked
+                // edges are penalized and a SOFT rebuild re-plans (A* node
+                // index + portal cache are reused — v4.8).
+                int totalBeams = g_GuideCells.Length - 1;
+                if (totalBeams > 0 && g_vBlocked <= GEOM_ITER_REPAIR_ONLY_MAX
+                    && g_vBlocked * 4 <= totalBeams)
+                {
+                    g_iGeomIter++; // consume the iteration budget
+                    LogMessage("[PTG] Geometry: %d/%d blocked beams below repair threshold — REPAIR in place",
+                        g_vBlocked, totalBeams);
+                    if (g_hCvarRepairEnable != null && g_hCvarRepairEnable.BoolValue)
+                        Guide_RepairBlocked();
+                    else if (g_bGuideCellsBusy)
+                    {
+                        g_bGuideCellsBusy = false;
+                        g_iPathGen++;
+                        Guide_RedrawAllToggled();
+                    }
+                    return;
+                }
                 g_iGeomIter++;
-                LogMessage("[PTG] Geometry iteration %d/%d: %d blocked beams recorded — rebuilding path",
+                LogMessage("[PTG] Geometry iteration %d/%d: %d blocked beams recorded — soft rebuilding path",
                     g_iGeomIter, GEOM_ITER_MAX, g_vBlocked);
-                Guide_Cleanup();
-                Guide_Prep();
+                // v4.8: soft rebuild — blocked edges penalize the re-run A*,
+                // node index + portal cache are reused (cost ~1/4 of full).
+                Guide_Prep(true);
                 return;
             }
 

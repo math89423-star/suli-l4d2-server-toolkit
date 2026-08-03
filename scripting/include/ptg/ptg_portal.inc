@@ -318,6 +318,13 @@ stock bool Portal_ComputeBatch(int count)
     if (g_hAStarNodes == null || g_hAStarNodes.Length < 2)
         return true; // nothing to classify — caller advances
 
+    // v4.8: soft rebuild — classification from the previous build is still
+    // valid (same nav mesh). Skip the whole batch phase: re-enumerating
+    // 18K+ adjacent pairs on large maps was ~1.3s of budgeted frames per
+    // dirty rebuild.
+    if (g_bPortalReady)
+        return true;
+
     if (!corner_available)
     {
         g_bPortalBuildFailed = true;

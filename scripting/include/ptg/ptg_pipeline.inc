@@ -39,7 +39,7 @@ int g_iPrepFrames, g_iErased, g_iNavBlocked, g_iTotalCollected, g_iTighten;
 
 float g_fPrepStartTime;
 
-void Guide_Prep()
+void Guide_Prep(bool soft = false)
 {
     // v4.6: Old 30s total-time watchdog removed. It killed SLOW pipelines on big
     // maps (unbounded build time → infinite fallback retry loop → permanent path
@@ -70,6 +70,26 @@ void Guide_Prep()
     // recovery) consumes the large-map lazy-build gate — only the background
     // prebuild in Timer_AutoCheck is gated.
     g_bLazyBuildRequested = true;
+
+    // v4.8: soft rebuild — the nav mesh itself hasn't changed (blocked-cell
+    // detour, geometry iteration), only the path needs re-planning. Reuse the
+    // A* node index, portal classification, HPA clusters and bridge detection;
+    // jump straight into post-build. On 4.5K-area maps the portal re-classify
+    // alone was ~1.3s of budgeted frames per rebuild (18954 pairs), and dirty
+    // rebuilds fired every 60-120s → continuous micro-hitching.
+    // evtPostNav (round_start_post_nav) sets g_bForceFullRebuild so a real
+    // nav change still gets the full rebuild.
+    g_bSoftRebuild = soft && !g_bForceFullRebuild;
+    g_bForceFullRebuild = false; // consumed by this prep
+    if (g_bSoftRebuild)
+    {
+        Guide_CleanupSoft();
+        LogMessage("[PTG] Soft rebuild — reusing node index + portal cache");
+    }
+    else
+    {
+        Guide_Cleanup();
+    }
     #if DEBUG>1
     LogMessage("Guide_Prep");
     #endif
@@ -92,7 +112,101 @@ void Guide_Prep()
     g_iPrepFrames = 0;
     #endif
     timer_nav = null;
+    // v4.8: soft rebuild starts in the post-build sub-state machine
+    // (g_iBuildPhase -1 → case 0 rescue scan → IG → A*). Phases 0-3
+    // (node index / portals / HPA / bridges) are already done.
+    if (g_bSoftRebuild)
+    {
+        if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1 || !Portal_Active())
+        {
+            // search data missing (first build, plugin reload) — full rebuild
+            g_bSoftRebuild = false;
+            g_iBuildPhase = 0;
+            g_iPostStep = 0;
+            LogMessage("[PTG] Soft rebuild downgraded to full (search data missing)");
+        }
+        else
+        {
+            g_iBuildPhase = -1;
+        }
+    }
     OnFramePrep(true);
+}
+
+// v4.8: cleanup for a SOFT rebuild — tear down the path and search state but
+// KEEP the reusable search data (node index, portal classification, HPA
+// clusters, bridge edges). The nav mesh is unchanged, so re-deriving all of
+// it would burn minutes of budgeted frames per dirty rebuild.
+void Guide_CleanupSoft()
+{
+    g_iPrepStage = STAGE_NONE; // tell guide prep to cancel
+    guide_prep = false;
+    g_bPathDirty = false;
+    g_bGuideCellsBusy = false; // v4.6: REPAIR chain died with the pipeline — unblock draws/requests
+    // NOTE: no Portal_Clear() — portal classification survives across soft rebuilds.
+    // NOTE: g_iHPAClusterCount/g_iHPABuildStage stay — HPA clusters are kept.
+    g_iBuildPhase = 0;
+    g_iPortalBatchIdx = 0;
+    g_fPrepStartTime = 0.0;
+    g_fLastPrepProgressTime = 0.0;
+
+    // v4.6: release distributed sub-state machine resources (IdentifyGoal BFS
+    // + SMOOTH chunks). Must happen on every cleanup — the mapgen guard now
+    // actually fires, so stale async frames from the previous map abort here.
+    g_iIGStage = 0;
+    delete g_hIGQueue;
+    g_hIGQueue = null;
+    delete g_hIGReachable;
+    g_hIGReachable = null;
+    delete g_hSmoothNodePath;
+    g_hSmoothNodePath = null;
+    delete g_hFunnelResult;
+    g_hFunnelResult = null;
+    delete g_hPartialBeacon; // v4.6: partial-path dead-end beacon
+    g_hPartialBeacon = null;
+    g_bAStarPartialPath = false;
+
+    if (guide_ready)
+    {
+        guide_ready = false;
+    }
+    delete g_GuideCells;
+    delete g_bBeamWalkable;
+
+    // Clean A* search state (may still be open if map changed mid-search)
+    delete g_hAStarOpen;
+    delete g_hAStarGScore;
+    delete g_hAStarCameFrom;
+    delete g_hAStarEdgeType;
+    delete g_hAStarClosed;
+
+    // KEEP: g_hAStarNodes / g_hAStarCenters / g_hAStarAreaToIndex /
+    // g_hSpatialHash / g_hPortalCache / g_hNonMeshEdges / HPA clusters /
+    // g_hBlockedEdges — all still valid for the unchanged nav mesh.
+
+    // Reset globals to clean state
+    g_bAStarPathFound = false;
+    g_iAStarGoalIndex = -1;
+    g_iAStarBestIdx = -1;
+    g_fAStarBestG = -1.0;
+    g_aAStarStart = 0;
+    g_aAStarGoal = 0;
+    g_bFoundRescueVehicle = false;
+    g_aNavRescueVehicle = Address_Null;
+    g_fFlowRescueVehicle = -1.0;
+    g_fMaxFlow = -1.0;
+    finale_stitched = false;
+    finale_backwards = false;
+
+    delete RescueVehicleCells;
+
+    // v4.7 smoothing state dies with the path (portals stay)
+    delete g_hPullResult;
+    g_hPullResult = null;
+    delete g_hSSFAPortals;
+    g_hSSFAPortals = null;
+    delete g_hSSFAPath;
+    g_hSSFAPath = null;
 }
 
 void Guide_Cleanup()
@@ -504,7 +618,12 @@ void OnFramePrep(bool new_frame = true)
                 DetectNonMeshConnections_Frame();
 
             // Run A* search for this frame
-            int result = AStar_SearchFrame(ASTAR_NODES_PER_FRAME);
+            // v4.8.2: adaptive cursor (l4d_path_to_goal_astar_nodes, default
+            // 300) replaces the hardcoded 100 — the old flat 100 capped A*
+            // throughput at ~5-6 nodes/frame under the 1.5ms budget, making
+            // large-map searches take 6-10s. The in-loop budget check
+            // (every 8 nodes) still shrinks the cursor when a frame runs hot.
+            int result = AStar_SearchFrame(g_iAStarNodesPerFrame);
 
             if (result == 1)
             {

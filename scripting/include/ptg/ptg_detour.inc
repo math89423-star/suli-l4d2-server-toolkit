@@ -569,8 +569,42 @@ void Detour_Fail()
     // cells made ±12/±24/±48 all fail; each retry burned ~40-100s of
     // budgeted frames before reaching the full rebuild it needed anyway.
     // One attempt with the initial window, then rebuild.
-    LogMessage("[PTG] Detour failed (window ±%d at cell %d) — full rebuild",
-        g_iDetourD, g_iDetourBlockedIdx);
+
+    // v4.8: remember the blocked window's edges in g_hBlockedEdges. Without
+    // this, the rebuilt path contains the same physical blocker again (the
+    // nav mesh didn't change) and the 6s PathIntegrityCheck re-triggers a
+    // detour→rebuild loop every 60-120s — the "hitching every minute" symptom
+    // on large maps. Penalizing these edges makes the next A* plan around the
+    // persistent blocker and converge.
+    if (g_GuideCells != null && g_iDetourBlockedIdx >= 0)
+    {
+        if (g_hBlockedEdges == null) g_hBlockedEdges = new StringMap();
+        int s = g_iDetourBlockedIdx - 2;
+        if (s < 0) s = 0;
+        int e = g_iDetourBlockedIdx + 2;
+        if (e >= g_GuideCells.Length) e = g_GuideCells.Length - 1;
+        Cell c0, c1;
+        int injected = 0;
+        for (int i = s; i < e; i++)
+        {
+            g_GuideCells.GetArray(i, c0, sizeof(Cell));
+            g_GuideCells.GetArray(i + 1, c1, sizeof(Cell));
+            if (c0.navArea == Address_Null || c1.navArea == Address_Null) continue;
+            char ekey[48];
+            Format(ekey, sizeof(ekey), "%d|%d", view_as<int>(c0.navArea), view_as<int>(c1.navArea));
+            g_hBlockedEdges.SetValue(ekey, 1);
+            Format(ekey, sizeof(ekey), "%d|%d", view_as<int>(c1.navArea), view_as<int>(c0.navArea));
+            g_hBlockedEdges.SetValue(ekey, 1);
+            injected++;
+        }
+        LogMessage("[PTG] Detour failed (window ±%d at cell %d) — %d edges recorded as blocked — soft rebuild",
+            g_iDetourD, g_iDetourBlockedIdx, injected);
+    }
+    else
+    {
+        LogMessage("[PTG] Detour failed (window ±%d at cell %d) — full rebuild",
+            g_iDetourD, g_iDetourBlockedIdx);
+    }
     g_bDetourActive = false;
     g_bGuideCellsBusy = false;
     g_iDetourStage = 0;

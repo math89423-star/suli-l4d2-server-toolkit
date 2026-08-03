@@ -17,7 +17,7 @@
 #include <dhooks>
 #include <l4d_path_to_goal>
 
-#define PLUGIN_VERSION 			"4.7 2026-08-02"
+#define PLUGIN_VERSION 			"4.8.3 2026-08-03"
 
 // Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
 // Per-client: each player toggles their own guide independently
@@ -253,6 +253,19 @@ public void OnPluginStart()
     // Auto-guide: check periodically if guide is ready, then start pulse timer
     // Use recursive one-shot timers (TIMER_REPEAT doesn't fire on empty servers)
     g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
+
+    // v4.8.1: mid-map reload — SM does NOT fire OnMapStart when a plugin is
+    // loaded while a map is already running, so map_started stays false and
+    // the guide is dead (every command silently ignored) until the next map
+    // change. If a map is live, adopt it immediately: MapStarted() sets
+    // map_started, recreates the auto-check timer (kills the one just
+    // created above), and resets per-map state. The first AutoCheck tick then
+    // runs a normal full Guide_Prep (fresh instance — search data is empty).
+    char g_sMapName[PLATFORM_MAX_PATH];
+    if (GetCurrentMap(g_sMapName, sizeof(g_sMapName)) && g_sMapName[0] != '\0')
+    {
+        MapStarted();
+    }
 }
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
@@ -373,6 +386,11 @@ void evtPostNav(Event event, const char[] name, bool dontBroadcast)
     // round — on large maps a full Guide_Cleanup meant a 30s+ blackout and the
     // death/rejoin "path lost" symptom. NavChanged(true) keeps the old path
     // drawing for toggled clients while the background rebuild runs (≤2s).
+    // v4.8: the nav mesh WAS rebuilt for this round — the next dirty rebuild
+    // must re-derive node index + portals from the new nav data (soft rebuild
+    // only re-plans the same mesh). evtPostNav is the sole caller that does
+    // this; all other dirty sources (detour failure, geom iteration) reuse.
+    g_bForceFullRebuild = true;
     NavChanged(true);
 }
 
@@ -1000,12 +1018,14 @@ Action Timer_AutoCheck(Handle timer)
     // Cleanup only when a path actually exists to tear down.
     if (g_bPathDirty && !guide_prep)
     {
-        LogMessage("[PTG] Rebuilding dirty path (%d cells, auto=%d)",
+        LogMessage("[PTG] Rebuilding dirty path (%d cells, auto=%d)%s",
             g_GuideCells != null ? g_GuideCells.Length : 0,
-            g_hCvarAutoEnable.BoolValue);
+            g_hCvarAutoEnable.BoolValue,
+            g_bForceFullRebuild ? " — FULL (nav data changed)" : "");
         g_bPathDirty = false;
-        if (guide_ready) Guide_Cleanup();
-        Guide_Prep();
+        // v4.8: soft rebuild — reuse node index + portal cache unless the
+        // nav mesh itself changed (evtPostNav set g_bForceFullRebuild).
+        Guide_Prep(true);
     }
 
     // Auto pulse mode (only when cvar enabled)
