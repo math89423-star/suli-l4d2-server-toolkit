@@ -51,6 +51,21 @@
 //         aggro 由 BhopEligible 消费（max_dist 翻倍 + 冷却缩短）；
 //         近战攻击簇 Cooldown(1.5) 对齐引擎 z_tank_attack_interval=1.5
 //         （冷却期按键 = 无效挥拳，与 Smoker/Charger 同模式）
+// v4.1: Tank 高级玩法四件套（用户设计方向：无脑连跳贴脸一拳 = 低级做法）——
+//         [协同配合] Tank 消费协同窗口：coordPinSeq（窗口+pin → 锁定被 pin
+//         者）+ coordPunchSeq（窗口内 ≤300u 直测 pin 出拳必杀）；mode 6
+//         巨兽协同保持小队分散（不命令集火）；Tank 出拳在非 mode6 下
+//         SI_SignalAttack 开团（CommandABot 小队跟进）
+//         [追击优化] damager 距离门控 ai_tank_damager_max_dist=800
+//         （风筝手不再把 Tank 拖离战场）；窗口期由 coordPinSeq 自然无视风筝手
+//         [地形秒杀] propKillSeq：Tank 打汽车/爆炸罐（prop_car*/4 种罐类，
+//         注入 500 拳伤确定性引爆，350u 爆圈内生还者被秒，inflictor=tank）
+//         [飞石精准+预判] TankAct_AimRock 提前量瞄准（lead=vel×dist/800，
+//         clamp 400u）+ L4D_TankRock_OnRelease 释放校正（真实 |vecVel|
+//         自修正 bhop 自身速度 + 动画期视角漂移；原版 AI 投石同享校正）
+//         新 cvar 8 个：ai_tank_coord / rock_predict / rock_lead_max /
+//         rock_pitch_offset / prop_kill / prop_punch_damage /
+//         prop_blast_radius / damager_max_dist
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -93,7 +108,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "4.0.5",
+    version = "4.1.0",
     url = "github.com/breezyplease"
 };
 

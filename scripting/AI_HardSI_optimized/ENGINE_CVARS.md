@@ -84,6 +84,13 @@
 
 ## 三、插件引擎数值干预清单（既成模式，改动需在此登记）
 
+### v4.1 新增机制基准（2026-08-03，代码侧推导 + l4dd 源码核对）
+
+- **石头投掷速度构成**：`vVel = 视线方向 × z_tank_throw_force(800) + Tank 自身速度 + z+80`（引擎 CTank::ThrowRock 逻辑，l4dd detour 核对）。→ 飞石预判 `t = dist/800` 是近似（bhop 时自身速度 +400~500u/s），`L4D_TankRock_OnRelease` 用释放瞬间真实 |vecVel| 重算自修正
+- **L4D_TankRock_OnRelease**：GlobalForward（l4dd_setup.sp 注册），插件声明 `public Action:L4D_TankRock_OnRelease(tank, rock, vecPos, vecAng, vecVel, vecRot)` 即接收；返回 Plugin_Changed + 改 vecVel → MRES_ChangedHandled 写回引擎。投石预判的权威校正通道
+- **prop 破坏注入模式**（l4d2_shop.sp:1800-1816 已核验）：`SDKHooks_TakeDamage(prop, attacker, inflictor, dmg, DMG_CLUB, -1, NULL_VECTOR, propPos, false)` —— damagePosition 必须传 prop 原点（否则爆炸衰减从世界原点算），归属跟 inflictor。prop_car* 损毁即爆炸（vanilla）；罐类（丙烷/汽油/氧气/烟花）死亡触发 propdata onbreak:explode_fire
+- **飞石弹道弧线垂直误差**：无引擎数据可查，`ai_tank_rock_pitch_offset` 默认 0，待空服实测标定（铁律：不验证不乱填）
+
 | cvar | 干预值 | 干预插件/位置 | 依据 |
 |------|--------|---------------|------|
 | `smoker_tongue_delay` | 1.5 → 1.0 | AI_HardSI `Smoker_OnModuleStart` | 更凶的拉人节奏 |
