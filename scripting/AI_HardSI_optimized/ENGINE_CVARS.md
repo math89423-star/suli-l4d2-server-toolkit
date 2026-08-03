@@ -25,6 +25,10 @@
 | `hunter_leap_away_give_up_range` | 0（def 1000） | 插件设 0 | ✅ |
 | `hunter_pounce_max_loft_angle` | 0（def 45） | 插件设 0 | ✅ |
 | `boomer_exposed_time_tolerance` | 10000（def 1.0） | 插件设 10000（Boomer 永不因被看到而逃） | ✅ |
+| `z_vomit_range` | **300** | Boomer 呕吐射程（第二轮实测）；v4.0.4 全部分支 500/550/350 → 300 | ✅ v4.0.4 对齐 |
+| `z_spit_range` | **900** | Spitter 酸液射程（第二轮实测）；插件 800/900 全部 ≤ 900 | ✅ 已验证无需改 |
+| `z_jockey_ride_damage` | 4 | Jockey 骑乘每秒伤害（第二轮实测；`jockey_ride_damage` 等名不存在） | — |
+| `z_tank_attack_interval` | 1.5 | Tank 攻击间隔（第二轮实测；`tank_attack_interval` 等名不存在） | — |
 
 ### 冲锋覆盖距离计算（750 的依据）
 
@@ -41,9 +45,12 @@
 |------|------|------|
 | `ai_ChargerChargeDistance` | Unknown command | 竞争配置（confogl/AllCharger）自创 cvar，非原版引擎。引擎对按钮路径冲锋无距离限制 |
 | `ai_fast_pounce_proximity` / `ai_straight_pounce_proximity` | Unknown command | **Hunter fPounceRange 一直用 fallback 1000 / fStraightRange 200**（v3.3 注释声称已接 cvar 是虚假记录）；1000 为 v4.0.1 实战验证值，暂保持 |
-| `smoker_tongue_range` / `z_tongue_range` | Unknown command | 舌头射程引擎硬编码（社区常识 ~1100u）；插件 IsInRange(850) 保守取值 ✅ |
-| `hunter_pounce_interval` | Unknown command | 扑击冷却无 cvar；插件 Cooldown(1.0) 为既有实战模式 |
-| `jockey_ride_*` | Unknown command | Jockey 骑乘参数非这些名字 |
+| `smoker_tongue_range` / `z_tongue_range` / `z_tongue_reach` / `smoker_tongue_reach` | Unknown command | 舌头射程引擎硬编码（社区常识 ~1100u）；插件 IsInRange(850) 保守取值 ✅ |
+| `hunter_pounce_interval` / `z_hunter_pounce_range` / `z_hunter_pounce_speed` | Unknown command | 扑击冷却/射程/速度无 cvar（全硬编码）；插件 Cooldown(1.0) 为既有实战模式 |
+| `jockey_ride_*` | Unknown command | Jockey 骑乘参数非这些名字（实际是 `z_jockey_ride_damage`=4） |
+| `boomer_vomit_range` / `boomer_vomit_interval` / `z_vomit_speed` / `z_vomit_duration` | Unknown command | 呕吐除 `z_vomit_range` 外无其他 cvar |
+| `z_spit_damage` / `z_spit_speed` / `z_spit_ammo` | Unknown command | 酸液伤害/速度/弹药无 cvar |
+| `z_charge_damage` / `z_charger_damage` | Unknown command | 冲锋伤害无 cvar |
 
 ---
 
@@ -83,9 +90,9 @@
 | 数值 | 当前值 | 状态 |
 |------|--------|------|
 | Hunter 高位扑上限 `fPounceRange + 600`（1600u） | 1600 | 估算（高位 40-200u 的高度加成），方向保守（过高→sprint，无危害）；实战观察后再微调 |
-| Hunter fPounceRange fallback | 1000 | 无 cvar 支撑，但 v4.0.1 出生蠕动修复实战验证过；若创建 `ai_fast_pounce_proximity` cvar 可调 |
+| Hunter fPounceRange fallback | 1000 | 无 cvar 支撑（第二轮确认 `z_hunter_pounce_range` 不存在），但 v4.0.1 出生蠕动修复实战验证过；若创建 `ai_fast_pounce_proximity` cvar 可调 |
 | 冲锋覆盖口径（~940 vs ~1190u） | — | 取决于 warmup 是否计入 duration；不影响 750 结论（两口径都 ≥ 940） |
-| Tank 相关数值 | — | 未实测（tank_rock_damage / tank_punch_damage 等不在本次范围）；v4.0.3 修复 5-6（Tank aggro/避障 cvar 接入）前补测 |
+| Tank 相关数值 | — | 第二轮确认 `tank_attack_interval`/`tank_rage_duration`/`tank_rock_speed` 不存在（实际 `z_tank_attack_interval`=1.5）；修复 5-6（Tank aggro/避障 cvar 接入）前补测剩余数值 |
 
 ---
 

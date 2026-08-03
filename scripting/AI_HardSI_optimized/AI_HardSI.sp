@@ -33,6 +33,12 @@
 //                 依据；服务器内存值本就是 750，防重启掉值）；
 //                 Hunter highPounceSeq 加 1000-1600u 距离门控（消除跳-蹲抖动）
 //                 + 5 个攻击序列补 Cooldown(1.0)（narrow/close/coord/openStrat）
+// v4.0.4: Boomer 呕吐射程对齐引擎实测 z_vomit_range=300（第二轮 rcon 补测）：
+//         v3.5 的 open 分支 550/500 为自创值，超过引擎射程 —— approach 在
+//         550u 就停 → 永远进不了 300u 射程，站桩无限按无效呕吐键；
+//         8 处 350/500/550 → 300（mode1/narrow/openS0/openS1/semi/approach 全系）；
+//         z_spit_range=900 实测 → Spitter 800/900 全部对齐无需改动（已验证）；
+//         z_jockey_ride_damage=4（骑乘 DPS）、z_tank_attack_interval=1.5 入库
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -74,7 +80,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "4.0.3",
+    version = "4.0.4",
     url = "github.com/breezyplease"
 };
 

@@ -12,6 +12,10 @@
 //   - Narrow corridor: hold chokepoint → vomit covers entire passage
 //   - Open area: flank behind cover → vomit from unexpected angle
 //   - Semi-open: hug wall → use corner for ambush vomit
+// v4.0.4: 全部呕吐距离对齐引擎实测 z_vomit_range=300（空服 rcon，见
+//   ENGINE_CVARS.md）。v3.5 的 500/550 为自创值：引擎在 300u 外不发射，
+//   approach 在 550u 就停 → Boomer 永远进不了射程，站桩对空气无限按无效
+//   呕吐键（原版 Boomer 就是贴脸吐，射程只有 300u）。
 // ============================================================================
 
 #if defined _bt_boomer_included
@@ -138,7 +142,7 @@ stock int BT_CreateBoomerTree() {
         BT_CreateCondition(CND_IsAttackWindow),
         BT_CreateAction(ACT_AcquirePinTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(350.0),
+        BT_CreateIsInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -148,7 +152,7 @@ stock int BT_CreateBoomerTree() {
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(350.0),
+        BT_CreateIsInRange(300.0),
         BT_CreateAction(ACT_HoldChokepoint),
         BT_CreateAction(BoomerAct_Vomit)
     );
@@ -156,7 +160,8 @@ stock int BT_CreateBoomerTree() {
     // v3.2 FIX: Split into approach + vomit branches.
     // Previously FlankApproach(RUNNING) blocked BoomerAct_Vomit in the sequence.
     // ==========================================
-    // v3.5: Open terrain — 2-way random + extended range (550u)
+    // v3.5: Open terrain — 2-way random
+    // v4.0.4: 550/500 射程对齐引擎 300（见文件头注释）
     // ==========================================
     int openStrategyRoll = BT_CreateSequence(2,
         BT_CreateCondition(CND_IsOpenArea),
@@ -166,28 +171,28 @@ stock int BT_CreateBoomerTree() {
     int openS0_Approach = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateIsNotInRange(550.0),
+        BT_CreateIsNotInRange(300.0),
         BT_CreateAction(ACT_FlankApproach)
     );
     int openS0_Vomit = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(550.0),
+        BT_CreateIsInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
     // Strat 1: Erratic vomit — zigzag approach → vomit from varied angle
     int openS1_Approach = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateIsNotInRange(500.0),
+        BT_CreateIsNotInRange(300.0),
         BT_CreateAction(ACT_ErraticApproach)
     );
     int openS1_Vomit = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(500.0),
+        BT_CreateIsInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -197,7 +202,7 @@ stock int BT_CreateBoomerTree() {
     int semiHugApproach = BT_CreateSequence(4,
         BT_CreateCondition(CND_IsSemiOpen),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateInverter(BT_CreateIsInRange(350.0)),
+        BT_CreateInverter(BT_CreateIsInRange(300.0)),
         BT_CreateAction(ACT_HugWall)
     );
     // Semi-open: vomit from cover when in range
@@ -205,7 +210,7 @@ stock int BT_CreateBoomerTree() {
         BT_CreateCondition(CND_IsSemiOpen),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(350.0),
+        BT_CreateIsInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
