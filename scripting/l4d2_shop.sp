@@ -667,6 +667,9 @@ public void OnPluginStart()
     // v1.3.0: 空服实测脚手架——准星单件（admin；随机罐子或榴弹，走正式 kind=5 分流）
     RegAdminCmd("sm_art5test", Cmd_Art5Test, ADMFLAG_ROOT,
         "[DEBUG] 火力支援III-饱和轰炸: spawn one random mixed item at the crosshair (empty-server test).");
+    // v1.6.0: 测试发分——直接写钱包（admin；sm_shop_give <名字> <积分>）
+    RegAdminCmd("sm_shop_give", Cmd_ShopGive, ADMFLAG_ROOT,
+        "[DEBUG] give wallet score: sm_shop_give <name> <amount>");
 
     // ── Events ──────────────────────────────────────────
 
@@ -1453,6 +1456,82 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
             delete menu;
     }
     return 0;
+}
+
+// v1.6.0: 测试发分——sm_shop_give <名字> <积分>（直接改钱包，不经过购买链路）
+// 注意：SRCDS 控制台会把中文名按字节拆成多个 arg（粟藜 → 多段），故不走
+// GetCmdArg(1/2)，用整串解析：末段 = 积分，其余段去掉空格拼回名字。
+public Action Cmd_ShopGive(int client, int args)
+{
+    if (args < 2)
+    {
+        ReplyToCommand(client, "[商店] 用法: sm_shop_give <名字> <积分>");
+        return Plugin_Handled;
+    }
+    char full[160];
+    GetCmdArgString(full, sizeof(full));
+
+    int pos = -1;
+    for (int i = strlen(full) - 1; i >= 0; i--)
+    {
+        if (full[i] == ' ')
+        {
+            pos = i;
+            break;
+        }
+    }
+    if (pos <= 0)
+    {
+        ReplyToCommand(client, "[商店] 用法: sm_shop_give <名字> <积分>");
+        return Plugin_Handled;
+    }
+
+    char amt[16];
+    strcopy(amt, sizeof(amt), full[pos + 1]);
+    int amount = StringToInt(amt);
+    if (amount == 0)
+    {
+        ReplyToCommand(client, "[商店] 积分必须非 0");
+        return Plugin_Handled;
+    }
+
+    char name[96];
+    int n = 0;
+    for (int i = 0; i < pos; i++)
+    {
+        if (full[i] != ' ')                    // 多 token 拼接（中文名拆分场景）
+            name[n++] = full[i];
+    }
+    name[n] = '\0';
+
+    int target = 0;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (!IsClientInGame(i) || IsFakeClient(i))
+            continue;
+        char cname[64];
+        GetClientName(i, cname, sizeof(cname));
+        if (StrEqual(cname, name, false))
+        {
+            target = i;                        // 精确命中优先
+            break;
+        }
+        if (target == 0 && StrContains(cname, name, false) == 0)
+            target = i;                        // 前缀匹配（小服够用）
+    }
+    if (target == 0)
+    {
+        ReplyToCommand(client, "[商店] 找不到玩家 \"%s\"", name);
+        return Plugin_Handled;
+    }
+
+    int before = SH_GetWallet(target);
+    SH_AddWallet(target, amount);
+    int after = SH_GetWallet(target);
+    LogMessage("[shop] give client=%N amount=%d wallet %d -> %d", target, amount, before, after);
+    ReplyToCommand(client, "[商店] 已给 %N 发 %d 积分（%d → %d）", target, amount, before, after);
+    PrintToChat(target, "\x04[商店]\x01 管理员给你发放 \x03%d\x01 积分（当前 \x04%d\x01）", amount, after);
+    return Plugin_Handled;
 }
 
 public Action Cmd_Shop(int client, int args)
