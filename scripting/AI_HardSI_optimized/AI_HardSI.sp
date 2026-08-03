@@ -58,9 +58,9 @@
 //         SI_SignalAttack 开团（CommandABot 小队跟进）
 //         [追击优化] damager 距离门控 ai_tank_damager_max_dist=800
 //         （风筝手不再把 Tank 拖离战场）；窗口期由 coordPinSeq 自然无视风筝手
-//         [地形秒杀] propKillSeq：Tank 打汽车（prop_car*，注入 500 拳伤
-//         确定性引爆，350u 爆圈内生还者被秒，inflictor=tank；用户拍板只打
-//         汽车不打爆炸罐 —— Tank 拳不作用于罐类，propdata 爆炸链路不可靠）
+//         [地形秒杀] 设计实现后经用户拍板整体移除（2026-08-03）—— Tank 拳
+//         只作用于汽车/树干等物理实体、不作用于爆炸物，罐类爆炸链路不可靠，
+//         "不确定宁愿用原版"。保持原版行为（propKillSeq 已删，cvar 3 个已删）
 //         [飞石精准+预判] TankAct_AimRock 提前量瞄准（lead=vel×dist/800，
 //         clamp 400u）+ L4D_TankRock_OnRelease 释放校正（真实 |vecVel|
 //         自修正 bhop 自身速度 + 动画期视角漂移；原版 AI 投石同享校正）
