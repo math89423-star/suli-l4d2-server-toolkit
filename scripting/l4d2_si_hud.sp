@@ -11,6 +11,15 @@
  *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *
+ * Changelog v1.9.4:
+ *   - 免费复活额度改为每图 1 次（user 拍板）: si_hud_respawn_base 默认 2→1
+ *     （每图 1 次免费复活 = 2 条命）；复活币跨图继承不变，次数用完才扣币。
+ *   - 复活延迟 15s→20s（user 拍板）: si_hud_respawn_delay 默认 20.0，留电击器
+ *     救援窗口（队友可先电击救起）。
+ *   - 三处播报复活币 + 剩余免费复活次数（user）: 进服（OnClientPostAdminCheck）、
+ *     每图开始（OnMapStart）、死亡复活时（ScheduleRespawn 统一文案，含消耗
+ *     后剩余值；躺尸等待分支同步统一格式）。
+ *
  * Changelog v1.9.0:
  *   - 商店解耦（user 拍板）: !shop/!buy 商店整体移出为独立插件 l4d2_shop.sp
  *     （商品表/菜单/购买/透视特感/火炮支援 I/II + si_hud_shop_enable/
@@ -695,6 +704,20 @@
  *
  * Dependencies: sourcemod + sdktools
  * Pure server-side. No client files needed.
+ *
+ * v1.9.2 (2026-08-03): 复活完成全局 forward「SH_OnClientRespawned」
+ * （Timer_RespawnTeleport 确认存活后触发,ET_Ignore,Param_Cell）——
+ * l4d2_shop v1.5.1 监听它发放"复活套装"(M60+消防斧+止痛药+土质炸弹)
+ * + 满血 100。闲置/接管不归本插件管（引擎自管,用户拍板）。
+ *
+ * v1.9.3 (2026-08-03, 用户拍板):
+ * ① 击杀聊天播报改版——爆头 = "HEADSHOT" 词、普通 = "KILL"（例:
+ *    Rochelle [M16] HEADSHOT BOOMER），去掉中文"爆头"后缀（近战/坦克
+ *    ★ 保留）；GetSIName 全插件去中文昵称（只留 SMOKER/BOOMER/…），
+ *    Witch 的"女巫"昵称同去。
+ * ② 过关奖励——map_transition 每人 +si_hud_mapend_reward（2000）积分,
+ *    PrintToChatAll 聊天播报；替代 l4d2_survivor_transition 的过关回满血
+ *    （该插件已禁用,2026-08-03）。
  */
 
 #pragma semicolon 1
@@ -705,7 +728,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.9.1"
+#define PLUGIN_VERSION "1.9.4"
 
 // ============================================================================
 // ConVar handles
@@ -719,6 +742,7 @@ ConVar g_cvChatEnable;
 ConVar g_cvKillHintEnable;
 ConVar g_cvKillCardEnable;
 ConVar g_cvKillCardTime;
+ConVar g_cvMapEndReward;    // v1.9.3: 过关奖励积分/人（替代过关回满血）
 ConVar g_cvBFWindow;
 ConVar g_cvBFPointsBasePct;        // v1.7.52: 基础分 = 特感实际血量 × %
 ConVar g_cvBFHeadshotMult;         // v1.7.52: 爆头击杀倍率
@@ -799,11 +823,12 @@ float     g_fLastStreakKillTime[MAXPLAYERS + 1];      // BF banner: last streak-
 int       g_iCommonStreak[MAXPLAYERS + 1];            // v1.7.4: common streak count (separate icons from SI skulls, shared window)
 int       g_iTotalScore[MAXPLAYERS + 1];              // v1.7.6: 本关积分 (scoreboard; 每关从 0 算, OnMapEnd 清零)
 int       g_iWallet[MAXPLAYERS + 1];                  // v1.7.27: 可用积分 (商店钱包; 战役内跨图保留, 新战役清零)
-// v1.7.28: 复活次数系统（用户：每图初始 2 次=3 条命，复活 15s；复活币 12000 无限购；
+// v1.7.28: 复活次数系统（用户：每图初始 1 次=2 条命，复活 20s；复活币 12000 无限购；
 // 次数用完不自动复活 → 电击器回归价值）
 int       g_iRevivesLeft[MAXPLAYERS + 1];             // 本图剩余自动复活次数（OnMapStart 重置 base）
 int       g_iReviveCoins[MAXPLAYERS + 1];             // 复活币余额（战役内保留，新战役清零，断线清零）
 Handle    g_hRespawnTimer[MAXPLAYERS + 1];            // 复活计时器
+Handle    g_hFwdRespawned;                            // v1.9.2: 复活完成全局 forward（shop 发复活套装）
 char      g_sPrevCampaign[64];                        // 上一张图的战役前缀（前缀变化 = 新战役 → 清钱包/复活币）
 // v1.7.30: 每图开始积分存档（团灭重开回滚到开局状态）
 // v1.7.35: 可用积分（钱包）一并存档回滚（用户实测团灭后 wallet 未重置）
@@ -984,6 +1009,11 @@ public void OnPluginStart()
     g_cvKillCardTime = CreateConVar("si_hud_killcard_time", "2.0",
         "Kill feedback (banner + kill card, one center message) display duration in seconds before the center clear.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
+    // v1.9.3 (user): 过关奖励 — 每小关进安全门结束每人 +N 积分
+    //（替代 l4d2_survivor_transition 的过关回满血，该插件已禁用；0=关闭）
+    g_cvMapEndReward = CreateConVar("si_hud_mapend_reward", "2000",
+        "Map-end reward: score granted to every survivor on map_transition (0 = off).", FCVAR_NOTIFY, true, 0.0, true, 99999.0);
+
     CreateConVar("si_hud_banner_time", "1.0",
         "DEPRECATED (v1.7.1): banner and kill card share one message timed by si_hud_killcard_time. Kept so cfg files don't error.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
@@ -1106,10 +1136,10 @@ public void OnPluginStart()
     //（替代 l4d2_auto_respawn；复活币商店 12000 无限购）
     g_cvRespawnEnable = CreateConVar("si_hud_respawn_enable", "1",
         "Enable the limited auto-respawn system (replaces l4d2_auto_respawn).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvRespawnBase = CreateConVar("si_hud_respawn_base", "2",
-        "Auto-respawn count per player per map (3 lives total with the initial one).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
-    g_cvRespawnDelay = CreateConVar("si_hud_respawn_delay", "15.0",
-        "Seconds before auto respawn (was 35 in l4d2_auto_respawn).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+    g_cvRespawnBase = CreateConVar("si_hud_respawn_base", "1",
+        "Auto-respawn count per player per map (2 lives total with the initial one).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
+    g_cvRespawnDelay = CreateConVar("si_hud_respawn_delay", "20.0",
+        "Seconds before auto respawn (20 = defib/revive window for teammates; was 35 in l4d2_auto_respawn).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvRespawnCoinMax = CreateConVar("si_hud_respawn_coin_max", "5",
         "Max revive coins a player may hold (checked on buy / join / map start).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
     g_cvRespawnCoinStart = CreateConVar("si_hud_respawn_coin_start", "2",
@@ -1182,6 +1212,8 @@ public void OnPluginStart()
     CreateNative("SH_AddReviveCoins", Native_SH_AddReviveCoins);
     CreateNative("SH_GetCoinMax",     Native_SH_GetCoinMax);
     CreateNative("SH_ReviveClient",   Native_SH_ReviveClient);   // v1.9.1
+    // v1.9.2: 复活完成全局 forward（l4d2_shop v1.5.1 监听发复活套装+满血）
+    g_hFwdRespawned = CreateGlobalForward("SH_OnClientRespawned", ET_Ignore, Param_Cell);
 
     // ── Events ──────────────────────────────────────────
 
@@ -1248,6 +1280,8 @@ public void OnPluginEnd()
     // 必须先重新 Init（BuildPath 纯函数可重复调用）。
     ScoreSave_Init();
     ScoreSave_All();
+    // v1.9.2 复活 forward 句柄不手动销毁：include/ 被裁剪无 forward.inc
+    // （DestroyForward 未定义），SM HandleSystem 在插件卸载时自动释放。
 }
 
 void ScoreSave_Init()
@@ -1550,6 +1584,14 @@ public void OnMapStart()
             g_iReviveCoins[i] = coinMax;
     }
 
+    // v1.9.4 (user): 每图开始播报复活币 + 本图剩余免费复活次数（真人）
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && !IsFakeClient(i))
+            PrintToChat(i, "\x04[复活]\x01 本图剩余免费复活 \x03%d\x01 次，复活币 \x03%d\x01 枚",
+                g_iRevivesLeft[i], g_iReviveCoins[i]);
+    }
+
     // v1.7.30: 每图开始存档（用户："每一个Map开始时，要有一个存档"）——
     // 此时 OnMapEnd 已把本关积分清零，存档 = 开局 0 分状态；团灭重开回滚用
     SaveScoreState();
@@ -1715,6 +1757,20 @@ public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcas
 // the map ends (the last chance to see this map's tally).
 public Action Event_MapTransition(Event event, const char[] name, bool dontBroadcast)
 {
+    // v1.9.3 (user): 过关奖励 — 每小关进安全门结束,每人 +N 积分
+    //（替代 l4d2_survivor_transition 的过关回满血，该插件已禁用；
+    //  不依赖 scoreboard 开关，独立于排行榜广播）
+    if (g_cvMapEndReward.IntValue > 0)
+    {
+        int reward = g_cvMapEndReward.IntValue;
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (IsClientInGame(i) && GetClientTeam(i) == 2)
+                g_iWallet[i] += reward;
+        }
+        PrintToChatAll("\x04[过关]\x01 每人获得 \x05%d\x01 积分奖励！", reward);
+    }
+
     if (!g_cvEnable.BoolValue || !g_cvScoreboardEnable.BoolValue)
         return Plugin_Continue;
     if (!g_bMapEndBroadcasted)
@@ -1781,6 +1837,10 @@ public void OnClientPostAdminCheck(int client)
         g_iWallet[client] = 0;
         g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
     }
+
+    // v1.9.4 (user): 进服播报当前复活币 + 本图剩余免费复活次数
+    PrintToChat(client, "\x04[复活]\x01 本图剩余免费复活 \x03%d\x01 次，复活币 \x03%d\x01 枚",
+        g_iRevivesLeft[client], g_iReviveCoins[client]);
 }
 
 public void OnClientDisconnect(int client)
@@ -2036,13 +2096,11 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
             {
                 g_iReviveCoins[victim]--;
                 ScheduleRespawn(victim, false);
-                PrintToChat(victim, "\x04[复活]\x01 复活次数已用完，消耗 \x05复活币\x01 x1（剩余 \x03%d\x01 枚）",
-                    g_iReviveCoins[victim]);
             }
             else
             {
-                PrintToChat(victim, "\x04[复活]\x01 本图复活次数已用完（初始 \x03%d\x01 次 + 复活币 \x03%d\x01 枚）——等待电击器或队友",
-                    g_cvRespawnBase.IntValue, g_iReviveCoins[victim]);
+                PrintToChat(victim, "\x04[复活]\x01 你已死亡（剩余免费复活 \x03%d\x01 次，复活币 \x03%d\x01 枚）——等待电击器或队友",
+                    0, g_iReviveCoins[victim]);
             }
         }
     }
@@ -2475,22 +2533,27 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
 
     // ── Suffix ──────────────────────────────────────────
 
+    // v1.9.3 (user): 爆头不再追加中文"爆头"后缀——动作词 HEADSHOT/KILL
+    // 直接体现（例: Rochelle  [M16] HEADSHOT BOOMER）；近战/坦克标记保留。
     char suffix[32];
-    if (isTank && headshot)       suffix = "  爆头 ★";
-    else if (isTank && melee)     suffix = "  近战 ★";
-    else if (isTank)              suffix = "  ★";
-    else if (headshot && melee)   suffix = "  爆头近战";
-    else if (headshot)            suffix = "  爆头";
-    else if (melee)               suffix = "  近战";
+    if (isTank && headshot)       suffix = " ★";
+    else if (isTank && melee)     suffix = " 近战 ★";
+    else if (isTank)              suffix = " ★";
+    else if (headshot && melee)   suffix = " 近战";
+    else if (melee)               suffix = " 近战";
 
     // ── Chat ────────────────────────────────────────────
 
     if (g_cvChatEnable.BoolValue)
     {
+        char action[16];
+        if (headshot) strcopy(action, sizeof(action), "HEADSHOT");
+        else          strcopy(action, sizeof(action), "KILL");
+
         char chatMsg[256];
         Format(chatMsg, sizeof(chatMsg),
-            "\x04%s\x01  [%s] KILL \x03%s\x01%s",
-            playerName, weaponDisplay, siName, suffix);
+            "\x04%s\x01  [%s] %s \x03%s\x01%s",
+            playerName, weaponDisplay, action, siName, suffix);
         PrintToChatAll(chatMsg);
     }
 
@@ -2562,9 +2625,6 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
         PlayClientSound(attacker, sound);
     }
 
-    char suffix[16];
-    if (headshot) suffix = "  爆头";
-
     // v1.7.2: Witch scores its base + headshot/melee bonuses (BF style).
     // No full-HP bonus: player_hurt never fires for NPC Witch entities.
     // v1.7.52: Witch 固定 500；爆头 ×1.5；无满血（NPC 不触发 player_hurt）
@@ -2576,12 +2636,17 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
     if (points > 0)
         StackStreakKill(attacker, points, false);
 
+    // v1.9.3 (user): 动作词 HEADSHOT/KILL；WITCH 不再带"女巫"昵称
     if (g_cvChatEnable.BoolValue)
     {
+        char action[16];
+        if (headshot) strcopy(action, sizeof(action), "HEADSHOT");
+        else          strcopy(action, sizeof(action), "KILL");
+
         char chatMsg[256];
         Format(chatMsg, sizeof(chatMsg),
-            "\x04%s\x01  [%s] KILL \x03WITCH 女巫\x01%s",
-            playerName, weaponDisplay, suffix);
+            "\x04%s\x01  [%s] %s \x03WITCH\x01",
+            playerName, weaponDisplay, action);
         PrintToChatAll(chatMsg);
     }
 
@@ -2591,13 +2656,13 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
     {
         char banner[192];
         BuildBFBanner(banner, sizeof(banner), attacker,
-            "女巫击杀", "WITCH 女巫");
+            "女巫击杀", "WITCH");    // v1.9.3: 去"女巫"昵称
 
         char msg[256];
         if (g_cvKillCardEnable.BoolValue)
         {
             char card[192];
-            BuildKillCard(card, sizeof(card), weaponDisplay, "WITCH 女巫", headshot);
+            BuildKillCard(card, sizeof(card), weaponDisplay, "WITCH", headshot);
             // v1.7.25: same as the SI card — killer's damage share + kill pts.
             // v1.7.31b fix: 实体索引边界检查
             int dmgPts = 0;
@@ -3131,17 +3196,19 @@ int PointsForSI(int victim)
 
 void GetSIName(int client, char[] buffer, int maxlen)
 {
+    // v1.9.3 (user): 去掉中文昵称（烟鬼/胖子/…）——玩家都熟悉,聊天/击杀卡
+    // 横幅/HP 条一律只显示英文名。
     int zombieClass = GetEntProp(client, Prop_Send, "m_zombieClass");
     switch (zombieClass)
     {
-        case 1:  strcopy(buffer, maxlen, "SMOKER  烟鬼");
-        case 2:  strcopy(buffer, maxlen, "BOOMER  胖子");
-        case 3:  strcopy(buffer, maxlen, "HUNTER  猎人");
-        case 4:  strcopy(buffer, maxlen, "SPITTER 口水");
-        case 5:  strcopy(buffer, maxlen, "JOCKEY  猴子");
-        case 6:  strcopy(buffer, maxlen, "CHARGER 牛");
-        case 7:  strcopy(buffer, maxlen, "WITCH  女巫");
-        case 8:  strcopy(buffer, maxlen, "TANK  坦克");
+        case 1:  strcopy(buffer, maxlen, "SMOKER");
+        case 2:  strcopy(buffer, maxlen, "BOOMER");
+        case 3:  strcopy(buffer, maxlen, "HUNTER");
+        case 4:  strcopy(buffer, maxlen, "SPITTER");
+        case 5:  strcopy(buffer, maxlen, "JOCKEY");
+        case 6:  strcopy(buffer, maxlen, "CHARGER");
+        case 7:  strcopy(buffer, maxlen, "WITCH");
+        case 8:  strcopy(buffer, maxlen, "TANK");
         default: strcopy(buffer, maxlen, "特感");
     }
 }
@@ -3239,7 +3306,7 @@ void KillHPHideTimer(int client)
 
 // v1.7.28: 复活系统（移植 l4d2_auto_respawn，限次数 + 复活币）
 // 每图初始 g_cvRespawnBase 次（=base+1 条命）；次数用完消耗复活币；
-// 都没有 → 躺尸（电击器回归价值）。复活延迟 g_cvRespawnDelay（15s）。
+// 都没有 → 躺尸（电击器回归价值）。复活延迟 g_cvRespawnDelay（20s）。
 // ============================================================================
 
 void ScheduleRespawn(int client, bool hasCount)
@@ -3251,11 +3318,11 @@ void ScheduleRespawn(int client, bool hasCount)
     // 和 DataPack 泄漏；标记后跨图继续，回调里 IsClientInGame/IsPlayerAlive 兜底
     g_hRespawnTimer[client] = CreateTimer(delay, Timer_Respawn, userid, TIMER_FLAG_NO_MAPCHANGE);
 
-    if (hasCount)
-        PrintToChat(client, "\x04[复活]\x01 你已死亡（本图剩余复活 \x03%d\x01 次），将在 \x03%.0f 秒\x01 后自动复活",
-            g_iRevivesLeft[client], delay);
-    else
-        PrintToChat(client, "\x04[复活]\x01 你已死亡（复活币复活），将在 \x03%.0f 秒\x01 后自动复活", delay);
+    // v1.9.4 (user): 统一文案——播报复活币 + 剩余免费复活次数（含消耗后剩余值）
+    int coins = g_iReviveCoins[client];
+    int revivesLeft = hasCount ? g_iRevivesLeft[client] : 0;
+    PrintToChat(client, "\x04[复活]\x01 你已死亡（剩余免费复活 \x03%d\x01 次，复活币 \x03%d\x01 枚），将在 \x03%.0f 秒\x01 后自动复活",
+        revivesLeft, coins, delay);
 
     int thresholds[] = {10, 5, 3, 2, 1};
     for (int i = 0; i < sizeof(thresholds); i++)
@@ -3332,6 +3399,13 @@ Action Timer_RespawnTeleport(Handle timer, int userid)
     }
 
     PrintHintText(client, "你已复活!");
+    // v1.9.2: 复活套装通知（l4d2_shop v1.5.1 监听 → 发 M60/斧/药/雷 + 满血）
+    if (g_hFwdRespawned != null)
+    {
+        Call_StartForward(g_hFwdRespawned);
+        Call_PushCell(client);
+        Call_Finish();
+    }
     return Plugin_Continue;
 }
 

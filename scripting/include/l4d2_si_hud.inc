@@ -57,3 +57,11 @@ native int SH_GetCoinMax();
  * 真死亡 → 用掉刚买的币复活；存活 → 返回 0，币正常囤积。
  */
 native int SH_ReviveClient(int client);
+
+/**
+ * 复活完成全局 forward（v1.9.2+，si_hud 发布，消费方定义同名 public 函数即可
+ * 自动接收）：复活币死亡复活流程确认存活后（Timer_RespawnTeleport，复活 0.5s
+ * 后）触发。l4d2_shop v1.5.1 监听它发放"复活套装"（sm_shop_respawn_gear）
+ * + 满血（sm_shop_respawn_health）。闲置/接管不触发（引擎自管）。
+ */
+forward void SH_OnClientRespawned(int client);

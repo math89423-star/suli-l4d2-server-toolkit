@@ -18,7 +18,7 @@
  * 瓦斯罐/煤气罐 100、汽油桶 3500、止痛药/肾上腺素 1000、电击器 3500、
  * 医疗包 3000、激光 1500、M60 5000、电锯 5000、榴弹 6500、复活币 8500、
  * 透视 4000/5min（生效期间不可重复购买）、近战盲盒 1000、烟花 1200、
- * 火力支援I-炮击 4500/30s、火力支援II-燃烧 6500/25s。
+ * 火力支援I-绿色雨幕 3500/15s、火力支援II-地狱烈火 6500/25s、火力支援III-饱和轰炸 7500/30s（罐+榴弹混合）。
  *
  * v1.0.1（2026-08-03）：火力支援仅收紧半径（时长 30s/25s 不变）——
  * I -25%：750/525/375→562.5/393.75/281.25；II -10%：半径拆独立组
@@ -125,9 +125,71 @@
  * Art4_CheckNatives。附带修复 v1.2.0 遗留：榴弹引信高度钳制在 pos 计算
  * 之后（只改参数不改落点，弹丸仍生成在 1800-2600 半空空爆浪费）——钳制
  * 提前到 pos 生成前（kind 4/5 同修，与 sm_art4test 口径一致）。
- * 注意：v1.0.2-v1.3.0 均未提交 git（用户要求，测试迭代中）。
+ * v1.4.0（2026-08-03）：火力支援 I/III 正式定稿（用户拍板）——
+ * ①混合轰炸转正「火力支援I-轰炸」artillery5 5500 分/30s：榴弹:罐子 = 1:1
+ * （si_hud_art5_can_pct 默认 50）、罐子内丙烷:氧气 70/30 → **50/50**（新增
+ * ART2_CAN_PROPANE_PCT 70 承接 kind=2 油桶/烟花池原比例）；每秒 2-3 件、
+ * 半径 562.5/393.75/281.25 不变（同原 I 口径）。**禁用原火力支援I-炮击
+ * （artillery）与火力支援IV-榴弹雨（artillery4）**——商店表删除两行
+ * （SHOP_SLOTS 20→18），菜单即消失；kind 1/4 代码路径全部保留（kind=5 罐子
+ * 分流依赖 kind=1 模型池路径，将来恢复只需加回表行）。
+ * ②火力支援III-胆汁雨定稿 3500/15s 不变：范围 = I-轰炸的 **75%**
+ * （421.875/295.3125/210.9375，v1.4.0 前 750/525/375 太大）、**每 2 秒 1-2 罐**
+ * （循环步进 2，15s ≈ 8-16 瓶，v1.4.0 前每秒 1-2 瓶减半）。
+ * ③商店菜单新增「火力支援」分类（cat=4，用户拍板）——I-轰炸/II-燃烧/III-胆汁雨
+ * 从"其他"移入，菜单分类页 0-4。
+ * ④新增商品（用户定稿）：马格南 2000（武器栏，weapon_pistol_magnum）、
+ * 燃烧弹包 500 / 高爆弹包 500（其它栏，weapon_upgradepack_incendiary/
+ * weapon_upgradepack_explosive，升级包走现有 ShopSpawn 通用路径）。表尾
+ * 追加三行不动 WALLHACK_SLOT 12。SHOP_SLOTS 18→21。
+ * v1.4.1（2026-08-03）：TEST 期结束（用户拍板）——0-14 槽全部恢复原价
+ * （瓦斯/煤气 100、油桶 3500、药/肾上腺素 1000、电击器 3500、医疗包 3000、
+ * 激光 1500、M60 5000、电锯 5000、榴弹 6500、复活币 8500、透视 4000、
+ * 盲盒 1000、烟花 1200）+ 火力支援II 恢复 6500；火力支援 I/III 与新商品
+ * 价格为 v1.4.0 定稿不动。TEST 注释行删除。
+ * v1.4.2（2026-08-03）：瞄准圈定稿（用户拍板）——**四色**：I-轰炸蓝 / II-燃烧
+ * 黄 / III-胆汁雨绿 / 无效红（kind 5 原品红 → 蓝，kind 1/4 已禁用落默认蓝）；
+ * **三档圈大小**：Art_RingParams 加 kind 参数，圈 = 各火力轰炸半径 × 4/3——
+ * I-轰炸 750/525/375、II-燃烧 900/630/450、III-胆汁 562.5/393.75/281.25
+ * （v1.0.7 的 si_hud_art_ring_* 独立 cvar 废弃不再读，残留惰性无害）。
+ * v1.4.3（2026-08-03）：商店布局定稿（用户拍板）——
+ * ①火力支援按价格重排编号：I-胆汁雨 3500（原 III）/ II-轰炸 5500（原 I-轰炸）/
+ * III-燃烧 6500（原 II）；只改显示名+描述，classname/kind/cvar 组全不动
+ * （菜单、圈色、时长等全部跟随 kind 自动正确）。
+ * ②复活币/燃烧弹包/高爆弹包移入道具类（cat 3→1）。
+ * ③菜单分类顺序：武器/道具/医疗/[火力支援(第4)]/[其他(第5)]——AddItem
+ * 顺序 0,1,2,4,3（cat 值不变，显示顺序调换）。
+ * v1.4.4（2026-08-03）：火力支援 II/III 对调编号 + 轰炸涨价（用户实测反馈
+ * "2 和 3 都过强"）——「火力支援III-饱和轰炸」7500/30s（原 II-轰炸 5500，其余
+ * 参数不变）、「火力支援II-地狱烈火」6500/25s（原 III-燃烧，全不变）。编号按
+ * 价格升序：I-胆汁雨 3500 < II-燃烧 6500 < III-轰炸 7500。
+ * v1.4.5（2026-08-03）：正式定名（用户拍板，弃用"胆汁雨/燃烧/轰炸"直白词）——
+ * 火力支援I-**绿色雨幕**（绿圈·控场）/ 火力支援II-**地狱烈火**（黄圈·燃烧）/
+ * 火力支援III-**地毯轰炸**（蓝圈·混合轰炸）。只改显示名+描述+cvar 文案，
+ * classname/kind/参数全不动。
+ * v1.4.6（2026-08-03）：新增「投掷」分类 + 补给品改名（用户拍板）——
+ * ①投掷类（cat=5，菜单第 4 类，火力支援/其他顺移第 5/6）：胆汁 850
+ * （weapon_vomitjar）/ 土质炸弹 900（weapon_pipe_bomb）/ 燃烧瓶 2500
+ * （weapon_molotov），走 ShopSpawn 通用生成路径；SHOP_SLOTS 21→24。
+ * ②燃烧弹包/高爆弹包从道具类移入医疗类（cat 1→2），医疗类改名「补给品」
+ * （菜单 AddItem/catNames 同步）。
+ * v1.4.7（2026-08-03）：菜单分类「投掷」改名「投掷品」（用户拍板，仅显示名）；
+ * 复活币移入其他类（cat 1→3）。
+ * v1.4.8（2026-08-03）：火力支援涨价（用户实测后拍板）——I-绿色雨幕
+ * 3500→**4500**、II-地狱烈火 6500→**8500**、III-地毯轰炸 7500→**10000**
+ * （时长/范围/机制全不变，只改价格）。
+ * v1.4.9（2026-08-03）：分类涨价（用户拍板）——投掷品 ×1.5：胆汁 1275/
+ * 土质炸弹 1350/燃烧瓶 3750；补给品 ×1.25：药/肾上腺素 1250、电击器 4375、
+ * 医疗包 3750、燃烧弹包/高爆弹包 625。
+ * v1.5.0（2026-08-03）：火力支援III 改名「饱和轰炸」（用户拍板，仅显示名，
+ * 覆盖商店表/cvar 描述/注释全部文案；classname/kind/价格机制全不变）。
+ * v1.5.1（2026-08-03）：复活套装（用户拍板）——监听 si_hud v1.9.2 的
+ * SH_OnClientRespawned 全局 forward，复活币死亡复活时发放固定装备 +
+ * 满血。sm_shop_respawn_gear（默认 M60+消防斧+止痛药+土质炸弹）+
+ * sm_shop_respawn_health 100；闲置/接管引擎自管。
+ * 注意：v1.0.2-v1.5.1 均未提交 git（用户要求，测试迭代中）。
  *
- * 依赖：l4d2_si_hud.smx >= v1.9.0（SH_ API）。未加载时商店不可用。
+ * 依赖：l4d2_si_hud.smx >= v1.9.2（SH_ API + 复活 forward）。未加载时商店不可用。
  */
 
 #pragma newdecls required
@@ -138,7 +200,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.3.0"
+#define PLUGIN_VERSION "1.6.0"
 
 // ============================================================================
 // SH_ public API（l4d2_si_hud >= v1.9.0 导出；契约见 include/l4d2_si_hud.inc）
@@ -209,6 +271,8 @@ ConVar g_cvArtWarnTime;     // v1.0.6: 确认后预警时长（5s）
 ConVar g_cvArtRingOut;      // v1.0.7: 光圈显示半径-开阔地（750）
 ConVar g_cvArtRingMid;      // v1.0.7: 光圈显示半径-高顶（525）
 ConVar g_cvArtRingSmall;    // v1.0.7: 光圈显示半径-矮房（375）
+ConVar g_cvRespawnGear;     // v1.5.1: 复活套装装备列表（逗号分隔；近战 weapon_melee|脚本名）
+ConVar g_cvRespawnHealth;   // v1.5.1: 复活套装满血值（0=不动）
 
 // ============================================================================
 // 常量（自 si_hud 逐字移植）
@@ -235,16 +299,18 @@ ConVar g_cvArtRingSmall;    // v1.0.7: 光圈显示半径-矮房（375）
 // v1.2.0: 引信 ~1.2s——生成高度特调 1500u（-900 初速 ≈1.1s 触地，贴近
 // 地面空爆）；罐子高度（1800-2600）会让榴弹在半空空爆，伤害打空浪费
 #define ART4_FUSE_HEIGHT 1500.0
-#define ART_CAN_PROPANE_PCT  70       // 罐型混合：70% 瓦斯罐 + 30% 煤气罐
+// v1.4.0: 罐型比例拆常量——kind1/5 罐子池 50/50（用户定稿：瓦斯:煤气=1:1）；
+// kind2 油桶/烟花池保持 70/30（原比例，v1.4.0 前共用同一常量会互相影响）
+#define ART_CAN_PROPANE_PCT  50       // kind 1/5 罐子池：50% 瓦斯罐 + 50% 煤气罐
+#define ART2_CAN_PROPANE_PCT 70       // kind 2 池：70% 油桶 + 30% 烟花
 #define ART_TICK_INT         0.05     // 瞄准心跳间隔（标记更新 + 右键/超时/死亡检测）
 #define ART_CEIL_THIN        100.0    // 薄遮挡厚度阈值（u）
 
-#define SHOP_SLOTS      20      // v1.3.0: +火力支援V-混合轰炸（v1.2.0: +火力支援IV-榴弹雨）
+#define SHOP_SLOTS      24      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）
 
 #define MELEE_POOL_COUNT   12
 
 #define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
-#define ARTILLERY_SLOT      15      // g_ShopTable 槽位（= 火炮支援1）
 #define WALLHACK_DURATION   300.0   // v1.8.1: 5 分钟（用户定稿，原 v1.7.67 定稿 180=3 分钟）
 // v1.0.10: 生效期间不可重复购买 → WALLHACK_CAP（900s 续费封顶）已删除
 
@@ -258,37 +324,51 @@ enum struct ShopItem
     char classname[64]; // 实体 classname（空 = 特殊商品：复活币）
     int  price;         // 价格（可用积分）
     int  limit;         // 每图限购次数（0 = 无限）
-    int  cat;           // v1.7.64: 菜单分类 0=武器 1=道具 2=医疗 3=其他
+    int  cat;           // v1.7.64: 菜单分类 0=武器 1=道具 2=补给品 3=其他；v1.4.0: 4=火力支援；v1.4.6: 5=投掷
 }
 
-// 商品表（价格用户定稿 2026-08-02 修订：近战盲盒 1000/激光 1500/罐子 100/医疗包
-// 3000/电击器 3500/药 1000/肾上腺素 1000/烟花 1200/油桶 3500；复活币 12000 不变）
+// 商品表（价格用户定稿 2026-08-02/08-03 修订：近战盲盒 1000/激光 1500/罐子 100/医疗包
+// 3000/电击器 3500/药 1000/肾上腺素 1000/烟花 1200/油桶 3500/复活币 8500/透视 4000；
+// v1.4.0: I-轰炸 5500/II-燃烧 6500/III-胆汁雨 3500/马格南 2000/燃烧弹包 500/高爆弹包 500）
 ShopItem g_ShopTable[SHOP_SLOTS] = {
     // v1.7.36 (user): 全部商品不限购（limit 0）——只有复活币受持有上限
     // (si_hud_respawn_coin_max 5) 约束
-    // ===== 2026-08-03 TEST: 全部改 1 分（原价见注释/记忆 l4d2-shop-default-prices），测完恢复 =====
-    { "瓦斯罐",      "weapon_propanetank",               1,  0,  1 },   // v1.7.96: 用户定稿 100
-    { "煤气罐",      "weapon_oxygentank",                1,  0,  1 },   // v1.7.96: 用户定稿 100
-    { "汽油桶",      "weapon_gascan",                    1,  0,  1 },   // v1.7.96: 用户定稿 3500（原 5000）
-    { "止痛药",      "weapon_pain_pills",                1,  0,  2 },   // v1.7.96: 用户定稿 1000（原 2000）
-    { "肾上腺素",    "weapon_adrenaline",                1,  0,  2 },   // v1.7.96: 用户定稿 1000（原 2000）
-    { "电击器",      "weapon_defibrillator",             1,  0,  2 },   // v1.7.96: 用户定稿 3500（原 4000）
-    { "医疗包",      "weapon_first_aid_kit",             1,  0,  2 },   // v1.7.96: 用户定稿 3000（原 4000）
-    { "激光瞄准",    "weapon_upgradepack_laser_sight",   1,  0,  0 },   // v1.7.96: 用户定稿 1500（原 3500）
-    { "M60 轻机枪",  "weapon_rifle_m60",                 1,  0,  0 },   // v1.7.96: 用户定稿 5000
-    { "电锯",        "weapon_chainsaw",                  1,  0,  0 },   // v1.7.44
-    { "榴弹发射器",  "weapon_grenade_launcher",          1,  0,  0 },   // v1.7.96: 用户定稿 6500（原 8000）
-    { "复活币",      "",                                 1,  0,  3 },   // v1.8.1: 用户定稿 8500（v1.7.96 定稿 9000）
-    { "透视特感",    "wallhack",                         1,  0,  3 },   // v1.8.1: 用户定稿 4000/5分钟（原 6000/3分钟；可续费至 15 分钟）
-    { "近战盲盒",    "melee_box",                        1,  0,  0 },   // v1.7.96: 用户定稿 1000（原 3000）
-    { "烟花",        "weapon_fireworkcrate",             1,  0,  1 },   // v1.7.96: 用户定稿 1200（原 2500）
-    { "火力支援I-炮击", "artillery",                   1,   0,  3 },  // v1.8.1: 用户定稿 4500/30s（v1.7.99 定稿 4000/35s）；v1.0.1: 半径收紧 25%
-    { "火力支援II-燃烧", "artillery2",                 1,   0,  3 },  // v1.8.1: 用户定稿 6500/25s（v1.7.99 定稿 7000/30s）；v1.0.1: 半径收紧 10%
-    { "火力支援III-胆汁雨", "artillery3",             1,   0,  3 }   // v1.1.0: 用户定稿 3500/15s（纯控场；TEST 期 1 分）
-    // v1.2.0: 支援IV-榴弹雨（左键确认后高空落弹，270 伤害原版爆炸；TEST 期 1 分，价格用户定稿）
-    , { "火力支援IV-榴弹雨", "artillery4",            1,   0,  3 }
-    // v1.3.0: 支援V-混合轰炸（罐子+榴弹同时掉，kind=5 随机分流；TEST 期 1 分，价格/时长/混合比用户定稿）
-    , { "火力支援V-混合轰炸", "artillery5",           1,   0,  3 }
+    // v1.4.1: TEST 期结束，全部恢复原价（2026-08-03 用户拍板）
+    { "瓦斯罐",      "weapon_propanetank",               100,  0,  1 },   // v1.7.96: 用户定稿 100
+    { "煤气罐",      "weapon_oxygentank",                100,  0,  1 },   // v1.7.96: 用户定稿 100
+    { "汽油桶",      "weapon_gascan",                    3500,  0,  1 },   // v1.7.96: 用户定稿 3500（原 5000）
+    { "止痛药",      "weapon_pain_pills",                1250,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 1000）
+    { "肾上腺素",    "weapon_adrenaline",                1250,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 1000）
+    { "电击器",      "weapon_defibrillator",             4375,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3500）
+    { "医疗包",      "weapon_first_aid_kit",             3750,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3000）
+    { "激光瞄准",    "weapon_upgradepack_laser_sight",   1500,  0,  0 },   // v1.7.96: 用户定稿 1500（原 3500）
+    { "M60 轻机枪",  "weapon_rifle_m60",                 5000,  0,  0 },   // v1.7.96: 用户定稿 5000
+    { "电锯",        "weapon_chainsaw",                  5000,  0,  0 },   // v1.7.44
+    { "榴弹发射器",  "weapon_grenade_launcher",          6500,  0,  0 },   // v1.7.96: 用户定稿 6500（原 8000）
+    { "复活币",      "",                                 8500,  0,  3 },   // v1.8.1: 用户定稿 8500（v1.7.96 定稿 9000）；v1.4.7: 移入其他类
+    { "透视特感",    "wallhack",                         4000,  0,  3 },   // v1.8.1: 用户定稿 4000/5分钟（原 6000/3分钟；可续费至 15 分钟）
+    { "近战盲盒",    "melee_box",                        1000,  0,  0 },   // v1.7.96: 用户定稿 1000（原 3000）
+    { "烟花",        "weapon_fireworkcrate",             1200,  0,  1 },   // v1.7.96: 用户定稿 1200（原 2500）
+    // v1.4.3: 按价格重排编号（用户拍板）——胆汁雨 3500 最低 = I、轰炸 5500 = II、
+    // 燃烧 6500 = III（原 III-胆汁雨/I-轰炸/II-燃烧）；v1.4.5 定名：绿色雨幕/地狱烈火/地毯轰炸
+    { "火力支援II-地狱烈火", "artillery2",                 8500,   0,  4 },  // v1.4.8: 用户定稿涨价 6500→8500（25s）；v1.0.1: 半径收紧 10%
+    { "火力支援I-绿色雨幕", "artillery3",             4500,  0,  4 }   // v1.4.8: 用户定稿涨价 3500→4500（15s，范围=轰炸 75%，每 2 秒 1-2 罐）
+    // v1.3.0: 支援V-混合轰炸 → v1.4.0 转正定稿「火力支援III-饱和轰炸」5500/30s
+    // （罐+榴弹 1:1；原火力支援I-炮击 artillery + IV-榴弹雨 artillery4 已禁用，表行删除）
+    , { "火力支援III-饱和轰炸", "artillery5",               10000,  0,  4 }   // v1.4.8: 用户定稿涨价 7500→10000（30s）
+    // v1.4.0: 新增商品（用户定稿；表尾追加不动透视特感槽位 12）——
+    // 马格南 2000（武器栏）、燃烧弹包/高爆弹包 500（升级包走现有
+    // ShopSpawn 通用生成路径，与激光瞄准同类）
+    // v1.4.3: 燃烧弹包/高爆弹包移入道具类（cat 3→1）
+    , { "马格南",      "weapon_pistol_magnum",          2000,  0,  0 }
+    , { "燃烧弹包",    "weapon_upgradepack_incendiary",  625,  0,  2 }   // v1.4.9: 补给品 ×1.25（原 500）
+    , { "高爆弹包",    "weapon_upgradepack_explosive",   625,  0,  2 }   // v1.4.9: 补给品 ×1.25（原 500）
+    // v1.4.6: 投掷类新增商品（用户定稿）——胆汁 850 / 土质炸弹(pipe_bomb) 900 /
+    // 燃烧瓶(molotov) 2500；cat=5 投掷（菜单第 4 类，火力支援/其他顺移）；
+    // 走 ShopSpawn 通用生成路径（投掷物实体直接生成可拾取）
+    , { "胆汁",        "weapon_vomitjar",                1275,  0,  5 }   // v1.4.9: 投掷品 ×1.5（原 850）
+    , { "土质炸弹",    "weapon_pipe_bomb",               1350,  0,  5 }   // v1.4.9: 投掷品 ×1.5（原 900）
+    , { "燃烧瓶",      "weapon_molotov",                 3750,  0,  5 }   // v1.4.9: 投掷品 ×1.5（原 2500）
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -331,7 +411,7 @@ int       g_iBeamHalo;
 float     g_fArtNextBuyTime;                  // 下次可购买 GameTime（轰炸中+冷却=禁止全体购买）
 // v1.0.6: 确认后预警阶段（5s 光圈全员可见 + 聊天播报，之后才开始落罐）
 bool      g_bArtWarning;                      // 预警阶段中
-int       g_iArtWarnKind;                     // v1.1.0: 预警目标火力类型 1/2/3（决定光圈颜色）
+int       g_iArtWarnKind;                     // v1.1.0/v1.3.0: 预警目标火力类型 1/2/3/4/5（决定光圈颜色）
 bool      g_bArt3NativesFail;                 // v1.2.1: left4dhooks native 缺失 → 购买拦截禁用
 bool      g_bArt4NativesFail;                 // v1.2.0: left4dhooks native 缺失 → 购买拦截禁用
 bool      g_bArt3Detonating;                  // v1.2.2: 当前碎裂的瓶子是否自家生成（VomitJar_Detonate pre→Post 窗口）
@@ -396,7 +476,7 @@ public void OnPluginStart()
     g_cvArtDuration.SetBounds(ConVarBound_Lower, true, 5.0);
 
     g_cvArtDuration2 = CreateConVar("si_hud_art2_duration", "25.0",
-        "Total barrage duration in seconds for 火力支援II-燃烧 (2-3 cans fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+        "Total barrage duration in seconds for 火力支援II-地狱烈火 (2-3 cans fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArtDuration2.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArtDuration2.SetBounds(ConVarBound_Lower, true, 5.0);
 
@@ -418,86 +498,88 @@ public void OnPluginStart()
 
     // v1.0.1: II 独立半径组，收紧 10%：750→675 / 525→472.5 / 375→337.5
     g_cvArt2RadiusOut = CreateConVar("si_hud_art2_radius_out", "675.0",
-        "Spread radius (units) of the 火力支援II-燃烧 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+        "Spread radius (units) of the 火力支援II-地狱烈火 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
     g_cvArt2RadiusMid = CreateConVar("si_hud_art2_radius_mid", "472.5",
-        "Spread radius for ceiling >= 900 (火力支援II-燃烧).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+        "Spread radius for ceiling >= 900 (火力支援II-地狱烈火).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
     g_cvArt2RadiusSmall = CreateConVar("si_hud_art2_radius_small", "337.5",
-        "Spread radius for ceiling 600-900 (火力支援II-燃烧).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+        "Spread radius for ceiling 600-900 (火力支援II-地狱烈火).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
     // v1.1.0: III-胆汁雨独立组（用户定稿 15s；半径 750/525/375 = 无伤害更大覆盖）
     g_cvArt3Duration = CreateConVar("si_hud_art3_duration", "15.0",
-        "Total barrage duration in seconds for 火力支援III-胆汁雨 (1-2 jars fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+        "Total barrage duration in seconds for 火力支援I-绿色雨幕 (1-2 jars fall randomly every 2 seconds).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArt3Duration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArt3Duration.SetBounds(ConVarBound_Lower, true, 5.0);
 
-    g_cvArt3RadiusOut = CreateConVar("si_hud_art3_radius_out", "750.0",
-        "Spread radius (units) of the 火力支援III-胆汁雨 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+    // v1.4.0: III 范围 = 火力支援I-轰炸的 75%（用户定稿）：562.5→421.875 /
+    // 393.75→295.3125 / 281.25→210.9375（纯控场圈收小）
+    g_cvArt3RadiusOut = CreateConVar("si_hud_art3_radius_out", "421.875",
+        "Spread radius (units) of the 火力支援I-绿色雨幕 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt3RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt3RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt3RadiusMid = CreateConVar("si_hud_art3_radius_mid", "525.0",
-        "Spread radius for ceiling >= 900 (火力支援III-胆汁雨).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+    g_cvArt3RadiusMid = CreateConVar("si_hud_art3_radius_mid", "295.3125",
+        "Spread radius for ceiling >= 900 (火力支援I-绿色雨幕).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt3RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt3RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt3RadiusSmall = CreateConVar("si_hud_art3_radius_small", "375.0",
-        "Spread radius for ceiling 600-900 (火力支援III-胆汁雨).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+    g_cvArt3RadiusSmall = CreateConVar("si_hud_art3_radius_small", "210.9375",
+        "Spread radius for ceiling 600-900 (火力支援I-绿色雨幕).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt3RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt3RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
     // v1.2.0: IV-榴弹雨独立组（TEST 15s；半径收紧档 = 有伤害口径同 I/II）
     g_cvArt4Duration = CreateConVar("si_hud_art4_duration", "15.0",
-        "Total barrage duration in seconds for 火力支援IV-榴弹雨 (1-2 grenades fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+        "Total barrage duration in seconds for 火力支援IV-榴弹雨 (disabled item; grenade path reused by 火力支援III-饱和轰炸).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArt4Duration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArt4Duration.SetBounds(ConVarBound_Lower, true, 5.0);
 
     g_cvArt4RadiusOut = CreateConVar("si_hud_art4_radius_out", "562.5",
-        "Spread radius (units) of the 火力支援IV-榴弹雨 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+        "Spread radius (units) of the 火力支援IV-榴弹雨 open-area strike (disabled item).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt4RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt4RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
     g_cvArt4RadiusMid = CreateConVar("si_hud_art4_radius_mid", "393.75",
-        "Spread radius for ceiling >= 900 (火力支援IV-榴弹雨).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+        "Spread radius for ceiling >= 900 (火力支援IV-榴弹雨, disabled item).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt4RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt4RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
     g_cvArt4RadiusSmall = CreateConVar("si_hud_art4_radius_small", "281.25",
-        "Spread radius for ceiling 600-900 (火力支援IV-榴弹雨).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+        "Spread radius for ceiling 600-900 (火力支援IV-榴弹雨, disabled item).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt4RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt4RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
     // v1.3.0: V-混合轰炸独立组（用户定稿 TEST 25s；半径同 I 562.5/393.75/281.25；
     // 混合比 can_pct 罐子占比，余下为榴弹——全引擎路径，无新增 native）
-    g_cvArt5Duration = CreateConVar("si_hud_art5_duration", "25.0",
-        "Total barrage duration in seconds for 火力支援V-混合轰炸 (cans+grenades mixed, 2-3 items per second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+    g_cvArt5Duration = CreateConVar("si_hud_art5_duration", "30.0",   // v1.4.0: 用户定稿 30s
+        "Total barrage duration in seconds for 火力支援III-饱和轰炸 (cans+grenades mixed, 2-3 items per second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArt5Duration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArt5Duration.SetBounds(ConVarBound_Lower, true, 5.0);
 
     g_cvArt5RadiusOut = CreateConVar("si_hud_art5_radius_out", "562.5",
-        "Spread radius (units) of the 火力支援V-混合轰炸 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+        "Spread radius (units) of the 火力支援III-饱和轰炸 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
     g_cvArt5RadiusMid = CreateConVar("si_hud_art5_radius_mid", "393.75",
-        "Spread radius for ceiling >= 900 (火力支援V-混合轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+        "Spread radius for ceiling >= 900 (火力支援III-饱和轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
     g_cvArt5RadiusSmall = CreateConVar("si_hud_art5_radius_small", "281.25",
-        "Spread radius for ceiling 600-900 (火力支援V-混合轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+        "Spread radius for ceiling 600-900 (火力支援III-饱和轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
     g_cvArt5CanPct = CreateConVar("si_hud_art5_can_pct", "50.0",
-        "Percent of falling items that are propane/oxygen cans in 火力支援V-混合轰炸 (rest are grenades).", FCVAR_NOTIFY, true, 0.0, true, 100.0);
+        "Percent of falling items that are propane/oxygen cans in 火力支援III-饱和轰炸 (rest are grenades).", FCVAR_NOTIFY, true, 0.0, true, 100.0);
     g_cvArt5CanPct.SetBounds(ConVarBound_Upper, true, 100.0);
     g_cvArt5CanPct.SetBounds(ConVarBound_Lower, true, 0.0);
 
@@ -562,6 +644,13 @@ public void OnPluginStart()
     g_cvArtRingSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArtRingSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
+    // v1.5.1: 复活套装（用户拍板：复活币死亡复活时发放固定装备 + 满血）
+    g_cvRespawnGear = CreateConVar("sm_shop_respawn_gear",
+        "weapon_rifle_m60,weapon_melee|fireaxe,weapon_pain_pills,weapon_pipe_bomb",
+        "Respawn gear list (comma separated; melee uses weapon_melee|<script>). Empty = disabled.", FCVAR_NOTIFY);
+    g_cvRespawnHealth = CreateConVar("sm_shop_respawn_health", "100",
+        "Health to set on respawn (0 = leave engine default).", FCVAR_NOTIFY, true, 0.0, true, 100.0);
+
     AutoExecConfig(true, "l4d2_shop");
 
     // ── Commands ────────────────────────────────────────
@@ -577,7 +666,7 @@ public void OnPluginStart()
         "[DEBUG] 火力支援IV: spawn one grenade at the crosshair (empty-server test).");
     // v1.3.0: 空服实测脚手架——准星单件（admin；随机罐子或榴弹，走正式 kind=5 分流）
     RegAdminCmd("sm_art5test", Cmd_Art5Test, ADMFLAG_ROOT,
-        "[DEBUG] 火力支援V: spawn one random mixed item at the crosshair (empty-server test).");
+        "[DEBUG] 火力支援III-饱和轰炸: spawn one random mixed item at the crosshair (empty-server test).");
 
     // ── Events ──────────────────────────────────────────
 
@@ -941,6 +1030,66 @@ int SpawnMelee(const char[] meleeName, float pos[3])
     return ent;
 }
 
+// ============================================================================
+// v1.5.1: 复活套装 — 监听 si_hud v1.9.2 的 SH_OnClientRespawned 全局 forward
+// （复活币死亡复活完成、确认存活后触发；闲置/接管引擎自管不在此列）。
+// 用户拍板固定配置：M60 + 消防斧 + 止痛药 + 土质炸弹，复活满血 100。
+// ============================================================================
+public void SH_OnClientRespawned(int client)
+{
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+        return;
+    if (GetClientTeam(client) != 2 || !IsPlayerAlive(client))
+        return;
+
+    char gear[256];
+    g_cvRespawnGear.GetString(gear, sizeof(gear));
+    if (gear[0] != '\0')
+    {
+        char items[8][64];
+        int count = ExplodeString(gear, ",", items, sizeof(items), sizeof(items[]));
+        for (int i = 0; i < count; i++)
+        {
+            TrimString(items[i]);
+            if (items[i][0] == '\0')
+                continue;
+
+            // 近战:weapon_melee|fireaxe（melee_script_name 键值，与 SpawnMelee 同法）
+            char parts[2][64];
+            if (ExplodeString(items[i], "|", parts, sizeof(parts), sizeof(parts[])) == 2)
+            {
+                int ent = CreateEntityByName("weapon_melee");
+                if (ent == -1)
+                    continue;
+                DispatchKeyValue(ent, "melee_script_name", parts[1]);
+                DispatchSpawn(ent);
+                EquipPlayerWeapon(client, ent);
+                LogMessage("[respawn-gear] %N melee=%s ent=%d", client, parts[1], ent);
+            }
+            else
+            {
+                int ent = GivePlayerItem(client, items[i]);
+                if (ent != -1)
+                {
+                    EquipPlayerWeapon(client, ent);
+                    LogMessage("[respawn-gear] %N item=%s ent=%d", client, items[i], ent);
+                }
+                else
+                {
+                    LogMessage("[respawn-gear] %N item=%s FAILED", client, items[i]);
+                }
+            }
+        }
+    }
+
+    int hp = g_cvRespawnHealth.IntValue;
+    if (hp > 0)
+    {
+        SetEntityHealth(client, hp);
+        LogMessage("[respawn-gear] %N hp=%d", client, hp);
+    }
+}
+
 void ShopBuy(int client, int slot)
 {
     if (slot < 0 || slot >= SHOP_SLOTS) return;
@@ -1177,8 +1326,10 @@ void OpenShopMenu(int client)
         SH_GetWallet(client), SH_GetReviveCoins(client));
     menu.AddItem("0", "武器类");
     menu.AddItem("1", "道具类");
-    menu.AddItem("2", "医疗类");
-    menu.AddItem("3", "其他");
+    menu.AddItem("2", "补给品");    // v1.4.6: 原"医疗类"改名（含医疗+弹药升级包）
+    menu.AddItem("5", "投掷品");      // v1.4.7: 第 4 类（cat 值 5：胆汁/土质炸弹/燃烧瓶）
+    menu.AddItem("4", "火力支援");    // v1.4.6: 第 5 类（cat 值 4）
+    menu.AddItem("3", "其他");        // v1.4.6: 第 6 类（cat 值 3）
     menu.ExitButton = true;
     g_hShopMenu[client] = menu;
     menu.Display(client, 20);
@@ -1186,9 +1337,9 @@ void OpenShopMenu(int client)
 
 void ShopCategoryMenu(int client, int cat)
 {
-    if (cat < 0 || cat > 3) cat = 3;
+    if (cat < 0 || cat > 5) cat = 5;
     g_iShopCat[client] = cat;
-    char catNames[4][16] = { "武器类", "道具类", "医疗类", "其他" };
+    char catNames[6][16] = { "武器类", "道具类", "补给品", "其他", "火力支援", "投掷品" };   // v1.4.6/v1.4.7: 医疗类→补给品、投掷→投掷品
     Menu menu = new Menu(ShopItemMenuHandler);
     char title[96];
     Format(title, sizeof(title), "%s: 可用积分 %d  复活币 %d 枚",
@@ -1653,8 +1804,8 @@ public Action Timer_ArtAim(Handle timer, int userid)
         return Plugin_Stop;
     }
 
-    // 标记更新：瞄准点 + 圆圈（爆炸范围）+ 光柱；v1.0.6: I-炮击蓝 / II-燃烧黄 /
-    // v1.1.0: III-胆汁雨绿 / v1.2.0: IV-榴弹雨红 / 无效红
+    // 标记更新：瞄准点 + 圆圈（爆炸范围）+ 光柱；v1.4.2: I-轰炸蓝 / II-燃烧黄 /
+    // I-绿色雨幕绿 / 无效红（用户定稿四色；原 v1.2.0 IV-榴弹雨红已禁用）
     float target[3];
     bool valid;
     Art_AimPoint(client, target, valid);
@@ -1664,24 +1815,21 @@ public Action Timer_ArtAim(Handle timer, int userid)
     if (ceiling > 0.0 && ceiling < ART_CEIL_LOW && !openAbove)
         valid = false;
 
-    int color[4] = { 0, 0, 255, 255 };            // 火力支援I-炮击：蓝
+    int color[4] = { 0, 0, 255, 255 };            // 火力支援III-饱和轰炸：蓝
     int radius = 150;
     if (valid)
     {
         // v1.0.1: 预览圈按火力类型用对应半径组（与 ConfirmStrike 口径一致）
-        // v1.1.0: kind = 1 炮击 / 2 燃烧 / 3 胆汁雨 / 4 榴弹雨（g_iArtSlot 未清，仍有效）
+        // v1.1.0/v1.4.2/v1.4.3: kind = 1 炮击[已禁] / 2 燃烧→III / 3 胆汁雨→I / 4 榴弹雨[已禁] / 5 轰炸→II
         int kind = Art_KindOfSlot(g_iArtSlot[client]);
         if (kind == 2)
-            color[0] = 255, color[1] = 255, color[2] = 0;   // 火力支援II-燃烧：黄
+            color[0] = 255, color[1] = 255, color[2] = 0;   // 火力支援II-地狱烈火：黄
         else if (kind == 3)
-            color[0] = 0, color[1] = 255, color[2] = 0;     // 火力支援III-胆汁雨：绿
-        else if (kind == 4)
-            color[0] = 255, color[1] = 0, color[2] = 0;     // 火力支援IV-榴弹雨：红
-        else if (kind == 5)
-            color[0] = 255, color[1] = 0, color[2] = 255;   // 火力支援V-混合轰炸：品红
-        // v1.0.7: 光圈显示用 ring 档位（默认收紧前原值），与轰炸半径解耦
+            color[0] = 0, color[1] = 255, color[2] = 0;     // 火力支援I-绿色雨幕：绿
+        // v1.4.2: kind 5（II-轰炸）落默认分支 = 蓝；kind 1/4 已禁用不可购买
+        // v1.0.7/v1.4.2: 光圈显示用 ring 档位 = 各火力轰炸半径 × 4/3（三档大小分明）
         float ring;
-        Art_RingParams(ceiling, openAbove, ring);
+        Art_RingParams(kind, ceiling, openAbove, ring);
         radius = RoundToNearest(ring);
     }
     else
@@ -1931,20 +2079,23 @@ void Art_PickParams(int kind, float ceiling, bool openAbove, float &radius, floa
     }
 }
 
-// v1.0.7: 光圈显示半径（与轰炸半径解耦）——瞄准圈/预警圈专用，档位逻辑
-// 与 Art_PickParams 一致，但取 si_hud_art_ring_*（默认收紧前原值 750/525/375）
-void Art_RingParams(float ceiling, bool openAbove, float &ring)
+// v1.4.2: 瞄准圈按火力类型区分大小（用户拍板）——圈 = 各火力轰炸半径 × 4/3
+// （保持"光圈 > 轰炸范围"便于看落点；I-轰炸 750/525/375、II-燃烧 900/630/450、
+// III-胆汁 562.5/393.75/281.25 三档分明）。v1.0.7 的 si_hud_art_ring_* 独立
+// cvar 废弃不再读（残留惰性无害）。
+void Art_RingParams(int kind, float ceiling, bool openAbove, float &ring)
 {
-    if (ceiling <= 0.0)
-        ring = g_cvArtRingOut.FloatValue;
-    else if (ceiling >= ART_CEIL_MID)
-        ring = g_cvArtRingMid.FloatValue;
-    else if (openAbove)
-        ring = g_cvArtRingOut.FloatValue;
-    else if (ceiling >= ART_CEIL_LOW)
-        ring = g_cvArtRingSmall.FloatValue;
-    else
-        ring = g_cvArtRingSmall.FloatValue;   // 拒绝级：确认前被拦截
+    ConVar cvOut  = kind == 2 ? g_cvArt2RadiusOut  : (kind == 3 ? g_cvArt3RadiusOut  : (kind == 5 ? g_cvArt5RadiusOut  : g_cvArtRadiusOut));
+    ConVar cvMid  = kind == 2 ? g_cvArt2RadiusMid  : (kind == 3 ? g_cvArt3RadiusMid  : (kind == 5 ? g_cvArt5RadiusMid  : g_cvArtRadiusMid));
+    ConVar cvSmall = kind == 2 ? g_cvArt2RadiusSmall : (kind == 3 ? g_cvArt3RadiusSmall : (kind == 5 ? g_cvArt5RadiusSmall : g_cvArtRadiusSmall));
+
+    float r;
+    if (ceiling <= 0.0)                r = cvOut.FloatValue;
+    else if (ceiling >= ART_CEIL_MID)  r = cvMid.FloatValue;
+    else if (openAbove)                r = cvOut.FloatValue;
+    else if (ceiling >= ART_CEIL_LOW)  r = cvSmall.FloatValue;
+    else                               r = cvSmall.FloatValue;   // 拒绝级：确认前被拦截
+    ring = r * 1.333333;    // 4/3：I-轰炸 562.5→750 / II-燃烧 675→900 / III-胆汁 421.875→562.5
 }
 
 // 确认轰炸（v1.0.6 重构）: 锁定落点 → 5s 预警（光圈全员可见 + 聊天播报）
@@ -1970,9 +2121,9 @@ void Art_ConfirmStrike(int client, float target[3])
     g_bArtWarning = true;
     g_iArtWarnKind = kind;
     g_fArtWarnTarget = target;
-    // v1.0.7: 光圈显示半径（ring 档位）与落罐半径（收紧后）分开存
+    // v1.0.7/v1.4.2: 光圈显示半径（ring 档位 = 各火力轰炸半径 × 4/3）与落罐半径分开存
     float ring;
-    Art_RingParams(ceiling, openAbove, ring);
+    Art_RingParams(kind, ceiling, openAbove, ring);
     g_fArtWarnRing = ring;
     g_fArtWarnRadius = radius;
     g_fArtWarnHeight = height;
@@ -2033,15 +2184,12 @@ public Action Timer_ArtWarn(Handle timer)
     ground[2] += 5.0;
     int color[4];
     if (g_iArtWarnKind == 2)
-        color = { 255, 255, 0, 255 };      // 火力支援II-燃烧：黄
+        color = { 255, 255, 0, 255 };      // 火力支援II-地狱烈火：黄
     else if (g_iArtWarnKind == 3)
-        color = { 0, 255, 0, 255 };        // v1.1.0: 火力支援III-胆汁雨：绿
-    else if (g_iArtWarnKind == 4)
-        color = { 255, 0, 0, 255 };        // v1.2.0: 火力支援IV-榴弹雨：红
-    else if (g_iArtWarnKind == 5)
-        color = { 255, 0, 255, 255 };      // v1.3.0: 火力支援V-混合轰炸：品红
+        color = { 0, 255, 0, 255 };        // v1.1.0: 火力支援I-绿色雨幕：绿
+    // v1.4.2: kind 1/4/5 全落默认蓝（II-轰炸蓝；kind 1/4 已禁用）——用户定稿四色
     else
-        color = { 0, 0, 255, 255 };        // 火力支援I-炮击：蓝
+        color = { 0, 0, 255, 255 };        // 火力支援III-饱和轰炸：蓝
     TE_SetupBeamRingPoint(ground, g_fArtWarnRing - 5.0, g_fArtWarnRing,
         g_iBeamLaser, g_iBeamHalo, 0, 10, 0.15, 3.0, 0.0, color, 0, 0);
     TE_SendToAll();
@@ -2092,7 +2240,8 @@ void Art_LaunchBarrage(int client, const float target[3], int kind,
         : ((kind == 4) ? ART4_GRENADES_MAX_PER_SEC
         : ((kind == 5) ? ART5_MAX_PER_SEC : ART_CANS_MAX_PER_SEC));
 
-    for (int sec = 0; sec < seconds; sec++)
+    // v1.4.0: kind==3 每 2 秒一槽（用户定稿：每 2 秒 1-2 罐，15s ≈ 8-16 瓶）
+    for (int sec = 0; sec < seconds; sec += (kind == 3 ? 2 : 1))
     {
         int cans = GetRandomInt(minPerSec, maxPerSec);
         for (int c = 0; c < cans; c++)
@@ -2134,7 +2283,10 @@ public Action Timer_ArtSpawnCan(Handle timer, DataPack dp)
     // v1.3.0 FIX: 榴弹/混合的引信高度钳制提前到 pos 计算前——v1.2.0 先算
     // pos 再钳 height 只改参数不改落点（弹丸仍生成在 1800-2600 半空空爆浪费；
     // sm_art4test 口径一致是钳后才算 pos，正式路径漏了）
-    if ((kind == 4 || kind == 5) && height > ART4_FUSE_HEIGHT)
+    // v1.6.0: kind 2（II-地狱烈火）同钳——露天高天花板下 III 罐子钳 1500 而
+    // II 不钳（2182）高度不统一；罐子虽无引信，统一钳制更稳（坠落时长/卡结构
+    // 风险随高度上升，且 II/III 罐子视觉节奏一致）。
+    if ((kind == 2 || kind == 4 || kind == 5) && height > ART4_FUSE_HEIGHT)
         height = ART4_FUSE_HEIGHT;
     float ang = GetRandomFloat(0.0, 6.2831853);
     float r = radius * SquareRoot(GetRandomFloat(0.0, 1.0));
@@ -2185,14 +2337,14 @@ public Action Timer_ArtSpawnCan(Handle timer, DataPack dp)
     // 30%——两个模型都已在 v1.7.93 precache + can_full_damage 清单，引擎死亡爆炸原版。
     if (kind == 2)
     {
-        if (GetRandomInt(1, 100) <= ART_CAN_PROPANE_PCT)
+        if (GetRandomInt(1, 100) <= ART2_CAN_PROPANE_PCT)   // v1.4.0: 独立常量，保持 70/30
             strcopy(model, sizeof(model), "models/props_junk/gascan001a.mdl");
         else
             strcopy(model, sizeof(model), "models/props_junk/explosive_box001.mdl");
     }
     else
     {
-        if (GetRandomInt(1, 100) <= ART_CAN_PROPANE_PCT)
+        if (GetRandomInt(1, 100) <= ART_CAN_PROPANE_PCT)    // v1.4.0: 50/50（用户定稿瓦斯:煤气=1:1）
             strcopy(model, sizeof(model), "models/props_junk/propanecanister001a.mdl");
         else
             strcopy(model, sizeof(model), "models/props_equipment/oxygentank01.mdl");
@@ -2280,7 +2432,7 @@ public Action Timer_ArtExplode(Handle timer, DataPack dp)
 }
 
 // ============================================================================
-// 火力支援III-胆汁雨（v1.1.0）——SDKCall 引擎工厂 CVomitJarProjectile::Create
+// 火力支援I-绿色雨幕（v1.1.0 原名火力支援III-胆汁雨）——SDKCall 引擎工厂 CVomitJarProjectile::Create
 // 直生真弹丸（v1.2.3 定稿：GetMemSig 经典条目 "CVomitJarProjectile::Create"
 // 无 L4DD:: 前缀、@_ZN 符号格式 → 工厂无投掷语音；L4D2_VomitJarPrj = 模拟
 // 完整投掷流程含角色喊话，仅作回退）。版本史：v1.1.0 SDKCall 死于 L4DD::
@@ -2293,7 +2445,7 @@ public Action Timer_ArtExplode(Handle timer, DataPack dp)
 // "落到地上自然碎裂"由引擎保证。
 // ============================================================================
 
-// v1.1.0/v1.2.0/v1.3.0: 商店槽位 → 火力类型（1=炮击 2=燃烧 3=胆汁雨 4=榴弹雨 5=混合轰炸 0=非火炮）
+// v1.1.0/v1.2.0/v1.3.0: 商店槽位 → 火力类型（1=炮击[已禁] 2=燃烧 3=胆汁雨 4=榴弹雨[已禁] 5=I-轰炸 0=非火炮）
 int Art_KindOfSlot(int slot)
 {
     if (slot < 0 || slot >= SHOP_SLOTS)
@@ -2405,6 +2557,7 @@ void Art3_SpawnJar(const float pos[3], float height, int buyer)
     float fallT = SquareRoot((2.0 * height) / ART_GRAVITY);
     DataPack dp = new DataPack();
     dp.WriteCell(ref);
+    dp.WriteFloat(pos[2] - height);   // v1.6.0: 空袭落点地面高度（高 h 强爆落点兜底）
     CreateTimer(fallT + 0.5, Timer_Art3Detonate, dp, TIMER_FLAG_NO_MAPCHANGE);
     LogMessage("[artillery3] jar spawned ent=%d fallT=%.1f h=%.0f thrower=%N",
         ent, fallT, height, buyer);
@@ -2415,14 +2568,20 @@ public Action Timer_Art3Detonate(Handle timer, DataPack dp)
 {
     dp.Reset();
     int ref = dp.ReadCell();
+    float groundZ = dp.ReadFloat();   // v1.6.0: 空袭落点地面高度
     delete dp;
     int ent = EntRefToEntIndex(ref);
     if (ent <= 0 || !IsValidEntity(ent))
         return Plugin_Continue;                // 已自然碎裂/被打碎 → 无事
 
-    // 若悬停在空中未落地（异常态），先落回地面再炸，保证胆汁覆盖到地面
+    // v1.6.0 FIX: 高 h 罐子从不落地（c4m2 露天 h=2182 实测 10 罐全 fallback、
+    // bile-applied 全 0）——trace 只算世界几何（ShopTraceFilter 忽略实体），
+    // 地面是 func_brush 实体几何时穿透 miss / 命中屋顶 → 罐子在 58m 高空被引爆，
+    // 地面零效果。正解：trace 失效或罐子离地太远（悬停/穿地）→ 直接传到
+    // 空袭落点地面高度再炸，保证胆汁必覆盖目标地面。
     float origin[3];
     GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", origin);
+    float z = groundZ;
     float below[3];
     below = origin;
     below[2] -= 5000.0;
@@ -2432,10 +2591,14 @@ public Action Timer_Art3Detonate(Handle timer, DataPack dp)
     {
         float end[3];
         TR_GetEndPosition(end, tr);
-        end[2] += 5.0;
-        TeleportEntity(ent, end, NULL_VECTOR, NULL_VECTOR);
+        if (FloatAbs(origin[2] - end[2]) < 60.0)
+            z = end[2];                        // 罐子已在地面（低空正常态）→ 用局部地形
     }
     delete tr;
+    float dest[3];
+    dest = origin;
+    dest[2] = z + 5.0;
+    TeleportEntity(ent, dest, NULL_VECTOR, NULL_VECTOR);
 
     // v1.2.5 FIX: 强裂前手动置标志——L4D_DetonateProjectile 兜底路径可能
     // 不触发 L4D2_VomitJar_Detonate pre（13:20 日志实证：拦截失效 → 站在
@@ -2645,6 +2808,40 @@ public Action Cmd_Art4Test(int client, int args)
     pos[2] += height;
     Art4_SpawnGrenade(pos, height, client);
     PrintToChat(client, "\x04[商店]\x01 火力支援IV 测试弹：h=%.0f（引信 ~1.2s，贴近地面空爆）", height);
+    return Plugin_Handled;
+}
+
+// v1.3.0: 空服实测脚手架——准星单件，走正式 kind=5 分流（随机罐子/榴弹）
+public Action Cmd_Art5Test(int client, int args)
+{
+    float target[3];
+    bool valid;
+    Art_AimPoint(client, target, valid);
+    if (!valid)
+    {
+        PrintToChat(client, "\x04[商店]\x01 目标无效——请照准地面/开阔处");
+        return Plugin_Handled;
+    }
+    bool openAbove;
+    float ceiling = Art_FindCeiling(target, openAbove);
+    if (ceiling > 0.0 && ceiling < ART_CEIL_LOW && !openAbove)
+    {
+        PrintToChat(client, "\x04[商店]\x01 目标无效——天花板过低");
+        return Plugin_Handled;
+    }
+    float radius, height;
+    Art_PickParams(5, ceiling, openAbove, radius, height);
+    DataPack dp = new DataPack();            // 复用 Timer_ArtSpawnCan 正式路径（含 kind=5 随机分流）
+    dp.WriteFloat(target[0]);
+    dp.WriteFloat(target[1]);
+    dp.WriteFloat(target[2]);
+    dp.WriteFloat(radius);
+    dp.WriteFloat(height);
+    dp.WriteCell(client);
+    dp.WriteCell(5);
+    Timer_ArtSpawnCan(INVALID_HANDLE, dp);
+    PrintToChat(client, "\x04[商店]\x01 火力支援V 测试件：h=%.0f（随机罐子或榴弹，混合比 si_hud_art5_can_pct=%d%%）",
+        height, g_cvArt5CanPct.IntValue);
     return Plugin_Handled;
 }
 

@@ -66,6 +66,9 @@
  *    倍率,恢复 1 倍(sm_gl_witch_mult 1.5 → 1.0 = 750/发)。
  *    数学:中远距离 750×2=1500 恰好两发死;贴脸 750+引擎补刀 441≈1191 < 1500
  *    不会秒杀,第二发必死。"两下必死"保留,贴脸不再一发带走。
+ *  v2.1.27 (2026-08-03): 修复启动/换图清理阶段 OnEntityDestroyed 收到无效索引
+ *    （-2034902966 等负数）→ EntIndexToEntRef 抛 "Invalid entity index" 异常刷屏：
+ *    回调开头加 entity <= 0 || > GetMaxEntities() 守卫。
  *  v2.1.14 (2026-08-02): Witch 伤害全链路重做（定论：引擎对 Witch 实体的爆炸伤害
  *    有专属后置重算，DMG_BLAST 任何路径——改 damage / 注入——全被打回：
  *    14:01 注入 1125 实落 ~221、14:11 贴脸 20 单位引擎只给 ~400 且 hook 不触发）。
@@ -160,7 +163,7 @@ public Plugin myinfo =
     name        = "GL Splash Damage Fix",
     author      = "suli",
     description = "Grenade launcher splash damage rewrite (self-damage fixed)",
-    version     = "2.1.26",
+    version     = "2.1.27",
     url         = ""
 };
 
@@ -356,6 +359,10 @@ public Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &dam
  */
 public void OnEntityDestroyed(int entity)
 {
+    // v2.1.16 FIX: 启动/换图清理阶段会收到无效索引（实测 -2034902966 等负数，
+    // EntIndexToEntRef 抛 "Invalid entity index" 异常刷屏）→ 有效性守卫先行
+    if (entity <= 0 || entity > GetMaxEntities())
+        return;
     int entRef = EntIndexToEntRef(entity);
     int idx = g_hProjectiles.FindValue(entRef);
     if (idx == -1)

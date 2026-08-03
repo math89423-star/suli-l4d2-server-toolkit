@@ -37,3 +37,4 @@ plugins/backup/
 data/last_map.txt
 data/si_hud_scores.txt
 data/sqlite/*.sq3
+*.smx.disabled
