@@ -13,8 +13,9 @@
 //     （C/H/Sp/J 任一 pin 住人 → Tank 冲过去一拳必杀）+ coordPunchSeq
 //     窗口内 ≤300u 直测 pin 出拳；mode 6 巨兽协同保持小队分散（不集火命令）
 //   - 追击优化：damager 距离门控 800u（风筝手不再把 Tank 拖离战场）
-//   - 地形秒杀：propKillSeq 打汽车/爆炸罐（注入 500 拳伤确定性引爆，
-//     爆炸半径内 350u 生还者被秒杀）
+//   - 地形秒杀：propKillSeq 打汽车（prop_car*，注入 500 拳伤确定性引爆，
+//     爆炸半径内 350u 生还者被秒杀；用户拍板只打汽车不打爆炸物 ——
+//     Tank 拳不作用于罐类，见 Tank_IsKillProp 注释）
 //   - 飞石精准 + 移动靶预判：TankAct_AimRock 提前量瞄准（lead = vel × dist/800）
 //     + L4D_TankRock_OnRelease 释放校正（真实 |vecVel| 自修正 bhop 自身速度）
 // Preserved v2.2 features:
@@ -498,37 +499,23 @@ BT_Status TankAct_CoordPunch(int client) {
 }
 
 // ============================================================================
-// v4.1: 地形秒杀 —— 打汽车/爆炸罐击杀附近幸存者
+// v4.1: 地形秒杀 —— 打汽车击杀附近幸存者（用户拍板：只打汽车，不打爆炸物）
 // ============================================================================
-// 引擎机制（已核验）：prop_car* 损毁即爆炸（vanilla）；罐类（丙烷/汽油/
-// 氧气/烟花箱）死亡触发 propdata onbreak:explode_fire 爆炸（l4d2_shop
-// v1.7.93 爆罐方案）。Tank 拳能伤 prop，但注入 SDKHooks_TakeDamage 保证
-// 确定性击杀 + 归属（inflictor=tank）。模型清单来自 l4d2_can_full_damage.sp:20-26。
+// 引擎机制（已核验）：prop_car* 损毁即爆炸（vanilla），爆炸范围伤害正常
+// 作用于附近生还者，归属跟 inflictor。
+// 2026-08-03 用户修正：Tank 拳击只作用于汽车/树干等物理实体，不作用于
+// 爆炸物（丙烷/汽油/氧气罐等）—— 罐类爆炸链路（propdata onbreak:
+// explode_fire）是 l4d2_shop 在"生成"场景验证的，对 Tank 拳击场景不可靠，
+// 属"不确定"。按用户原则（不确定宁愿用原版）剔除 4 种爆炸罐 + 模型匹配，
+// 只保留 prop_car*（Tank 拳能打汽车 = 用户确认的 vanilla 行为）。
+// 注入 SDKHooks_TakeDamage 保证确定性破坏 + 归属（inflictor=tank）。
 stock bool Tank_IsKillProp(int ent) {
     char cls[64];
     GetEntityClassname(ent, cls, sizeof(cls));
-    if (StrContains(cls, "prop_car", false) == 0) {
-        // prop_car / prop_car_alarm；prop_car_glass 只会碎不会爆
-        if (StrEqual(cls, "prop_car_glass")) return false;
-        return HasEntProp(ent, Prop_Data, "m_iHealth") && GetEntProp(ent, Prop_Data, "m_iHealth") > 0;
-    }
-    if (StrEqual(cls, "weapon_propanetank") || StrEqual(cls, "weapon_gascan")
-        || StrEqual(cls, "weapon_oxygentank") || StrEqual(cls, "weapon_fireworkcrate")) {
-        return true;
-    }
-    if (StrEqual(cls, "prop_physics") || StrEqual(cls, "prop_physics_multiplayer")
-        || StrEqual(cls, "prop_physics_override") || StrEqual(cls, "prop_dynamic")
-        || StrEqual(cls, "prop_dynamic_override")) {
-        char model[PLATFORM_MAX_PATH];
-        GetEntPropString(ent, Prop_Data, "m_ModelName", model, sizeof(model));
-        if (StrEqual(model, "models/props_junk/propanecanister001a.mdl")
-            || StrEqual(model, "models/props_equipment/oxygentank01.mdl")
-            || StrEqual(model, "models/props_junk/gascan001a.mdl")
-            || StrEqual(model, "models/props_junk/explosive_box001.mdl")) {
-            return HasEntProp(ent, Prop_Data, "m_iHealth") && GetEntProp(ent, Prop_Data, "m_iHealth") > 0;
-        }
-    }
-    return false;
+    if (StrContains(cls, "prop_car", false) != 0) return false;
+    // prop_car / prop_car_alarm；prop_car_glass 只会碎不会爆
+    if (StrEqual(cls, "prop_car_glass")) return false;
+    return HasEntProp(ent, Prop_Data, "m_iHealth") && GetEntProp(ent, Prop_Data, "m_iHealth") > 0;
 }
 
 // LOS：eye→prop 射线，首个命中必须是该 prop（TerrainTraceFilter 只排除
@@ -717,7 +704,7 @@ stock int BT_CreateTankTree() {
 
     int meleeSelector = BT_Create(BTN_SELECTOR);
     BT_AddChild(meleeSelector, coordPunchSeq);        // 1a. v4.1 协同窗口 → 拳杀被 pin 者
-    BT_AddChild(meleeSelector, propKillSeq);          // 1b. v4.1 打汽车/爆炸罐（地形秒杀）
+    BT_AddChild(meleeSelector, propKillSeq);          // 1b. v4.1 打汽车（地形秒杀）
     BT_AddChild(meleeSelector, ledgePunchSeq);        // 1c. ledge → punch off cliff
     BT_AddChild(meleeSelector, openStrat1_Charge);    // 1d. open → charge punch
     int meleeCluster = BT_CreateCooldown(1.5, meleeSelector);
@@ -780,7 +767,7 @@ public Tank_OnModuleStart() {
     CreateConVar("ai_tank_rock_predict",       "1",   "Predictive rock aiming (lead) + OnRelease correction", FCVAR_NONE);
     CreateConVar("ai_tank_rock_lead_max",      "400", "Max lead distance (u) for rock prediction", FCVAR_NONE);
     CreateConVar("ai_tank_rock_pitch_offset",  "0",   "Vertical aim compensation for rock arc (empirical)", FCVAR_NONE);
-    CreateConVar("ai_tank_prop_kill",          "1",   "Tank smashes cars/explosive props to kill nearby survivors", FCVAR_NONE);
+    CreateConVar("ai_tank_prop_kill",          "1",   "Tank smashes cars (prop_car*) to kill nearby survivors", FCVAR_NONE);
     CreateConVar("ai_tank_prop_punch_damage",  "500", "Damage injected per prop punch", FCVAR_NONE);
     CreateConVar("ai_tank_prop_blast_radius",  "350", "Survivor must be within this radius of the prop", FCVAR_NONE);
     CreateConVar("ai_tank_damager_max_dist",   "800", "Damager-preference chase distance gate (kiter immunity)", FCVAR_NONE);
