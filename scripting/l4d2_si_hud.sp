@@ -17,7 +17,8 @@
  *     si_hud_art_* cvar）。本插件保留计分入账、钱包/复活币所有权与持久化、
  *     复活系统、排行榜、HUD。新增 SH_ 公共 API（RegPluginLibrary
  *     "l4d2_si_hud_api"：SH_GetWallet/SH_AddWallet/SH_GetReviveCoins/
- *     SH_AddReviveCoins/SH_GetCoinMax；契约见 include/l4d2_si_hud.inc；
+ *     SH_AddReviveCoins/SH_GetCoinMax/SH_ReviveClient；契约见
+ *     include/l4d2_si_hud.inc；
  *     SM 1.12 懒绑定：l4d2_shop 直接 native 声明 + FindPluginByFile 守卫）。
  *     respawn_coin_* 保留本插件。
  *   - 删除死代码: gamedata SetHasLaserSight SDKCall（L4D2 无此符号，从未调用）
@@ -704,7 +705,7 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.9.0"
+#define PLUGIN_VERSION "1.9.1"
 
 // ============================================================================
 // ConVar handles
@@ -917,6 +918,32 @@ public int Native_SH_AddReviveCoins(Handle plugin, int numParams)
 public int Native_SH_GetCoinMax(Handle plugin, int numParams)
 {
     return g_cvRespawnCoinMax.IntValue;
+}
+
+// v1.9.1 (bug): 商店购买复活币时，玩家可能已躺尸——复活判定只响应
+// player_death，躺尸后买币不会再有 death 事件 → 币白买。本 native 供
+// 消费方（l4d2_shop）在加币后调用：玩家处于真死亡状态时消耗 1 枚复活币
+// 并安排自动复活；其他情况（活着/倒下/已有复活计划/无币）返回 0 不动。
+public int Native_SH_ReviveClient(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients)
+        return 0;
+    if (!IsClientInGame(client) || IsFakeClient(client))
+        return 0;
+    if (GetClientTeam(client) != 2)
+        return 0;
+    // 倒下（incapacitated）不算死亡——引擎自会处理，强行复活会穿模/双复活
+    if (IsPlayerAlive(client) || L4D_IsPlayerIncapacitated(client))
+        return 0;
+    if (g_hRespawnTimer[client] != null)
+        return 0;              // 已有复活计划（次数复活倒计时中）——不重复
+    if (g_iReviveCoins[client] <= 0)
+        return 0;
+
+    g_iReviveCoins[client]--;
+    ScheduleRespawn(client, false);   // 打印"复活币复活"倒计时提示
+    return 1;
 }
 
 // ============================================================================
@@ -1154,6 +1181,7 @@ public void OnPluginStart()
     CreateNative("SH_GetReviveCoins", Native_SH_GetReviveCoins);
     CreateNative("SH_AddReviveCoins", Native_SH_AddReviveCoins);
     CreateNative("SH_GetCoinMax",     Native_SH_GetCoinMax);
+    CreateNative("SH_ReviveClient",   Native_SH_ReviveClient);   // v1.9.1
 
     // ── Events ──────────────────────────────────────────
 

@@ -46,3 +46,14 @@ native int SH_AddReviveCoins(int client, int amount);
  * 钳制处使用同一策略，消费方购买前检查用它保持口径一致）。
  */
 native int SH_GetCoinMax();
+
+/**
+ * 复活币立即复活（v1.9.1+）：玩家当前处于真死亡状态（复活次数用完且无币
+ * 而躺尸）时，消耗 1 枚复活币并安排自动复活（延迟 si_hud_respawn_delay）。
+ * 返回 1 = 已消耗并安排复活；0 = 未生效（活着/倒下/已有复活计划/无币/非幸存者）。
+ *
+ * 背景：复活判定只响应 player_death 事件——躺尸后购买复活币不会再有死亡
+ * 事件，币会白买。消费方在 SH_AddReviveCoins(+1) 后立即调用本 native：
+ * 真死亡 → 用掉刚买的币复活；存活 → 返回 0，币正常囤积。
+ */
+native int SH_ReviveClient(int client);
