@@ -4,7 +4,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "1.7.0"
+#define PLUGIN_VERSION "1.8.0"
 #define CHAT_PREFIX "\x04[战利品]\x01"
 #define MAX_LOOT_ITEMS 16
 
@@ -18,27 +18,29 @@ enum struct LootItem
     int weight;
 }
 
-// 投掷物池：Tank 必掉 3 个（权重抽 3 不重复 = 各 1 个）/ 小僵尸 1%（胆汁/土制 50/50）
+// 投掷物池：Tank 必掉 1 个 / 小僵尸 1%（胆汁/土制 50/50）
 LootItem g_Pool_Throw[MAX_LOOT_ITEMS];
 int g_Count_Throw = 0;
 
-// Witch 池：4 选 1（医疗包/电击器/燃烧瓶/高爆弹药包）
+// Witch 池：4 选 1（高爆弹包35/燃烧弹包35/医疗包15/电击器15）
 LootItem g_Pool_Witch[MAX_LOOT_ITEMS];
 int g_Count_Witch = 0;
 
-// 重型武器池：Tank 必掉 2 选 1（M60 / 榴弹发射器）
-LootItem g_Pool_Weapon[MAX_LOOT_ITEMS];
-int g_Count_Weapon = 0;
+// 装备池：Tank 必掉 4 选 1（医疗包/电击器/M60/榴弹发射器）
+LootItem g_Pool_Equip[MAX_LOOT_ITEMS];
+int g_Count_Equip = 0;
+
+// 小药池：Tank 必掉 1 个（止痛药/肾上腺素 50/50）
+LootItem g_Pool_SmallMed[MAX_LOOT_ITEMS];
+int g_Count_SmallMed = 0;
 
 // ============================================================================
 // ConVars
 // ============================================================================
 ConVar g_cvEnabled;
-ConVar g_cvSI_Adrenaline;
-ConVar g_cvSI_Pills;
 ConVar g_cvSI_Molotov;
-ConVar g_cvSI_Explosive;
-ConVar g_cvSI_Incendiary;
+ConVar g_cvSI_Meds;
+ConVar g_cvSI_Packs;
 ConVar g_cvCommonChance;
 ConVar g_cvAnnounce;
 
@@ -49,7 +51,7 @@ public Plugin myinfo =
 {
     name        = "L4D2 Loot Drop",
     author      = "Claude",
-    description = "击杀掉落战利品：小僵尸1%, 特感7%(5种独立概率), Tank 必掉医疗包+M60/榴弹+3投掷物, Witch 4选1",
+    description = "击杀掉落战利品：小僵尸1%(胆汁/土制), 特感4%(单件), Tank 必掉3件(医疗/重火力+投掷物+小药), Witch 4选1",
     version     = PLUGIN_VERSION,
     url         = ""
 };
@@ -58,12 +60,10 @@ public Plugin myinfo =
 public void OnPluginStart()
 {
     g_cvEnabled            = CreateConVar("sm_loot_enabled",              "1",    "启用战利品掉落 (0=关闭, 1=开启)", _, true, 0.0, true, 1.0);
-    // v1.7.0：普通特感 5 种物品独立概率（合计 7%），可单独调
-    g_cvSI_Adrenaline      = CreateConVar("sm_loot_si_adrenaline",        "1.0",  "特感掉落肾上腺素概率 (%)", _, true, 0.0, true, 100.0);
-    g_cvSI_Pills           = CreateConVar("sm_loot_si_pills",             "1.0",  "特感掉落止痛药概率 (%)", _, true, 0.0, true, 100.0);
-    g_cvSI_Molotov         = CreateConVar("sm_loot_si_molotov",           "2.0",  "特感掉落燃烧瓶概率 (%)", _, true, 0.0, true, 100.0);
-    g_cvSI_Explosive       = CreateConVar("sm_loot_si_explosive",         "1.5",  "特感掉落高爆弹药包概率 (%)", _, true, 0.0, true, 100.0);
-    g_cvSI_Incendiary      = CreateConVar("sm_loot_si_incendiary",        "1.5",  "特感掉落燃烧弹药包概率 (%)", _, true, 0.0, true, 100.0);
+    // v1.8.0：特感单次 roll，只掉 1 件（总概率 = 三个 cvar 之和，默认 4%）
+    g_cvSI_Molotov         = CreateConVar("sm_loot_si_molotov",           "1.0",  "特感掉落燃烧瓶概率 (%)", _, true, 0.0, true, 100.0);
+    g_cvSI_Meds            = CreateConVar("sm_loot_si_meds",              "1.0",  "特感掉落药品组概率 (%) — 止痛药/肾上腺素 50/50", _, true, 0.0, true, 100.0);
+    g_cvSI_Packs           = CreateConVar("sm_loot_si_packs",             "2.0",  "特感掉落弹药包组概率 (%) — 燃烧弹包/高爆弹包 50/50", _, true, 0.0, true, 100.0);
     g_cvCommonChance       = CreateConVar("sm_loot_common_chance",        "1.0",  "普通感染者掉落概率 (%) — 胆汁/土制炸弹 50/50", _, true, 0.0, true, 100.0);
     g_cvAnnounce           = CreateConVar("sm_loot_announce",              "1",    "掉落通知 (0=关闭, 1=仅击杀者, 2=全体)", _, true, 0.0, true, 2.0);
 
@@ -87,23 +87,30 @@ public void OnMapStart()
 // ============================================================================
 void LoadTables()
 {
-    // —— 投掷物池：Tank 必掉 3 个（权重抽 3 不重复 = 3 种各 1）/ 小僵尸 1%（50/50）——
+    // —— 投掷物池：Tank 必掉 1 个 / 小僵尸 1%（50/50）——
     g_Count_Throw = 0;
     AddThrow("weapon_pipe_bomb",  "土制炸弹", 40);
     AddThrow("weapon_molotov",    "燃烧瓶",   30);
     AddThrow("weapon_vomitjar",   "胆汁罐",   30);
 
-    // —— Witch 池：4 选 1（等权重）——
+    // —— Witch 池：4 选 1（高爆弹包35/燃烧弹包35/医疗包15/电击器15）——
     g_Count_Witch = 0;
-    AddWitch("weapon_first_aid_kit",         "医疗包",     25);
-    AddWitch("weapon_defibrillator",         "电击器",     25);
-    AddWitch("weapon_molotov",               "燃烧瓶",     25);
-    AddWitch("weapon_upgradepack_explosive", "高爆弹药包", 25);
+    AddWitch("weapon_upgradepack_explosive",  "高爆弹药包", 35);
+    AddWitch("weapon_upgradepack_incendiary", "燃烧弹药包", 35);
+    AddWitch("weapon_first_aid_kit",          "医疗包",     15);
+    AddWitch("weapon_defibrillator",          "电击器",     15);
 
-    // —— 重型武器池：Tank 必掉 2 选 1 ——
-    g_Count_Weapon = 0;
-    AddWeapon("weapon_rifle_m60",        "M60 轻机枪", 50);
-    AddWeapon("weapon_grenade_launcher", "榴弹发射器", 50);
+    // —— 装备池：Tank 必掉 4 选 1（医疗包/电击器/M60/榴弹 各25%）——
+    g_Count_Equip = 0;
+    AddEquip("weapon_first_aid_kit",   "医疗包",     25);
+    AddEquip("weapon_defibrillator",   "电击器",     25);
+    AddEquip("weapon_rifle_m60",       "M60 轻机枪", 25);
+    AddEquip("weapon_grenade_launcher","榴弹发射器", 25);
+
+    // —— 小药池：Tank 必掉 1 个（止痛药/肾上腺素 50/50）——
+    g_Count_SmallMed = 0;
+    AddSmallMed("weapon_pain_pills", "止痛药",   50);
+    AddSmallMed("weapon_adrenaline", "肾上腺素", 50);
 }
 
 void AddThrow(const char[] cls, const char[] name, int w)
@@ -124,13 +131,22 @@ void AddWitch(const char[] cls, const char[] name, int w)
     g_Count_Witch++;
 }
 
-void AddWeapon(const char[] cls, const char[] name, int w)
+void AddEquip(const char[] cls, const char[] name, int w)
 {
-    if (g_Count_Weapon >= MAX_LOOT_ITEMS) return;
-    strcopy(g_Pool_Weapon[g_Count_Weapon].classname, 64, cls);
-    strcopy(g_Pool_Weapon[g_Count_Weapon].displayName, 32, name);
-    g_Pool_Weapon[g_Count_Weapon].weight = w;
-    g_Count_Weapon++;
+    if (g_Count_Equip >= MAX_LOOT_ITEMS) return;
+    strcopy(g_Pool_Equip[g_Count_Equip].classname, 64, cls);
+    strcopy(g_Pool_Equip[g_Count_Equip].displayName, 32, name);
+    g_Pool_Equip[g_Count_Equip].weight = w;
+    g_Count_Equip++;
+}
+
+void AddSmallMed(const char[] cls, const char[] name, int w)
+{
+    if (g_Count_SmallMed >= MAX_LOOT_ITEMS) return;
+    strcopy(g_Pool_SmallMed[g_Count_SmallMed].classname, 64, cls);
+    strcopy(g_Pool_SmallMed[g_Count_SmallMed].displayName, 32, name);
+    g_Pool_SmallMed[g_Count_SmallMed].weight = w;
+    g_Count_SmallMed++;
 }
 
 // ============================================================================
@@ -322,41 +338,62 @@ void SpawnCommonLoot(int attacker, float pos[3])
 }
 
 // ============================================================================
-// 普通特感掉落：5 种物品独立概率（默认合计 7%），多件同时掉概率可忽略
+// 普通特感掉落：单次 roll，有且只有 1 件（总概率 = 三组之和，默认 4%）
+// 燃烧瓶 1% ｜ 止痛药/肾上腺素 1% ｜ 燃烧弹包/高爆弹包 2%
 // ============================================================================
 void SpawnSILoot(int attacker, float pos[3], const char[] siName)
 {
-    float zero[3]; zero[0] = 0.0; zero[1] = 0.0; zero[2] = 0.0;
+    float m     = g_cvSI_Molotov.FloatValue;
+    float meds  = g_cvSI_Meds.FloatValue;
+    float packs = g_cvSI_Packs.FloatValue;
 
-    if (GetRandomFloat(0.0, 100.0) <= g_cvSI_Adrenaline.FloatValue)
+    float roll = GetRandomFloat(0.0, 100.0);
+    char cls[64];
+    char itemName[32];
+
+    if (roll <= m)
     {
-        SpawnOne("weapon_adrenaline", pos, zero);
-        Announce(attacker, "肾上腺素", 1, siName);
+        strcopy(cls, sizeof(cls), "weapon_molotov");
+        strcopy(itemName, sizeof(itemName), "燃烧瓶");
     }
-    if (GetRandomFloat(0.0, 100.0) <= g_cvSI_Pills.FloatValue)
+    else if (roll <= m + meds)
     {
-        SpawnOne("weapon_pain_pills", pos, zero);
-        Announce(attacker, "止痛药", 1, siName);
+        if (GetRandomInt(0, 1) == 0)
+        {
+            strcopy(cls, sizeof(cls), "weapon_pain_pills");
+            strcopy(itemName, sizeof(itemName), "止痛药");
+        }
+        else
+        {
+            strcopy(cls, sizeof(cls), "weapon_adrenaline");
+            strcopy(itemName, sizeof(itemName), "肾上腺素");
+        }
     }
-    if (GetRandomFloat(0.0, 100.0) <= g_cvSI_Molotov.FloatValue)
+    else if (roll <= m + meds + packs)
     {
-        SpawnOne("weapon_molotov", pos, zero);
-        Announce(attacker, "燃烧瓶", 1, siName);
+        if (GetRandomInt(0, 1) == 0)
+        {
+            strcopy(cls, sizeof(cls), "weapon_upgradepack_incendiary");
+            strcopy(itemName, sizeof(itemName), "燃烧弹药包");
+        }
+        else
+        {
+            strcopy(cls, sizeof(cls), "weapon_upgradepack_explosive");
+            strcopy(itemName, sizeof(itemName), "高爆弹药包");
+        }
     }
-    if (GetRandomFloat(0.0, 100.0) <= g_cvSI_Explosive.FloatValue)
+    else
     {
-        SpawnOne("weapon_upgradepack_explosive", pos, zero);
-        Announce(attacker, "高爆弹药包", 1, siName);
+        return;   // 本次不掉落
     }
-    if (GetRandomFloat(0.0, 100.0) <= g_cvSI_Incendiary.FloatValue)
-    {
-        SpawnOne("weapon_upgradepack_incendiary", pos, zero);
-        Announce(attacker, "燃烧弹药包", 1, siName);
-    }
+
+    float zero[3]; zero[0] = 0.0; zero[1] = 0.0; zero[2] = 0.0;
+    SpawnOne(cls, pos, zero);
+    Announce(attacker, itemName, 1, siName);
 }
 
 // ============================================================================
-// event: infected_death — common infected kills
+// event: infected_death — common infected kills（只处理普通感染者）
 // ============================================================================
 void Event_InfectedDeath(Event event, const char[] name, bool dontBroadcast)
 {
@@ -366,16 +403,20 @@ void Event_InfectedDeath(Event event, const char[] name, bool dontBroadcast)
     if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker)) return;
     if (GetClientTeam(attacker) != 2) return;
 
+    // v1.8.0：引擎对 Witch/特感死亡也会触发 infected_death —— 只允许
+    // 普通感染者(classname "infected")走这条路径，保证"有且只有一件"
+    int infected = event.GetInt("entityid");
+    if (infected <= 0 || !IsValidEntity(infected)) return;
+    char cls[16];
+    GetEntityClassname(infected, cls, sizeof(cls));
+    if (!StrEqual(cls, "infected")) return;
+
     // 小僵尸：1% 掉 1 件
     if (GetRandomFloat(0.0, 100.0) > g_cvCommonChance.FloatValue) return;
 
     // 从僵尸身上掉落，不是击杀者
     float pos[3];
-    int infected = event.GetInt("entityid");
-    if (infected > 0 && IsValidEntity(infected))
-        GetEntPropVector(infected, Prop_Send, "m_vecOrigin", pos);
-    else
-        GetClientAbsOrigin(attacker, pos);
+    GetEntPropVector(infected, Prop_Send, "m_vecOrigin", pos);
 
     SpawnCommonLoot(attacker, pos);
 }
@@ -420,44 +461,40 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 
         if (zClass == 8)
         {
-            // ---- Tank：必掉 医疗包 + 强武器(M60/榴弹 2选1) + 3 投掷物 ----
-            int picks[MAX_LOOT_ITEMS];
-            WeightedPickN(g_Pool_Throw, g_Count_Throw, 3, picks);
-            SpawnN(g_Pool_Throw, picks, 3, pos);          // 偏移 0,1,2
+            // ---- Tank：必掉 3 件 = 装备(医疗/电击/M60/榴弹 4选1) + 投掷物 + 小药 ----
+            int equipIdx = WeightedPick(g_Pool_Equip, g_Count_Equip);
+            int throwIdx = WeightedPick(g_Pool_Throw, g_Count_Throw);
+            int medIdx   = WeightedPick(g_Pool_SmallMed, g_Count_SmallMed);
+            if (equipIdx < 0 || throwIdx < 0 || medIdx < 0) return;
 
-            float off3[3] = { -50.0, -20.0, 0.0 };        // 偏移 3：医疗包
-            SpawnOne("weapon_first_aid_kit", pos, off3);
-
-            int wIdx = WeightedPick(g_Pool_Weapon, g_Count_Weapon);
-            char weaponName[32];
-            if (wIdx >= 0)
-            {
-                float off4[3] = { 50.0, -20.0, 0.0 };     // 偏移 4：强武器
-                SpawnOne(g_Pool_Weapon[wIdx].classname, pos, off4);
-                strcopy(weaponName, sizeof(weaponName), g_Pool_Weapon[wIdx].displayName);
-            }
-            else
-            {
-                strcopy(weaponName, sizeof(weaponName), "(无)");
-            }
+            float offs[3][3] = {
+                {   0.0,  0.0 },
+                { -40.0, 30.0 },
+                {  40.0, 30.0 }
+            };
+            SpawnOne(g_Pool_Equip[equipIdx].classname, pos, offs[0]);
+            SpawnOne(g_Pool_Throw[throwIdx].classname, pos, offs[1]);
+            SpawnOne(g_Pool_SmallMed[medIdx].classname, pos, offs[2]);
 
             char names[256];
-            Format(names, sizeof(names), "\x04%s\x01, \x04医疗包\x01, \x04", weaponName);
-            char rest[192];
-            JoinNames(g_Pool_Throw, picks, 3, rest, sizeof(rest));
-            StrCat(names, sizeof(names), rest);
-            Announce(attacker, names, 5, siName);
+            Format(names, sizeof(names), "\x04%s\x01, \x04%s\x01, \x04%s\x01",
+                g_Pool_Equip[equipIdx].displayName,
+                g_Pool_Throw[throwIdx].displayName,
+                g_Pool_SmallMed[medIdx].displayName);
+            Announce(attacker, names, 3, siName);
+
+            EmitSoundToAll("erasounds/bounce_era.wav", SOUND_FROM_PLAYER, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, 0.4);
         }
         else
         {
-            // ---- 普通特感：5 种独立概率 roll ----
+            // ---- 普通特感：单次 roll，只掉 1 件 ----
             SpawnSILoot(attacker, pos, siName);
         }
     }
 }
 
 // ============================================================================
-// event: witch_killed — 4 选 1（医疗包/电击器/燃烧瓶/高爆弹药包，等权重）
+// event: witch_killed — 4 选 1（高爆弹包35/燃烧弹包35/医疗包15/电击器15）
 // ============================================================================
 void Event_WitchKilled(Event event, const char[] name, bool dontBroadcast)
 {

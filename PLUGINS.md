@@ -86,7 +86,7 @@
 | `l4d2_medical_supply_scaler.smx` | 医疗补给数量按人数缩放（包/药/针） |
 | `l4dmultislots.smx` | 多人生存者 — 最多 10 人，最少 4 人，免大厅等待 |
 | `l4d2_chainsaw_fuel.smx` | 电锯燃料量控制 |
-| `l4d2_loot_drop.smx` | 击杀掉落战利品 — Tank/Witch/特感/小僵尸概率掉落 |
+| `l4d2_loot_drop.smx` | 击杀掉落 v1.8.0 — 小僵尸1%(胆汁/土制)｜特感4%单件(燃烧瓶1/药肾上1/弹药包2)｜Tank必掉3件(医疗/电击/M60/榴弹4选1+投掷物+小药)｜Witch 4选1(高爆35/燃烧35/医疗15/电击15) |
 | `l4d2_give_items.smx` | 右键递物 — 手持投掷物对队友右键递出（对方槽位空才给）；医疗包/药/电击器 cvar 开关默认关 |
 | `l4d2_common_kill_reward.smx` | 击杀小僵尸奖励 |
 | `survivor_chat_select.smx` | 聊天指令选择幸存者角色/皮肤 |
