@@ -53,7 +53,8 @@
 
 | 插件 | 说明 |
 |------|------|
-| `l4d2_si_hud.smx` | 特感血量 HUD + 战地击杀横幅（☠ 并排骷髅头 + 得分，v1.5.0） |
+| `l4d2_si_hud.smx` | 特感血量 HUD + 战地击杀横幅 + 计分/钱包/复活系统（v1.9.0；商店已解耦至 l4d2_shop，导出 SH_ API） |
+| `l4d2_shop.smx` | 积分商店 !shop/!buy（v1.0.0；自 si_hud v1.8.2 解耦：商品表/菜单/透视特感/火炮支援 I/II + si_hud_shop_enable/si_hud_art_* cvar） |
 | `l4d2_bf_killfeedback.smx` | 战地击杀音效（6 种 MP3，v4.2.0；v4.2.1 待发 sound.cache） |
 | `advertisements.smx` | 定时轮播服务器公告（120s 间隔） |
 | `auto_motd.smx` | 自动显示 MOTD 欢迎信息 |

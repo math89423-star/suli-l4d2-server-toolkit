@@ -11,14 +11,13 @@
  * 战役清零、重连恢复全在 si_hud 内。消费方（如 l4d2_shop）通过本 API
  * 读取/增减，不触碰内部状态。
  *
- * ⚠ 绑定规则（l4d2_shop 按字母序在 si_hud 之前加载，必须可选绑定）：
- *   - 消费方不得直接 `native` 声明这些函数（si_hud 缺失时加载硬失败）。
- *   - 正确姿势：si_hud OnPluginStart 调用
- *     RegPluginLibrary("l4d2_si_hud_api")；消费方在 OnAllPluginsLoaded 与
- *     OnLibraryAdded("l4d2_si_hud_api") 里用
- *     GetNativeHandle(FindPluginByFile("l4d2_si_hud.smx"), "SH_...") 获取
- *     句柄，OnLibraryRemoved 里清空；调用走 CallNativeHandle。
- *   - 全部句柄有效 = API 可用；任一缺失（si_hud 过旧）按整体不可用处理。
+ * ⚠ 绑定规则（SM 1.12 运行时懒绑定——项目既有模式，见 left4dhooks 消费方）：
+ *   - 消费方直接 `native` 声明这些函数即可；si_hud 未加载时插件照常加载，
+ *     但对缺失 native 的调用会记错误日志并返回 0。
+ *   - 因此调用必须经可用性守卫：FindPluginByFile("l4d2_si_hud.smx") 存在
+ *     且版本 >= 1.9.0（SH_Ready 模式，见 l4d2_shop.sp），未就绪时不发起
+ *     调用。si_hud 通过 RegPluginLibrary("l4d2_si_hud_api") 声明库存在，
+ *     可作辅助信号。
  */
 
 /**

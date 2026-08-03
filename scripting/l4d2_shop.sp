@@ -33,86 +33,31 @@
 #define PLUGIN_VERSION "1.0.0"
 
 // ============================================================================
-// SH_ public API（l4d2_si_hud 导出）——可选绑定层
+// SH_ public API（l4d2_si_hud >= v1.9.0 导出；契约见 include/l4d2_si_hud.inc）
+//
+// 绑定方式（SM 1.12）：plain native 声明 + 运行时懒绑定——项目既有模式
+// （left4dhooks 消费方、废弃的 l4d2_shop_artillery2 同款）。si_hud 未加载
+// 时调用缺失 native 会记错误日志，故所有调用走 SH_Ready() 守卫的入口
+// （Cmd_Shop / ShopBuy / ArtEndDesignate 退款），正常情况不发起裸调用。
 // ============================================================================
 
-enum
-{
-    Native_Wallet,      // SH_GetWallet
-    Native_AddWallet,   // SH_AddWallet
-    Native_Coins,       // SH_GetReviveCoins
-    Native_AddCoins,    // SH_AddReviveCoins
-    Native_CoinMax,     // SH_GetCoinMax
-    NATIVE_COUNT
-};
+native int SH_GetWallet(int client);
+native int SH_AddWallet(int client, int amount);
+native int SH_GetReviveCoins(int client);
+native int SH_AddReviveCoins(int client, int amount);
+native int SH_GetCoinMax();
 
-Handle g_hSH[NATIVE_COUNT];
-ConVar g_cvSIHudEnable;      // si_hud 总开关（FindConVar，随绑定刷新）
-
-void SH_Refresh()
-{
-    Handle plugin = FindPluginByFile("l4d2_si_hud.smx");
-    if (plugin == INVALID_HANDLE)
-    {
-        SH_Clear();
-        return;
-    }
-    g_hSH[Native_Wallet]    = GetNativeHandle(plugin, "SH_GetWallet");
-    g_hSH[Native_AddWallet] = GetNativeHandle(plugin, "SH_AddWallet");
-    g_hSH[Native_Coins]     = GetNativeHandle(plugin, "SH_GetReviveCoins");
-    g_hSH[Native_AddCoins]  = GetNativeHandle(plugin, "SH_AddReviveCoins");
-    g_hSH[Native_CoinMax]   = GetNativeHandle(plugin, "SH_GetCoinMax");
-    g_cvSIHudEnable = FindConVar("si_hud_enable");
-    if (!SH_Ready())
-        SH_Clear();          // 任一 native 缺失（si_hud 过旧）→ 整组不可用
-}
+ConVar g_cvSIHudEnable;      // si_hud 总开关（FindConVar 读；null 视为开启）
 
 bool SH_Ready()
 {
-    for (int i = 0; i < NATIVE_COUNT; i++)
-    {
-        if (g_hSH[i] == INVALID_HANDLE)
-            return false;
-    }
-    return true;
-}
-
-void SH_Clear()
-{
-    for (int i = 0; i < NATIVE_COUNT; i++)
-        g_hSH[i] = INVALID_HANDLE;
-    g_cvSIHudEnable = null;
-}
-
-// 包装函数：句柄无效时防御返回 0（绝不裸调 CallNativeHandle）
-int SH_Wallet(int client)
-{
-    return (g_hSH[Native_Wallet] != INVALID_HANDLE)
-        ? CallNativeHandle(g_hSH[Native_Wallet], client) : 0;
-}
-
-int SH_AddWallet(int client, int amount)
-{
-    return (g_hSH[Native_AddWallet] != INVALID_HANDLE)
-        ? CallNativeHandle(g_hSH[Native_AddWallet], client, amount) : 0;
-}
-
-int SH_Coins(int client)
-{
-    return (g_hSH[Native_Coins] != INVALID_HANDLE)
-        ? CallNativeHandle(g_hSH[Native_Coins], client) : 0;
-}
-
-int SH_AddCoins(int client, int amount)
-{
-    return (g_hSH[Native_AddCoins] != INVALID_HANDLE)
-        ? CallNativeHandle(g_hSH[Native_AddCoins], client, amount) : 0;
-}
-
-int SH_CoinMax()
-{
-    return (g_hSH[Native_CoinMax] != INVALID_HANDLE)
-        ? CallNativeHandle(g_hSH[Native_CoinMax]) : 0;
+    Handle plugin = FindPluginByFile("l4d2_si_hud.smx");
+    if (plugin == INVALID_HANDLE)
+        return false;
+    // v1.8.x 及更早无 SH_ API（商店内嵌）；v1.9.0 起导出
+    char ver[16];
+    GetPluginInfo(plugin, PlInfo_Version, ver, sizeof(ver));
+    return (StrContains(ver, "1.8") != 0);
 }
 
 // ============================================================================
@@ -353,31 +298,18 @@ public void OnPluginStart()
     g_hWitchList = new ArrayList();          // 透视特感 Witch 实体表（自家独立）
     WallhackClearGlow();                     // reload 安全网——清掉残留特感发光（防 reload 后光不灭）
 
-    SH_Clear();                              // SH_ 句柄初始态（OnAllPluginsLoaded 绑定）
+    g_cvSIHudEnable = FindConVar("si_hud_enable");   // 总开关（可能为 null——si_hud 未加载）
     LogMessage("[shop] loaded v%s — requires l4d2_si_hud >= v1.9.0 (SH_ API)", PLUGIN_VERSION);
 }
 
 // ============================================================================
-// SH_ 绑定生命周期
+// 绑定生命周期（懒绑定无需重刷句柄——只做加载完成时的可用性日志）
 // ============================================================================
 
 public void OnAllPluginsLoaded()
 {
-    SH_Refresh();
     if (!SH_Ready())
-        LogMessage("[shop] si_hud API 不可用（si_hud 未加载或过旧）——商店降级");
-}
-
-public void OnLibraryAdded(const char[] name)
-{
-    if (StrEqual(name, "l4d2_si_hud_api"))
-        SH_Refresh();        // si_hud reload 后自动重绑，无需重载商店
-}
-
-public void OnLibraryRemoved(const char[] name)
-{
-    if (StrEqual(name, "l4d2_si_hud_api"))
-        SH_Clear();
+        LogMessage("[shop] si_hud API 不可用（si_hud 未加载或 < v1.9.0）——商店降级");
 }
 
 // ============================================================================
@@ -649,13 +581,13 @@ void ShopBuy(int client, int slot)
 
     // DEBUG v1.7.43b: 全量购买日志（排障激光分支不执行）
     LogMessage("[shop-buy] client=%N slot=%d cls='%s' price=%d wallet=%d",
-        client, slot, g_ShopTable[slot].classname, g_ShopTable[slot].price, SH_Wallet(client));
+        client, slot, g_ShopTable[slot].classname, g_ShopTable[slot].price, SH_GetWallet(client));
 
     int price = g_ShopTable[slot].price;
-    if (SH_Wallet(client) < price)
+    if (SH_GetWallet(client) < price)
     {
         PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 需要 \x03%d\x01 当前积分，你只有 \x03%d\x01",
-            g_ShopTable[slot].name, price, SH_Wallet(client));
+            g_ShopTable[slot].name, price, SH_GetWallet(client));
         return;
     }
     if (g_ShopTable[slot].limit > 0
@@ -669,10 +601,10 @@ void ShopBuy(int client, int slot)
     // 复活币持有上限检查（必须在扣款前——v1.7.31b fix：原来在扣款后，
     // 达上限购买会扣分不给币）
     if (g_ShopTable[slot].classname[0] == '\0'
-        && SH_Coins(client) >= SH_CoinMax())
+        && SH_GetReviveCoins(client) >= SH_GetCoinMax())
     {
         PrintToChat(client, "\x04[商店]\x01 复活币已达持有上限 \x03%d\x01 枚，无法再购买",
-            SH_CoinMax());
+            SH_GetCoinMax());
         return;
     }
 
@@ -709,9 +641,9 @@ void ShopBuy(int client, int slot)
     // 复活币（classname 空）：不 spawn 物品，余额 +1 枚（战役内保留）
     if (g_ShopTable[slot].classname[0] == '\0')
     {
-        int coins = SH_AddCoins(client, 1);
+        int coins = SH_AddReviveCoins(client, 1);
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05复活币\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），复活币余额 \x03%d\x01 枚",
-            price, SH_Wallet(client), coins);
+            price, SH_GetWallet(client), coins);
         return;
     }
 
@@ -736,7 +668,7 @@ void ShopBuy(int client, int slot)
         LogMessage("[shop-laser] m_upgradeBitVec %d -> %d weapon=%d client=%N",
             upgrade, upgrade | 4, weapon, client);
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05激光瞄准\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），激光已装备到当前主武器",
-            price, SH_Wallet(client));
+            price, SH_GetWallet(client));
         return;
     }
 
@@ -770,7 +702,7 @@ void ShopBuy(int client, int slot)
             return;
         }
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05近战盲盒\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：开出 \x05%s\x01",
-            price, SH_Wallet(client), picked);
+            price, SH_GetWallet(client), picked);
         return;
     }
 
@@ -827,7 +759,7 @@ void ShopBuy(int client, int slot)
     ShopSpawn(g_ShopTable[slot].classname, pos);   // v1.7.93: 可爆炸类商品直接生成 prop_physics
 
     PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），物品已放在你面前",
-        g_ShopTable[slot].name, price, SH_Wallet(client));
+        g_ShopTable[slot].name, price, SH_GetWallet(client));
 }
 
 // ============================================================================
@@ -840,7 +772,7 @@ void OpenShopMenu(int client)
     // v1.7.32c FIX: title 必须单行 — L4D2 VguiMenu 标题不支持 \n，
     // 多行标题 → 整个菜单不渲染（用户实测 !buy 无反应，!csm 的 Panel 单行正常）
     menu.SetTitle("商店: 可用积分 %d  复活币 %d 枚",
-        SH_Wallet(client), SH_Coins(client));
+        SH_GetWallet(client), SH_GetReviveCoins(client));
     menu.AddItem("0", "武器类");
     menu.AddItem("1", "道具类");
     menu.AddItem("2", "医疗类");
@@ -858,7 +790,7 @@ void ShopCategoryMenu(int client, int cat)
     Menu menu = new Menu(ShopItemMenuHandler);
     char title[96];
     Format(title, sizeof(title), "%s: 可用积分 %d  复活币 %d 枚",
-        catNames[cat], SH_Wallet(client), SH_Coins(client));
+        catNames[cat], SH_GetWallet(client), SH_GetReviveCoins(client));
     menu.SetTitle(title);
 
     char info[4];
@@ -893,7 +825,7 @@ void ShopCategoryMenu(int client, int cat)
         }
         else if (limit <= 0)
         {
-            if (SH_Wallet(client) < price)
+            if (SH_GetWallet(client) < price)
                 Format(line, sizeof(line), "%s (%d分) [积分不足]", g_ShopTable[i].name, price);
             else
                 Format(line, sizeof(line), "%s (%d分) [无限购]", g_ShopTable[i].name, price);
@@ -903,13 +835,13 @@ void ShopCategoryMenu(int client, int cat)
             int left = limit - g_iShopBought[client][i];
             if (left <= 0)
                 Format(line, sizeof(line), "%s (%d分) [已购满]", g_ShopTable[i].name, price);
-            else if (SH_Wallet(client) < price)
+            else if (SH_GetWallet(client) < price)
                 Format(line, sizeof(line), "%s (%d分) [积分不足]", g_ShopTable[i].name, price);
             else
                 Format(line, sizeof(line), "%s (%d分) [可购 x%d]", g_ShopTable[i].name, price, left);
         }
 
-        if (i == ARTILLERY_SLOT && SH_Wallet(client) >= price)   // 火炮提示使用方式
+        if (i == ARTILLERY_SLOT && SH_GetWallet(client) >= price)   // 火炮提示使用方式
             Format(line, sizeof(line), "%s ·左键射击轰炸", line);
 
         IntToString(i, info, sizeof(info));
@@ -1042,17 +974,17 @@ void WallhackStart(int client, int price)
         g_hWallhackSyncTimer = CreateTimer(0.5, Timer_WallhackSync, INVALID_HANDLE, TIMER_REPEAT);
 
     LogMessage("[wallhack] %s client=%N wallet=%d total=%.0fs", renew ? "renew" : "start",
-        client, SH_Wallet(client), total);
+        client, SH_GetWallet(client), total);
     int secs = RoundToNearest(total);
     if (renew)
     {
         PrintToChat(client, "\x04[商店]\x01 已续费 \x05透视特感\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），剩余生效时长：\x03%d\x01 秒",
-            price, SH_Wallet(client), secs);
+            price, SH_GetWallet(client), secs);
     }
     else
     {
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05透视特感\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：特感蓝色高亮生效，剩余生效时长：\x03%d\x01 秒（全队可见；死亡/切图/重开/闲置后失效）",
-            price, SH_Wallet(client), secs);
+            price, SH_GetWallet(client), secs);
     }
     // v1.7.68: 全服播报购买/续费（y 键聊天可见）
     PrintToChatAll("\x04[商店]\x01 \x05%N\x01 购买了特感透视，剩余生效时长：\x03%d\x01 秒",
@@ -1267,7 +1199,7 @@ void ArtEndDesignate(int client, bool refund)
         AcceptEntityInput(marker, "Kill");
     g_iArtMarker[client] = 0;
 
-    if (refund)
+    if (refund && SH_Ready())     // si_hud 未加载/过旧时跳过退款（懒绑定缺失 native 会记错）
     {
         SH_AddWallet(client, g_iArtPrice[client]);
         g_iShopBought[client][g_iArtSlot[client]]--;
