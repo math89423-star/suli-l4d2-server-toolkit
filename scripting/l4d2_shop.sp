@@ -200,7 +200,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.6.3"
+#define PLUGIN_VERSION "1.6.4"
 
 // ============================================================================
 // SH_ public API（l4d2_si_hud >= v1.9.0 导出；契约见 include/l4d2_si_hud.inc）
@@ -1246,7 +1246,9 @@ void ShopBuy(int client, int slot)
     {
         // v1.7.82: 倒地/死亡状态拦截（用户边界审查）——倒地/死亡无法开火确认，
         // 买了也立即被心跳退款，直接拒绝更清晰
-        if (!IsPlayerAlive(client))
+        // v1.7.0 FIX: IsPlayerAlive 对倒地玩家返回 true（倒地=存活）→ 只拦死了没拦倒地；
+        // 补 L4D_IsPlayerIncapacitated 才算完整拦截（left4dhooks 已包含，si_hud 同款用法）
+        if (!IsPlayerAlive(client) || L4D_IsPlayerIncapacitated(client))
         {
             SH_AddWallet(client, price);
             g_iShopBought[client][slot]--;
@@ -1912,7 +1914,7 @@ public Action Timer_ArtAim(Handle timer, int userid)
         else if (kind == 3)
             color[0] = 0, color[1] = 255, color[2] = 0;     // 火力支援I-绿色雨幕：绿
         // v1.4.2: kind 5（II-轰炸）落默认分支 = 蓝；kind 1/4 已禁用不可购买
-        // v1.0.7/v1.4.2: 光圈显示用 ring 档位 = 各火力轰炸半径 × 4/3（三档大小分明）
+        // v1.0.7/v1.4.2/v1.6.4: 光圈显示用 ring 档位 = 各火力轰炸半径 + 效果半径（v1.6.4 改）
         float ring;
         Art_RingParams(kind, ceiling, openAbove, ring);
         radius = RoundToNearest(ring);
@@ -2168,6 +2170,10 @@ void Art_PickParams(int kind, float ceiling, bool openAbove, float &radius, floa
 // （保持"光圈 > 轰炸范围"便于看落点；I-轰炸 750/525/375、II-燃烧 900/630/450、
 // III-胆汁 562.5/393.75/281.25 三档分明）。v1.0.7 的 si_hud_art_ring_* 独立
 // cvar 废弃不再读（残留惰性无害）。
+// v1.6.4 FIX: 用户实测"轰炸范围远大于瞄准圈"——圈只盖落点圈，没算每件爆炸物的
+// 效果半径（爆炸/火焰蔓延/胆汁溅射 ≈ 400-500u），实际轰炸覆盖 = 落点半径 + 效果
+// 半径。用户拍板改 圈 = 半径 + 450（户外：绿色雨幕 750→1200 / 地狱烈火 675→1125
+// / 饱和轰炸 562.5→1012）。
 void Art_RingParams(int kind, float ceiling, bool openAbove, float &ring)
 {
     ConVar cvOut  = kind == 2 ? g_cvArt2RadiusOut  : (kind == 3 ? g_cvArt3RadiusOut  : (kind == 5 ? g_cvArt5RadiusOut  : g_cvArtRadiusOut));
@@ -2180,7 +2186,7 @@ void Art_RingParams(int kind, float ceiling, bool openAbove, float &ring)
     else if (openAbove)                r = cvOut.FloatValue;
     else if (ceiling >= ART_CEIL_LOW)  r = cvSmall.FloatValue;
     else                               r = cvSmall.FloatValue;   // 拒绝级：确认前被拦截
-    ring = r * 1.333333;    // 4/3：I-轰炸 562.5→750 / II-燃烧 675→900 / III-胆汁 421.875→562.5
+    ring = r + 450.0;   // v1.6.4: 落点半径 + 效果半径（用户拍板 450u）
 }
 
 // 确认轰炸（v1.0.6 重构）: 锁定落点 → 5s 预警（光圈全员可见 + 聊天播报）
@@ -2206,7 +2212,7 @@ void Art_ConfirmStrike(int client, float target[3])
     g_bArtWarning = true;
     g_iArtWarnKind = kind;
     g_fArtWarnTarget = target;
-    // v1.0.7/v1.4.2: 光圈显示半径（ring 档位 = 各火力轰炸半径 × 4/3）与落罐半径分开存
+    // v1.0.7/v1.4.2/v1.6.4: 光圈显示半径（ring 档位 = 各火力轰炸半径 + 效果半径）与落罐半径分开存
     float ring;
     Art_RingParams(kind, ceiling, openAbove, ring);
     g_fArtWarnRing = ring;
