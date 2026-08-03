@@ -200,7 +200,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.6.0"
+#define PLUGIN_VERSION "1.6.2"
 
 // ============================================================================
 // SH_ public API（l4d2_si_hud >= v1.9.0 导出；契约见 include/l4d2_si_hud.inc）
@@ -2367,12 +2367,72 @@ public Action Timer_ArtSpawnCan(Handle timer, DataPack dp)
     // 风险随高度上升，且 II/III 罐子视觉节奏一致）。
     if ((kind == 2 || kind == 4 || kind == 5) && height > ART4_FUSE_HEIGHT)
         height = ART4_FUSE_HEIGHT;
+
+    // v1.6.2 FIX: 头顶隐形实体探测——c4m2 空地 z=972 防飞顶实体实锤（16:54 测试
+    // h=2196 罐子 8/8 全停 972：ShopTraceFilter 忽略实体 → ceiling/落点 validate
+    // 都检测不到 → 罐子撞实体不触发触碰碎裂 → fallback 半碎裂无胆汁视觉）。
+    // 从 target 向上 5000u trace（不带 filter，MASK_SOLID 含实体）→ 首面即头顶
+    // 阻挡 → height 压到阻挡下方 50u。室内真实天花板 ceiling-150 余量更大 →
+    // maxH 更大 → 保持原值不变；露天防飞顶（972）→ 2196 钳到 801，罐子从
+    // 阻挡下方生成 → 直接落地触碰世界 → 引擎完整碎裂（14:12 h=189 同款流程）。
+    float up[3];
+    up = target;
+    up[2] += 5000.0;
+    Handle trUp = TR_TraceRayEx(target, up, MASK_SOLID, RayType_EndPoint);
+    if (TR_DidHit(trUp))
+    {
+        float hit[3];
+        TR_GetEndPosition(hit, trUp);
+        float maxH = hit[2] - target[2] - 50.0;
+        if (maxH >= 100.0 && height > maxH)
+        {
+            char cls[64] = "world";
+            int entHit = TR_GetEntityIndex(trUp);
+            if (entHit > 0)
+                GetEntityClassname(entHit, cls, sizeof(cls));
+            LogMessage("[artillery3] head-block hit z=%.0f maxH=%.0f class=%s height %.0f -> %.0f",
+                hit[2], maxH, cls, height, maxH);
+            height = maxH;
+        }
+    }
+    delete trUp;
+
     float ang = GetRandomFloat(0.0, 6.2831853);
     float r = radius * SquareRoot(GetRandomFloat(0.0, 1.0));
     float pos[3];
     pos[0] = target[0] + Cosine(ang) * r;
     pos[1] = target[1] + Sine(ang) * r;
     pos[2] = target[2] + height;
+
+    // v1.6.1 FIX: 落点验证——散布圈盖到建筑时罐子会落到屋顶（16:46 实测 jar 落
+    // 到 z=972 屋顶 vs 目标地面 169，800u 落差 → 全在屋顶爆，地面零效果）。
+    // 从生成点向下 trace：首面非目标地面（|end.z - target[2]| > 150）→ 重掷
+    // 坐标（≤8 次）；无命中（地面是实体几何）→ 放行（fallback groundZ 兜底）。
+    for (int tries = 0; tries < 8; tries++)
+    {
+        float probe[3];
+        probe = pos;
+        probe[2] -= 5000.0;
+        Handle tr = TR_TraceRayFilterEx(pos, probe, MASK_SOLID, RayType_EndPoint,
+            ShopTraceFilter, -1);
+        if (!TR_DidHit(tr))
+        {
+            delete tr;
+            break;                             // 下方无实心世界几何 → 放行
+        }
+        float end[3];
+        TR_GetEndPosition(end, tr);
+        delete tr;
+        if (FloatAbs(end[2] - target[2]) <= 150.0)
+            break;                             // 首面即目标地面 → 落点 OK
+        LogMessage("[artillery3] validate reject try=%d endz=%.0f target=%.0f → 重掷",
+            tries, end[2], target[2]);
+        ang = GetRandomFloat(0.0, 6.2831853);
+        r = radius * SquareRoot(GetRandomFloat(0.0, 1.0));
+        pos[0] = target[0] + Cosine(ang) * r;
+        pos[1] = target[1] + Sine(ang) * r;
+        pos[2] = target[2] + height;
+    }
 
     // v1.1.0: kind==3 胆汁瓶——走引擎工厂直生真弹丸（不走 prop_physics 罐子路径）
     if (kind == 3)
@@ -2632,14 +2692,15 @@ void Art3_SpawnJar(const float pos[3], float height, int buyer)
     if (ref != 0 && g_hArtCans != null)
         g_hArtCans.Push(ref);                  // 换图/卸载清理链自动覆盖
 
-    // 兜底：自然碎裂应在 ~fallT 发生；落后 0.5s 仍未碎 → 强制 Detonate
+    // 兜底：自然碎裂应在 ~fallT 发生；落后 0.5s 仍未碎 → 降到落点地面再触碰/强裂
     float fallT = SquareRoot((2.0 * height) / ART_GRAVITY);
     DataPack dp = new DataPack();
     dp.WriteCell(ref);
     dp.WriteFloat(pos[2] - height);   // v1.6.0: 空袭落点地面高度（高 h 强爆落点兜底）
     CreateTimer(fallT + 0.5, Timer_Art3Detonate, dp, TIMER_FLAG_NO_MAPCHANGE);
-    LogMessage("[artillery3] jar spawned ent=%d fallT=%.1f h=%.0f thrower=%N",
-        ent, fallT, height, buyer);
+
+    LogMessage("[artillery3] jar spawned ent=%d fallT=%.1f h=%.0f pos=(%.0f %.0f %.0f) thrower=%N",
+        ent, fallT, height, pos[0], pos[1], pos[2], buyer);
 }
 
 // 兜底：落地后仍存活 → 降到地面再强制引擎 Detonate（原版碎裂+胆汁全流程）
@@ -2670,8 +2731,10 @@ public Action Timer_Art3Detonate(Handle timer, DataPack dp)
     {
         float end[3];
         TR_GetEndPosition(end, tr);
-        if (FloatAbs(origin[2] - end[2]) < 60.0)
-            z = end[2];                        // 罐子已在地面（低空正常态）→ 用局部地形
+        // v1.6.1: 守卫改比「目标地面」而非「罐子当前高度」——屋顶上的罐子
+        // origin.z==end.z 但 end.z 距目标地面 800u，之前误判"已在地面"留在屋顶
+        if (FloatAbs(end[2] - groundZ) <= 150.0)
+            z = end[2];                        // 首面 ≈ 目标地面 → 用局部地形
     }
     delete tr;
     float dest[3];
@@ -2679,15 +2742,32 @@ public Action Timer_Art3Detonate(Handle timer, DataPack dp)
     dest[2] = z + 5.0;
     TeleportEntity(ent, dest, NULL_VECTOR, NULL_VECTOR);
 
-    // v1.2.5 FIX: 强裂前手动置标志——L4D_DetonateProjectile 兜底路径可能
-    // 不触发 L4D2_VomitJar_Detonate pre（13:20 日志实证：拦截失效 → 站在
-    // 落点附近的幸存者被淋 → 角色语音照响）。手动窗口覆盖强裂全程，
-    // 与 pre 路径（若触发）天然互斥不冲突。
-    g_bArt3Detonating = true;
-    LogMessage("[artillery3] fallback detonate ent=%d (manual block window)", ent);
-    L4D_DetonateProjectile(ent);               // v1.2.1: 现成 native 强裂（原 SDKCall 已删）
+    // v1.6.2 FIX: 传送后不立即强裂——v1.2.x 时代"fallback 无 bile"实为立即
+    // 强裂半碎裂（L4D_DetonateProjectile = CBaseGrenade::Detonate 基类，不喷
+    // 胆汁；16:54 dbg after-detonate alive=1 证明碎裂流程未走完 → 用户听到
+    // 声音看不到胆汁烟雾）。传送落点 + 延迟 0.15s → 引擎物理掉落触碰地面 →
+    // 完整碎裂（14:12 实测 h=189 落地触碰 = 引擎碎裂 + bile applied 13 人
+    // 全流程）。仍存活（传送未唤醒/悬停）→ 兜底强裂（原 v1.2.5 手动窗口）。
+    DataPack dp2 = new DataPack();
+    dp2.WriteCell(EntIndexToEntRef(ent));
+    CreateTimer(0.15, Timer_Art3GroundTouch, dp2, TIMER_FLAG_NO_MAPCHANGE);
+    return Plugin_Continue;
+}
+
+// v1.6.2: 传送落点后等待引擎触碰碎裂（完整胆汁效果）；仍未碎 → 兜底强裂
+public Action Timer_Art3GroundTouch(Handle timer, DataPack dp)
+{
+    dp.Reset();
+    int ref = dp.ReadCell();
+    delete dp;
+    int ent = EntRefToEntIndex(ref);
+    if (ent <= 0 || !IsValidEntity(ent))
+        return Plugin_Continue;              // 已自然触碰碎裂 → 引擎全流程 ✓
+    LogMessage("[artillery3] touch-miss ent=%d force-detonate (fallback 兜底半碎裂)", ent);
+    g_bArt3Detonating = true;                // v1.2.5 手动窗口：拦截幸存者被淋
+    L4D_DetonateProjectile(ent);             // v1.2.1: 现成 native 强裂（原 SDKCall 已删）
     g_bArt3Detonating = false;
-    if (IsValidEntity(ent))                    // Detonate 未销毁实体 → 兜底 Kill
+    if (IsValidEntity(ent))                  // Detonate 未销毁实体 → 兜底 Kill
         AcceptEntityInput(ent, "Kill");
     return Plugin_Continue;
 }
