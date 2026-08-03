@@ -67,6 +67,11 @@
 //         新 cvar 8 个：ai_tank_coord / rock_predict / rock_lead_max /
 //         rock_pitch_offset / prop_kill / prop_punch_damage /
 //         prop_blast_radius / damager_max_dist
+// v4.1.1: Boomer 伏击站桩修复 —— ambushSeq（narrow + 目标>300u →
+//         AmbushHold）无距离上限 + 无超时 = 出生远的 Boomer 无限站桩
+//         被电脑处死。修复：目标 >1500u 不伏击直接接近（approach 分支
+//         先拉近距离）+ 伏击超时 8s 转主动接近（ACT_AmbushHold 加
+//         UserParam1 超时参数，≤0 = 不超时保持原行为，仅 Boomer 使用）
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -109,7 +114,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "4.1.0",
+    version = "4.1.1",
     url = "github.com/breezyplease"
 };
 

@@ -984,6 +984,23 @@ BT_Status ACT_CircleFlank(int client) {
 // 原地不动、面向目标方向，等待目标进入射程由上层 selector 切换到攻击分支。
 // 返回 RUNNING 保持姿态。Boomer 门后伏击、Smoker 走廊尽头等人都用它。
 BT_Status ACT_AmbushHold(int client) {
+    // v4.1.1: 伏击超时 —— UserParam1（秒）内目标未进射程 → FAIL 放弃伏击，
+    // 由上层 selector 落到 approach 主动接近（防"出生远 → 无限站桩 → 被处死"）。
+    // 超时后 _ambush_start 刻意残留：本生命内该分支每 tick 立即 FAIL，
+    // 行为 = 永久转为主动接近，直到重生（BB 重置）恢复伏击能力。
+    // UserParam1 ≤ 0 = 不超时（保持原行为）。
+    int nodeId = g_iBTCurrentTickNode;
+    float timeout = g_fBTNodeUserParam1[nodeId];
+    if (timeout > 0.0) {
+        float now = GetGameTime();
+        float start = BB_GetFloat(client, "_ambush_start", 0.0);
+        if (start <= 0.0) {
+            BB_SetFloat(client, "_ambush_start", now);
+        } else if (now - start >= timeout) {
+            return BT_FAILURE;
+        }
+    }
+
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
         float sPos[3], tPos[3], dir[3], ang[3];

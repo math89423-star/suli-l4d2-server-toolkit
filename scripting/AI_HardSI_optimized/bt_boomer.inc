@@ -125,12 +125,18 @@ stock int BT_CreateBoomerTree() {
     // v4.0: 伏击等待 —— narrow 地形不冲脸，原地隐藏等目标进 300u 再吐。
     // 真人 Boomer 会提前预判队伍行进路线，藏在必经之路上。
     // 目标 < 300u 时本分支 FAIL → 落到 narrowHoldVomit/vomitSeq 吐。
+    // v4.1.1: 两道保险 —— ① 目标 > 1500u 不伏击（出生太远直接 approach，
+    // 先拉近距离再说）；② 伏击超时 8s（目标迟迟不进射程 = 不会来，
+    // 放弃伏击主动接近）。修复"出生远 → 无限站桩 → 被电脑处死"。
     // ==========================================
-    int ambushSeq = BT_CreateSequence(4,
+    int ambushHold = BT_CreateAction(ACT_AmbushHold);
+    BT_SetUserParam1(ambushHold, 8.0);          // 伏击超时 8s
+    int ambushSeq = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateIsNotInRange(300.0),
-        BT_CreateAction(ACT_AmbushHold)
+        BT_CreateIsInRange(1500.0),             // 距离上限：>1500u 直接接近
+        ambushHold
     );
 
     // ==========================================
