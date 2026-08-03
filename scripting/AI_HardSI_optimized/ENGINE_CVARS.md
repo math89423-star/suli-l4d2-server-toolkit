@@ -28,7 +28,12 @@
 | `z_vomit_range` | **300** | Boomer 呕吐射程（第二轮实测）；v4.0.4 全部分支 500/550/350 → 300 | ✅ v4.0.4 对齐 |
 | `z_spit_range` | **900** | Spitter 酸液射程（第二轮实测）；插件 800/900 全部 ≤ 900 | ✅ 已验证无需改 |
 | `z_jockey_ride_damage` | 4 | Jockey 骑乘每秒伤害（第二轮实测；`jockey_ride_damage` 等名不存在） | — |
-| `z_tank_attack_interval` | 1.5 | Tank 攻击间隔（第二轮实测；`tank_attack_interval` 等名不存在） | — |
+| `z_tank_attack_interval` | **1.5** | Tank 爪击间隔（第二轮实测）；插件近战簇 `Cooldown(1.5)` | ✅ v4.0.5 对齐 |
+| `z_tank_throw_interval` | **5** | Tank 扔石头冷却（第三轮实测 cvarlist）；插件岩石簇 `Cooldown(5.0)`（openStrat0+rockSeq 共享，双冷却节点会轮流触发=没锁） | ✅ v4.0.5 对齐 |
+| `z_tank_throw_force` | 800 | 石头投掷力度（速度基准，飞石预判计算用） | — |
+| `z_tank_rock_radius` | 100 | 石头爆炸半径（u） | — |
+| `z_tank_throw_health` | 50 | 石头血量（0 禁用投掷） | — |
+| `z_tank_damage_slow_min_range` / `_max_range` | 200 / 400 | 引擎机制：**400u 内 Tank 被枪火减速**（与 min_dist=500 配合：500u 外连跳拉近不受减速，400u 内被减速稳步推进） | — |
 
 ### 冲锋覆盖距离计算（750 的依据）
 
@@ -66,7 +71,13 @@
 | `z_witch_health` | 1500（def 1000） | 当前被改动过（Witch 血量调整入口：[[l4d2-si-health]]） |
 | `z_hunter_speed` | 300 | 移动速度 u/s |
 | `z_spitter_speed` | 210 | |
-| `z_tank_speed` | 210 | |
+| `z_tank_speed` | 210 | 追击速度 |
+| `z_tank_walk_speed` | 100 | 行走速度 |
+| `z_tank_incapacitated_health` | 5000 | 死亡挣扎阶段血量 |
+| `z_tank_incapacitated_decay_rate` | 1 | 死亡挣扎掉血速率 |
+| `z_tank_grenade_damage` | 750 | 手雷对 Tank 伤害 |
+| `z_tank_grenade_launcher_dmg_scale` | 3 | 榴弹对 Tank 伤害倍率 |
+| `z_tank_autoshotgun_dmg_scale` | 0 | 自动霰弹对 Tank 伤害倍率（0=不减免？） |
 | `z_common_limit` | 30 | 引擎小僵尸上限；l4d2_max_common 按人数缩放 30+6x/人，封顶 120 |
 
 ---
@@ -92,7 +103,7 @@
 | Hunter 高位扑上限 `fPounceRange + 600`（1600u） | 1600 | 估算（高位 40-200u 的高度加成），方向保守（过高→sprint，无危害）；实战观察后再微调 |
 | Hunter fPounceRange fallback | 1000 | 无 cvar 支撑（第二轮确认 `z_hunter_pounce_range` 不存在），但 v4.0.1 出生蠕动修复实战验证过；若创建 `ai_fast_pounce_proximity` cvar 可调 |
 | 冲锋覆盖口径（~940 vs ~1190u） | — | 取决于 warmup 是否计入 duration；不影响 750 结论（两口径都 ≥ 940） |
-| Tank 相关数值 | — | 第二轮确认 `tank_attack_interval`/`tank_rage_duration`/`tank_rock_speed` 不存在（实际 `z_tank_attack_interval`=1.5）；修复 5-6（Tank aggro/避障 cvar 接入）前补测剩余数值 |
+| Tank 相关数值 | — | ✅ 第三轮已补齐（cvarlist z_tank 全量 27 条，2026-08-03）：`tank_attack_interval`/`tank_rage_duration`/`tank_rock_speed` 不存在（实际 `z_tank_attack_interval`=1.5 / `z_tank_throw_interval`=5）；**无 Tank 速度/追击类可调 cvar**（除 z_tank_speed）——"Tank 增强"只能走插件行为层 |
 
 ---
 

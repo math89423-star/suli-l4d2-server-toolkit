@@ -39,6 +39,18 @@
 //         8 处 350/500/550 → 300（mode1/narrow/openS0/openS1/semi/approach 全系）；
 //         z_spit_range=900 实测 → Spitter 800/900 全部对齐无需改动（已验证）；
 //         z_jockey_ride_damage=4（骑乘 DPS）、z_tank_attack_interval=1.5 入库
+// v4.0.5: Witch 死树移除 + Tank cvar 接入审计——
+//         [Witch] bt_witch.inc 整文件删除：Witch 是实体非客户端，无
+//         OnPlayerRunCmd 入口、无 player_spawn 绑定（BT_Bind 永不执行）、
+//         节点全为客户端 API（GetClientAimTarget/m_mobRush 误用），纯死代码；
+//         [Tank] 13 个 ai_tank_* cvar 审计：punch_jump/instakill/punch_damage/
+//         rage_multiplier/wall_dist/adaptive/evade/aggro 创建了但未接入或丢失——
+//         修复 punch_jump（=0 仍触发近身跳拳）、instakill/damage（hook 无条件
+//         秒杀）、rage_multiplier（硬编码 1.5）；恢复 bhop 冷却（g_fTankLastBhop
+//         只写不读 = 无冷却连跳）+ chain 重置 + wall trace/evade（v3.2 重构丢失）；
+//         aggro 由 BhopEligible 消费（max_dist 翻倍 + 冷却缩短）；
+//         近战攻击簇 Cooldown(1.5) 对齐引擎 z_tank_attack_interval=1.5
+//         （冷却期按键 = 无效挥拳，与 Smoker/Charger 同模式）
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -70,7 +82,8 @@
 #include "bt_boomer.inc"
 #include "bt_spitter.inc"
 #include "bt_tank.inc"
-#include "bt_witch.inc"
+// v4.0.5: bt_witch.inc 已删除 —— Witch 是实体不是客户端，整棵树从未被 bind/tick
+// （无 OnPlayerRunCmd 入口、无 player_spawn 绑定、节点全为客户端 API），纯死代码
 
 // ============================================================================
 // Plugin Info
@@ -80,7 +93,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "4.0.4",
+    version = "4.0.5",
     url = "github.com/breezyplease"
 };
 
@@ -105,7 +118,6 @@ int   g_iBTSmokerRoot   = -1;
 int   g_iBTBoomerRoot   = -1;
 int   g_iBTSpitterRoot  = -1;
 int   g_iBTTankRoot     = -1;
-int   g_iBTWitchRoot    = -1;
 
 // Cached ConVar handles (avoid FindConVar per-tick)
 ConVar g_hCvarTankAggroBhop = null;
@@ -143,7 +155,6 @@ public OnPluginStart() {
     Charger_OnModuleStart();
     Jockey_OnModuleStart();
     Tank_OnModuleStart();
-    Witch_OnModuleStart();
 
     // Cache frequently-read cvars (avoid FindConVar per tick)
     g_hCvarTankAggroBhop = FindConVar("ai_tank_aggro_bhop");
@@ -159,7 +170,6 @@ public OnPluginStart() {
     g_iBTBoomerRoot  = BT_CreateBoomerTree();
     g_iBTSpitterRoot = BT_CreateSpitterTree();
     g_iBTTankRoot    = BT_CreateTankTree();
-    g_iBTWitchRoot   = BT_CreateWitchTree();
 
     // --- Coordination timer ---
     CreateTimer(1.0, Timer_UpdateCoordination, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
@@ -195,7 +205,6 @@ public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast)
         case L4D2Infected_Boomer:  rootId = g_iBTBoomerRoot;
         case L4D2Infected_Spitter: rootId = g_iBTSpitterRoot;
         case L4D2Infected_Tank:    rootId = g_iBTTankRoot;
-        case L4D2Infected_Witch:   rootId = g_iBTWitchRoot;
         default:                   rootId = -1;
     }
 
