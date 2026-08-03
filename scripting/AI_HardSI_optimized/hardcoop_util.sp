@@ -744,7 +744,7 @@ stock SI_GetCoordinatedTarget(si, preferClass = -1) {
 			}
 		}
 		if (alreadyTargeted && candidateCount > 1) continue;
-		if (SI_IsBoomerActive() && GetEntProp(candidates[i], Prop_Send, "m_hasBeenBoomed") > 0) {
+		if (SI_IsBoomerActive() && SI_IsSurvivorBoomed(candidates[i])) {
 			return candidates[i];
 		}
 		if (bestDist < 0.0 || candidateDist[i] < bestDist) {
@@ -802,10 +802,28 @@ stock SI_SignalAttack(si) {
 	}
 }
 
+// v4.1.2: m_hasBeenBoomed 在本游戏版本（2.2.4.3）不存在于网络数据表（sm_dump_netprops
+// 实测全表无此属性）——v4.0.2 的 Prop_Data→Prop_Send 只换了失败方式，GetEntProp 依旧
+// 每次抛异常（每晚数万条，BT tick 全中止）。改用引擎事件 L4D_OnVomitedUpon_Post
+// 跟踪"被胆汁覆盖"状态（CTerrorPlayer::OnVomitedUpon 后置钩子，语义与 prop 一致）。
+// 胆汁持续 ≈10s 自动失效；玩家重生时清零（Event_PlayerSpawn Pre）。
+#define SI_BOOMED_DURATION 10.0
+float g_fSurvivorBoomedUntil[MAXPLAYERS + 1];
+
+public L4D_OnVomitedUpon_Post(victim, attacker, bool:boomerExplosion) {
+	if (victim > 0 && victim <= MaxClients && IsClientInGame(victim))
+		g_fSurvivorBoomedUntil[victim] = GetGameTime() + SI_BOOMED_DURATION;
+}
+
+stock bool:SI_IsSurvivorBoomed(client) {
+	return client > 0 && client <= MaxClients
+		&& g_fSurvivorBoomedUntil[client] > GetGameTime();
+}
+
 stock bool:SI_AnySurvivorBoomaBiled() {
 	for (new client = 1; client <= MaxClients; client++) {
 		if (IsSurvivor(client) && IsPlayerAlive(client)) {
-			if (GetEntProp(client, Prop_Send, "m_hasBeenBoomed") > 0) return true;
+			if (SI_IsSurvivorBoomed(client)) return true;
 		}
 	}
 	return false;

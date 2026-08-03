@@ -7,6 +7,11 @@
 // v3.5: Randomized open-terrain strategies per SI type
 // v3.6: Anti-melee for control SI — ability-first, melee as valid fallback
 // v3.7: Audit fixes — RandomChance thrashing, dead code, missing range checks
+// v4.1.2: m_hasBeenBoomed 在此游戏版本（2.2.4.3）网络数据表不存在（netprops dump
+//         实测全表无此属性）——v4.0.2 的 Prop_Data→Prop_Send 只换了失败方式，
+//         GetEntProp 依旧每晚数万异常（BT tick 中止，协同瘫痪）。
+//         改用 L4D_OnVomitedUpon_Post 事件跟踪胆汁状态（≈10s 失效，重生清零），
+//         替换 4 处 GetEntProp 调用点（hardcoop_util 747/808 + spitter 84 + smoker 221）。
 // v4.0.1: Charger 出生保护（unghost 后 2s 禁冲）+ coordSeq 补距离/LOS；
 //         Hunter 出生蠕动修复（sprint 死区消除 + crouchApproach 站立快跑化）
 // v4.0.2: P0 修复 hardcoop_util m_hasBeenBoomed Prop_Data→Prop_Send（每日 4 万异常，
@@ -114,7 +119,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "4.1.1",
+    version = "4.1.2",
     url = "github.com/breezyplease"
 };
 
@@ -211,7 +216,11 @@ public OnPluginEnd() {
 
 public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast) {
     int client = GetClientOfUserId(GetEventInt(event, "userid"));
-    if (!IsBotInfected(client)) return Plugin_Handled;
+    // v4.1.2: 幸存者重生清胆汁状态（死亡/复活 = 胆汁覆盖结束，事件跟踪归零）
+    if (client > 0 && client <= MaxClients && !IsBotInfected(client)) {
+        g_fSurvivorBoomedUntil[client] = 0.0;
+        return Plugin_Handled;
+    }
 
     g_bHasBeenShoved[client] = false;
     g_iTickCounter[client] = 0;
