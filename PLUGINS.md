@@ -44,7 +44,7 @@
 | `specialspawner.smx` | 特感生成控制器 — 刷新间隔/数量上限/安全区/各类权重 |
 | `spawn_infected_nolimit.smx` | 移除引擎层特感生成数量限制 |
 | `si_composition_manager.smx` | 特感刷新组合管理 — 6种战术模式轮换 + Tank协同，deficit-first 分配类型，动态 spawn_size 缩放 |
-| `AI_HardSI_bt.smx` | 特感 AI 强化 — 行为树 v4.1.0（v4.0.5：Witch 死树移除 + Tank 13 cvar 审计接入 + 追击修正（bhop 500u 威胁圈外拉近、处决门控追杀未倒地优先）+ 近战/岩石簇对齐引擎间隔 1.5/5s；**v4.1：Tank 高级玩法四件套 — 协同窗口消费（锁被 pin 目标 + 窗口内拳杀，mode 6 保持小队分散）+ damager 追击门控 800u + 地形秒杀（只打汽车 prop_car*，注入拳伤确定性引爆；用户拍板剔除爆炸罐）+ 飞石预判瞄准（lead=vel×dist/800）与 OnRelease 释放校正**），精准扑击/冲锋/连跳/协同攻击；引擎基准见 `scripting/AI_HardSI_optimized/ENGINE_CVARS.md` |
+| `AI_HardSI_bt.smx` | 特感 AI 强化 — 行为树 v4.1.0（v4.0.5：Witch 死树移除 + Tank 13 cvar 审计接入 + 追击修正（bhop 500u 威胁圈外拉近、处决门控追杀未倒地优先）+ 近战/岩石簇对齐引擎间隔 1.5/5s；**v4.1：Tank 高级玩法 — 协同窗口消费（锁被 pin 目标 + 窗口内拳杀，mode 6 保持小队分散）+ damager 追击门控 800u + 飞石预判瞄准（lead=vel×dist/800）与 OnRelease 释放校正；地形秒杀已移除（用户拍板保持原版，Tank 拳不作用于爆炸物）**），精准扑击/冲锋/连跳/协同攻击；引擎基准见 `scripting/AI_HardSI_optimized/ENGINE_CVARS.md` |
 | `l4d2_tank_unified.smx` | **Tank/Witch 统一核心** — HP 缩放（存活人数 × 3000）+ 播报 |
 | `l4d2_max_common.smx` | 普通感染者上限控制 |
 | `l4d_path_to_goal.smx` | PTG — SI 导航路径计算（A* 寻路） |
