@@ -44,7 +44,7 @@
 | `specialspawner.smx` | 特感生成控制器 — 刷新间隔/数量上限/安全区/各类权重 |
 | `spawn_infected_nolimit.smx` | 移除引擎层特感生成数量限制 |
 | `si_composition_manager.smx` | 特感刷新组合管理 — 6种战术模式轮换 + Tank协同，deficit-first 分配类型，动态 spawn_size 缩放 |
-| `AI_HardSI_bt.smx` | 特感 AI 强化 — 行为树 v4.0.2（BoomedProp 崩溃修复 + 冲锋距离 750 + 走廊站桩 + tick 4→2），精准扑击/冲锋/连跳/协同攻击 |
+| `AI_HardSI_bt.smx` | 特感 AI 强化 — 行为树 v4.0.3（实战弱化审计修复：Smoker 拉人/Charger 冲锋冷却簇消除挠击 + 冲锋距离 750 真生效 + Smoker 孤立度选人恢复 + Hunter 高位扑距离门控），精准扑击/冲锋/连跳/协同攻击 |
 | `l4d2_tank_unified.smx` | **Tank/Witch 统一核心** — HP 缩放（存活人数 × 3000）+ 播报 |
 | `l4d2_max_common.smx` | 普通感染者上限控制 |
 | `l4d_path_to_goal.smx` | PTG — SI 导航路径计算（A* 寻路） |

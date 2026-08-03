@@ -359,6 +359,31 @@ stock int BT_CreateChargerTree() {
         BT_CreateAction(ChargerAct_BlindCharge)
     );
 
+    // ==========================================
+    // v4.0.3: 冲锋冷却簇 —— 冲锋与近战共享 IN_ATTACK。
+    // 引擎冲锋冷却 z_charge_interval=12s（空服 rcon 实测，非 3s！）期间按
+    // ATTACK = 近战拳击；原版 11 个冲锋分支全部无冷却：进入冲锋距离后每
+    // tick 都按 → 冷却期贴脸拳击/退后-挠循环（v3.7 注释承认"拳击是有效
+    // fallback"，但每 tick 狂按不是设计意图）。
+    // 簇冷却 12.0 对齐引擎冷却：12s 内整个簇 FAIL，树落到 BlockCharge/
+    // 走位分支（不按 ATTACK），12s 一到引擎技能就绪 → 立刻再冲，零浪费。
+    // 分支相对顺序与 v4.0 一致：出生保护 > pin 判断 > 近距离/盲冲/洪流/
+    // 协同/酸液/悬崖/窄巷/开阔/残血/默认。
+    // ==========================================
+    int chargeCluster = BT_Create(BTN_SELECTOR);
+    BT_AddChild(chargeCluster, stepBackCharge);    // too close → step back + charge
+    BT_AddChild(chargeCluster, blindCharge);       // no LOS + close → 30% blind charge
+    BT_AddChild(chargeCluster, mode0Charge);       // v4.0: mode 0 → 900u 正面直冲
+    BT_AddChild(chargeCluster, coordSeq);          // v4.0: coordination 冲被 pin 者
+    BT_AddChild(chargeCluster, acidCharge);        // v4.0: 冲酸液里的人
+    BT_AddChild(chargeCluster, ledgeChargeSeq);    // v3.2: ledge → charge
+    BT_AddChild(chargeCluster, narrowChargeSeq);   // v3.2/v4.0.2: narrow → charge
+    BT_AddChild(chargeCluster, openS0_Charge);     // v3.5: open strat0 → flank charge
+    BT_AddChild(chargeCluster, openS1_Charge);     // v3.5: open strat1 → erratic charge
+    BT_AddChild(chargeCluster, lowHpSeq);          // FALLBACK: low HP charge
+    BT_AddChild(chargeCluster, defaultChargeSeq);  // FALLBACK: default charge
+    int cooldownCharge = BT_CreateCooldown(12.0, chargeCluster);  // v4.0.3: 对齐 z_charge_interval=12s
+
     // Root selector — terrain branches fail when disabled → fallback to standard.
     int root = BT_Create(BTN_SELECTOR);
     // v4.0.1: 0. 出生保护 —— unghost 后 2s 内强制 BlockCharge（防出生对空气冲）
@@ -368,32 +393,27 @@ stock int BT_CreateChargerTree() {
     );
     BT_AddChild(root, spawnProtect);                               // 0. v4.0.1
     BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor)); // 1
-    BT_AddChild(root, stepBackCharge);         // 2. v3.7: too close → step back + charge
-    BT_AddChild(root, blindCharge);            // 3. v3.7: no LOS + close → 30% blind charge
-    BT_AddChild(root, mode0Charge);            // 3.5. v4.0: mode 0 → 900u 正面直冲
-    // v4.0: coordSeq 从第 10 位前置到第 4 位 ——
-    // 队友 pin 住人时立刻冲（窗口 = pin 广播），不再被地形分支挡住
-    BT_AddChild(root, coordSeq);               // 4. ← v4.0 前置: coordination 冲被 pin 者
-    BT_AddChild(root, acidCharge);             // 4.5. v4.0: 冲酸液里的人（Charger×Spitter 配合）
-    BT_AddChild(root, ledgeChargeSeq);         // 5. v3.2: ledge → charge
-    BT_AddChild(root, narrowChargeSeq);        // 6. v3.2/v4.0.2: narrow → charge (750u)
-    BT_AddChild(root, openStrategyRoll);        // 7a. v3.5: open → roll token
-    BT_AddChild(root, openS0_Charge);           // 8b. v3.5: open strat0 → flank charge
-    BT_AddChild(root, openS0_Approach);         // 8c. v3.5: open strat0 → flank approach
-    BT_AddChild(root, openS1_Charge);           // 9a. v3.5: open strat1 → erratic charge
-    BT_AddChild(root, openS1_Approach);         // 9b. v3.5: open strat1 → erratic approach
-    // 9c: open strat2 → falls through to defaultChargeSeq
-    BT_AddChild(root, lowHpSeq);                // 10. ← FALLBACK: low HP charge
-    BT_AddChild(root, defaultChargeSeq);        // 11. ← FALLBACK: default charge (prox=750)
-    BT_AddChild(root, noLosApproach);           // 12. ← FALLBACK: in-range no-LOS approach
-    BT_AddChild(root, approachSeq);             // 13. ← FALLBACK: approach from far
-    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 14.
-    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 15.
+    BT_AddChild(root, cooldownCharge);          // 2. v4.0.3: 全部冲锋分支（2s 冷却）
+    BT_AddChild(root, openStrategyRoll);         // 3. v3.5: open → roll token
+    BT_AddChild(root, openS0_Approach);          // 4. v3.5: open strat0 → flank approach
+    BT_AddChild(root, openS1_Approach);          // 5. v3.5: open strat1 → erratic approach
+    // open strat2 → falls through to generic approaches
+    BT_AddChild(root, noLosApproach);            // 6. FALLBACK: in-range no-LOS approach
+    BT_AddChild(root, approachSeq);              // 7. FALLBACK: approach from far
+    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 8. 冷却期间站桩（不按 ATTACK）
+    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 9. last resort
 
     return root;
 }
 
 public Charger_OnModuleStart() {
-    CreateConVar("ai_charge_proximity", "500", "Charger charge proximity");
+    // ai_charge_proximity：BT 发起冲锋的距离门槛（按钮路径，引擎对按钮冲锋
+    // 无距离限制；是否打得中取决于冲锋物理覆盖）。
+    // v4.0.3 验证结论（空服 rcon 实测，见 ENGINE_CVARS.md）：
+    //   z_charge_duration=2.5s × z_charge_max_speed=500u/s + warmup 0.5s 加速
+    //   → 冲锋覆盖 ≈ 940~1190u。750u 发起完全打得到，500 反而保守浪费一半覆盖。
+    //   服务器当前内存值本就是 750（手动设过）——源码默认必须对齐 750，
+    //   否则重启会掉回 v2.4 的 500。
+    CreateConVar("ai_charge_proximity", "750", "Charger charge proximity");
     CreateConVar("ai_health_threshold_charger", "200", "Low HP charge threshold");
 }

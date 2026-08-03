@@ -274,10 +274,17 @@ stock int BT_CreateHunterTree() {
     // v3.2: HasHighGround check so Hunter only climbs when there is
     // actually elevated ground above. Without it, 35% of crouched ticks trace-hit
     // the ground at Hunter's feet and jump uselessly (原地跳跃).
-    int highPounceSeq = BT_CreateSequence(4,
+    // v4.0.3: 加距离门控 —— 原版无任何距离/LOS 限制，只要蹲着 + 头顶
+    // 40-200u 有高台，35%/65% 概率每 tick 重掷跳台（跳-蹲-跳抖动，高台图
+    // 上大量时间在爬不在扑）。现在只在"最近生还者 1000-1600u"才爬高：
+    //   ≤1000u：直接扑（closePounce/fastPounce 分支处理，不再爬高）
+    //   >1600u：爬了够不着，交给 sprintApproach 快跑接近
+    int highPounceSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
         BT_CreateCondition(HunterCond_HasHighGround),
+        BT_CreateIsNotInRange(fPounceRange),        // 扑击范围内不爬高，直接扑
+        BT_CreateIsInRange(fPounceRange + 600.0),   // 1600u 外爬了没用
         BT_CreateSequence(2,
             BT_CreateCondition(HunterCond_HighPounceChance),  // v4.0: mode 2 → 65%
             BT_CreateAction(HunterAct_ClimbHighGround)
@@ -299,7 +306,10 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_QueueLunge),
         BT_CreateAction(ACT_SignalAttack)
     );
-    BT_AddChild(narrowPounceSeq, narrowAttackSeq);
+    // v4.0.3: 攻击序列统一包 Cooldown(1.0)（对齐 fastPounceSeq 的
+    // cooldownAttack 既有模式）—— 原版这些分支每 tick 按 IN_ATTACK，
+    // 引擎扑击冷却期间全部变成无效按键/近战挥击。
+    BT_AddChild(narrowPounceSeq, BT_CreateCooldown(1.0, narrowAttackSeq));
 
     // ==========================================
     // v3.5: Open terrain — 3-way random pounce strategies
@@ -324,7 +334,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(HunterAct_WideGaussOffset),
         BT_CreateAction(ACT_QueueLunge)
     );
-    BT_AddChild(openStrat0_WidePounce, widePounceAttack);
+    BT_AddChild(openStrat0_WidePounce, BT_CreateCooldown(1.0, widePounceAttack));
 
     // Strategy 1: Erratic pounce — standard Gauss offset + unpredictable approach
     int openStrat1_ErraticPounce = BT_CreateSequence(7,
@@ -341,7 +351,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_GaussianAimOffset),
         BT_CreateAction(ACT_QueueLunge)
     );
-    BT_AddChild(openStrat1_ErraticPounce, erraticPounceAttack);
+    BT_AddChild(openStrat1_ErraticPounce, BT_CreateCooldown(1.0, erraticPounceAttack));
 
     // Strategy 2: Standard pounce — falls through to fastPounceSeq below
 
@@ -394,7 +404,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_SnapAimToTarget),
         BT_CreateAction(ACT_QueueLunge)
     );
-    BT_AddChild(closePounceSeq, closeAttackSeq);
+    BT_AddChild(closePounceSeq, BT_CreateCooldown(1.0, closeAttackSeq));
 
     // --- v3.3: Sprint approach — RUN full speed when far from target ---
     // Replaces the old approachFull which forced crouch BEFORE running.
@@ -458,7 +468,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_SnapAimToTarget),
         BT_CreateAction(ACT_QueueLunge)
     );
-    BT_AddChild(coordPounceSeq, coordPounceAttack);
+    BT_AddChild(coordPounceSeq, BT_CreateCooldown(1.0, coordPounceAttack));
 
     int wander = BT_CreateAction(ACT_Wander);
 

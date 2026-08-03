@@ -320,6 +320,10 @@ stock int BT_CreateSpitterTree() {
 }
 
 public Spitter_OnModuleStart() {
-    // No game cvar tuning needed for Spitter.
-    // (z_spit_damage_interrupt does not exist in L4D2 — removed)
+    // v4.0.3: 引擎喷吐冷却 z_spit_interval=20s（空服 rcon 实测）vs 插件
+    // post-spit 自锁 8s —— 8~20s 窗口内树已解锁、按 ATTACK 全部无效
+    // （贴脸时变成挠击）。按既有模式干预引擎数值（同 smoker_tongue_delay、
+    // boomer_vomit_delay）：20s → 8s，与 SpitterCnd_HasSpit 的 8s 自锁对齐，
+    // 每 8s 一次有效喷吐，零无效按键。见 ENGINE_CVARS.md。
+    SetConVarFloat(FindConVar("z_spit_interval"), 8.0);
 }

@@ -305,9 +305,12 @@ stock int BT_CreateSmokerTree() {
     );
 
     // Standard: pull (mixed targeting), check LOS, aim, attack
+    // v4.0.3: 加 IsInRange(850) —— 原版无距离限制，2000u 外有 LOS 也每 tick 按
+    // ATTACK（舌头够不着，纯浪费按键；与 openS0/S1 pull 的距离口径对齐）。
     int acquireTarget = BT_CreateAction(SmokerAct_AcquireTarget);
-    int pullSeq = BT_CreateSequence(3,
+    int pullSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(850.0),
         BT_CreateAction(ACT_SnapAimToTarget),
         BT_CreateAction(ACT_Attack)
     );
@@ -317,6 +320,15 @@ stock int BT_CreateSmokerTree() {
 
     // Ledge retarget (override: 90% farthest)
     int ledgeRetarget = BT_CreateCooldown(2.0, ledgeTargetAcquire);
+
+    // v4.0.3: ledgeRetarget 加地形门控 —— 原版无条件每 2s 用"90% 拉最远"覆盖
+    // 目标选择，把 v4.0 孤立度选人（retargetCooldown）的生效窗口砍掉一半。
+    // 现在只有真正站在 ledge 附近才走"90% 拉最远"（v3.2 设计意图）；
+    // 不在 ledge 时完全交给 retargetCooldown 的孤立度逻辑。
+    int ledgeRetargetGated = BT_CreateSequence(2,
+        BT_CreateCondition(CND_IsNearLedge),
+        ledgeRetarget
+    );
 
     // Approach: 外侧走位 —— 绕到目标远离队伍的一侧再拉（把人拉离队伍）
     int approachAct = BT_CreateAction(SmokerAct_ApproachOutside);
@@ -357,24 +369,37 @@ stock int BT_CreateSmokerTree() {
         BT_CreateAction(ACT_StrafeRandom)
     );
 
-    // Root selector — v3.6: pull with cooldown prevents melee spam.
+    // ==========================================
+    // v4.0.3: 拉人冷却簇 —— 舌头与近战共享 IN_ATTACK。
+    // 引擎舌头冷却 (smoker_tongue_delay=1.0) 期间按 ATTACK = 近战挠击，
+    // 原版 6 个拉人分支全部无冷却：只要 LOS+射程内就每 tick 按 →
+    // 舌头冷却期贴脸挠击（v3.6 注释声称的 Cooldown(1.8) 从未落地）。
+    // 现在所有拉人分支包进一个 Cooldown(1.8)：冷却窗口内整个簇 FAIL，
+    // 树落到走位/重新选人分支（v3.6 设计意图原样落地），
+    // ATTACK 频率从每 tick → 每 1.8s。
+    // ==========================================
+    int pullCluster = BT_Create(BTN_SELECTOR);
+    BT_AddChild(pullCluster, ledgePullSeq);       // ledge → pull
+    BT_AddChild(pullCluster, narrowPullSeq);      // narrow → pull
+    BT_AddChild(pullCluster, mode3Pull);          // v4.0: mode 3 → 拉被喷者
+    BT_AddChild(pullCluster, openS0_Pull);        // open strat0 → flank pull
+    BT_AddChild(pullCluster, openS1_Pull);        // open strat1 → erratic pull
+    BT_AddChild(pullCluster, pullSeq);            // standard pull (fallback)
+    int cooldownPull = BT_CreateCooldown(1.8, pullCluster);
+
+    // Root selector — v4.0.3: 攻击簇冷却 → 走位/选人，挠击消除。
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor)); // 1
-    BT_AddChild(root, ledgePullSeq);          // 2. ledge → pull
-    BT_AddChild(root, narrowPullSeq);         // 3. narrow → pull
-    BT_AddChild(root, mode3Pull);             // 3.5. v4.0: mode 3 → 拉被喷者
-    BT_AddChild(root, mode3Approach);         // 3.5. v4.0: mode 3 → 外侧走位接近
+    BT_AddChild(root, cooldownPull);          // 2. v4.0.3: 全部拉人分支（1.8s 冷却）
+    BT_AddChild(root, mode3Approach);         // 3. v4.0: mode 3 → 外侧走位接近
     BT_AddChild(root, openStrategyRoll);      // 4a. open → roll token
-    BT_AddChild(root, openS0_Pull);           // 4b. open strat0 → flank pull
     BT_AddChild(root, openS0_Approach);       // 4c. open strat0 → flank approach
-    BT_AddChild(root, openS1_Pull);           // 5a. open strat1 → erratic pull
     BT_AddChild(root, openS1_Approach);       // 5b. open strat1 → erratic approach
-    BT_AddChild(root, pullSeq);               // 6. standard pull (any range + LOS)
-    BT_AddChild(root, closeRangeStrafe);      // 7. v3.6: close + noLOS → strafe, don't approach
-    BT_AddChild(root, ledgeRetarget);         // 8. ledge → retarget
-    BT_AddChild(root, retargetCooldown);      // 9. standard retarget
-    BT_AddChild(root, approachAct);           // 10. approach (only when far)
-    BT_AddChild(root, BT_CreateAction(ACT_Wander)); // 11. last resort — melee IS valid here
+    BT_AddChild(root, closeRangeStrafe);      // 6. v3.6: close + noLOS → strafe, don't approach
+    BT_AddChild(root, ledgeRetargetGated);    // 7. v4.0.3: ledge 附近 → 90% 拉最远（门控）
+    BT_AddChild(root, retargetCooldown);      // 8. standard retarget（孤立度选人）
+    BT_AddChild(root, approachAct);           // 9. approach (only when far)
+    BT_AddChild(root, BT_CreateAction(ACT_Wander)); // 10. last resort — melee IS valid here
 
     return root;
 }

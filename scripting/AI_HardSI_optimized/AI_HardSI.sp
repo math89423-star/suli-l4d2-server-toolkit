@@ -14,6 +14,25 @@
 //         Charger 出生保护加 freshSpawn 兜底（未观察到 ghost 阶段也保护 2s）；
 //         走廊窄巷 Charger 直接 750u 冲（移除 HoldChokepoint 站桩分支）；
 //         TICK_INTERVAL 4→2（BT 帧率翻倍，原版 AI 主导帧减半）
+// v4.0.3: 实战弱化审计修复（三个根因类别 + 引擎数值实测校准）——
+//         引擎数值实测（空服 rcon，2026-08-03，见 ENGINE_CVARS.md）：
+//           z_charge_interval=12s（冲锋冷却）、覆盖 ≈940~1190u → 750 打得到；
+//           z_spit_interval=20s（喷吐冷却）；smoker_tongue_delay def=1.5；
+//           ai_fast_pounce_proximity/ai_straight_pounce_proximity 从未创建
+//           （Hunter 一直用 fallback 1000/200，v3.3 注释为虚假记录）；
+//           ai_ChargerChargeDistance 不存在（竞争配置自创，引擎无此限制）
+//         [类型1] 装载链验证：运行版 = v4.0.2，无装载断链；
+//         [类型2] Smoker ledgeRetarget 加 CND_IsNearLedge 门控（原版无条件
+//                 每 2s 用"90% 拉最远"覆盖目标选择，孤立度选人窗口减半）；
+//         [类型3] 攻击分支冷却簇 —— Smoker 6 个拉人分支包 Cooldown(1.8)、
+//                 Charger 11 个冲锋分支包 Cooldown(12.0)（对齐引擎冲锋冷却；
+//                 舌头/冲锋与近战共享 IN_ATTACK，无冷却 = 能力冷却期每 tick
+//                 挠击/拳击，观感最蠢）；Spitter z_spit_interval 20→8 对齐
+//                 post-spit 自锁（消除 8-20s 无效按键）；
+//                 ai_charge_proximity 默认 500→750（冲锋覆盖 ~940-1190u 实测
+//                 依据；服务器内存值本就是 750，防重启掉值）；
+//                 Hunter highPounceSeq 加 1000-1600u 距离门控（消除跳-蹲抖动）
+//                 + 5 个攻击序列补 Cooldown(1.0)（narrow/close/coord/openStrat）
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -55,7 +74,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "4.0.2",
+    version = "4.0.3",
     url = "github.com/breezyplease"
 };
 
