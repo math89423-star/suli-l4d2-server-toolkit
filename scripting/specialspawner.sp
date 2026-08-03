@@ -41,6 +41,8 @@
 // 且必须 LOS 可见至少一个生还者；优先 ≥ss_spawnrange_guard(400)，耗尽改取
 // ≥ss_spawnrange_guard_min(250) 且可见的最佳点，再兜底 250 不可见（窄室内防饿死），
 // 仍无 → 本只跳过等下波（绝不放行 <250）。
+// v1.4.1：处决可观测——KillInactiveSI 记 LogMessage；fallback 拆 visible/invisible
+// 计数（invis-fb 是残余处决源，比例偏高时再收紧，比如调低 guard_min 或禁止不可见兜底）。
 #define SPAWN_GUARD_MAX_TRIES					10
 
 Handle
@@ -155,7 +157,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "1.4.0",
+	version = "1.4.1",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -386,9 +388,12 @@ Action tmrForceSuicide(Handle timer) {
 }
 
 void KillInactiveSI(int client) {
-	#if DEBUG
-	PrintToServer("[SS] Kill inactive SI -> %N", client);
-	#endif
+	// v1.4.1: 处决观测（进 L 日志，DEBUG 不依赖）——自杀计时处决必须可数，
+	// 否则无法判断 LOS 过滤是否真的消除了"刷新即处决"。
+	float o[3];
+	GetClientAbsOrigin(client, o);
+	LogMessage("[SS] 处决 %N (class=%d) 距生还者最近 %.0f", client,
+		GetEntProp(client, Prop_Send, "m_zombieClass"), DistanceToNearestSurvivor(o));
 	ForcePlayerSuicide(client);
 
 	if (!g_hRetryTimer)
@@ -1094,7 +1099,8 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	int zombie;
 	float vPos[3];
 	int guardBlocked = 0;
-	int guardFallback = 0;
+	int guardFallbackVisible = 0;
+	int guardFallbackInvisible = 0;
 	float guard = g_cSpawnRangeGuard.FloatValue;
 	float guardMin = g_cSpawnRangeGuardMin.FloatValue;
 	for (i = 0; i < spawnSize; i++) {
@@ -1141,13 +1147,15 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 			if (hasBestVisible && guard > 0.0 && guardMin > 0.0 && bestVisibleDist >= guardMin) {
 				vPos = bestVisiblePos;
 				find = true;
-				guardFallback++;
+				guardFallbackVisible++;
 			}
 			// 保底 2：不可见但 ≥guard_min（极窄地形，AI 会自行转向找人）
+			// ⚠️ 残余处决源：不可见点 → m_hasVisibleThreats false → 25s 自杀计时。
+			// 无法完全消除（全跳 = 饿死），靠日志统计比例决定是否收紧。
 			else if (hasBestPos && guard > 0.0 && guardMin > 0.0 && bestDist >= guardMin) {
 				vPos = bestPos;
 				find = true;
-				guardFallback++;
+				guardFallbackInvisible++;
 			}
 			else {
 				guardBlocked++;
@@ -1166,9 +1174,10 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	}
 
 	// v1.3.9: 守卫统计（跳过 / 保底放行，波内有任何拦截才记一条，防日志刷屏）
-	if (guardBlocked || guardFallback) {
-		LogMessage("[SS] spawn guard: %d/%d skipped, %d fallback(>=%.0f), prefer >=%.0f",
-			guardBlocked, spawnSize, guardFallback, guardMin, guard);
+	// v1.4.1: fallback 拆 visible/invisible——invisible 是残余处决源，观测用
+	if (guardBlocked || guardFallbackVisible || guardFallbackInvisible) {
+		LogMessage("[SS] spawn guard: %d/%d skipped, %d vis-fb(>=%.0f), %d invis-fb, prefer >=%.0f",
+			guardBlocked, spawnSize, guardFallbackVisible, guardMin, guardFallbackInvisible, guard);
 	}
 
 	g_bInSpawnTime = false;
