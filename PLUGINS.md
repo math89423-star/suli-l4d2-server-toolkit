@@ -53,7 +53,7 @@
 
 | 插件 | 说明 |
 |------|------|
-| `l4d2_si_hud.smx` | 特感血量 HUD + 战地击杀横幅 + 计分/钱包/复活系统（v1.9.0；商店已解耦至 l4d2_shop，导出 SH_ API） |
+| `l4d2_si_hud.smx` | 特感血量 HUD + 战地击杀横幅 + 计分/钱包/复活系统（v1.9.6；商店已解耦至 l4d2_shop，导出 SH_ API；复活清尸依赖 Defib_Fix v2.0.2） |
 | `l4d2_shop.smx` | 积分商店 !shop/!buy（v1.0.0；自 si_hud v1.8.2 解耦：商品表/菜单/透视特感/火炮支援 I/II + si_hud_shop_enable/si_hud_art_* cvar） |
 | `l4d2_bf_killfeedback.smx` | 战地击杀音效（6 种 MP3，v4.2.0；v4.2.1 待发 sound.cache） |
 | `advertisements.smx` | 定时轮播服务器公告（120s 间隔） |
@@ -85,7 +85,7 @@
 | `l4d2_shove_fatigue_scaler.smx` | 推挠疲劳度缩放控制 |
 | `l4d2_medical_supply_scaler.smx` | 医疗补给数量按人数缩放（包/药/针） |
 | `l4dmultislots.smx` | 多人生存者 — 最多 24 人，最少 4 人，免大厅等待；alive_bot_time 30 |
-| `Defib_Fix.smx` | 电击器修复 v2.0.1 本地适配 — 修 5+ 幸存者电击错乱/电到活人（GameConfGetAddress+全局 detour，2026-08-03） |
+| `Defib_Fix.smx` | 电击器修复 v2.0.2 本地适配 — 修 5+ 幸存者电击错乱/电到活人（GameConfGetAddress+全局 detour）+ 复活清尸 native L4D2_KillSurvivorDeathModel（2026-08-03） |
 | `l4d2_chainsaw_fuel.smx` | 电锯燃料量控制 |
 | `l4d2_loot_drop.smx` | 击杀掉落 v1.8.0 — 小僵尸1%(胆汁/土制)｜特感4%单件(燃烧瓶1/药肾上1/弹药包2)｜Tank必掉3件(医疗/电击/M60/榴弹4选1+投掷物+小药)｜Witch 4选1(高爆35/燃烧35/医疗15/电击15) |
 | `l4d2_give_items.smx` | 右键递物 — 手持投掷物对队友右键递出（对方槽位空才给）；医疗包/药/电击器 cvar 开关默认关 |

@@ -27,7 +27,7 @@
 
 #define GAMEDATA "defib_fix"
 
-#define PLUGIN_VERSION	"2.0.1"
+#define PLUGIN_VERSION	"2.0.2"
 
 GlobalForward g_hForward_SurvivorDeathModelCreated;
 
@@ -48,6 +48,11 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	}
 	
 	g_hForward_SurvivorDeathModelCreated = new GlobalForward("L4D2_OnSurvivorDeathModelCreated", ET_Event, Param_Cell, Param_Cell);
+
+	// v2.0.2 (2026-08-03): 复活后清尸 native——复活插件（si_hud 自动复活/复活币）
+	// 用 L4D_RespawnPlayer 强制复活，引擎不清理死亡模型，残留尸体可被电击器
+	// 再次电击（活人错乱）。本 native 按 g_iDeathModelOwner 映射删除目标玩家尸体。
+	CreateNative("L4D2_KillSurvivorDeathModel", Native_KillSurvivorDeathModel);
 	return APLRes_Success;
 }
 
@@ -297,4 +302,26 @@ void KillAllDeathModels()
 	{
 		AcceptEntityInput(i, "Kill");
 	}
+}
+
+// v2.0.2: 删除指定玩家的死亡尸体（强制复活路径用）。返回删除数量。
+public int Native_KillSurvivorDeathModel(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if(client < 1 || client > MaxClients || !IsClientInGame(client))
+		return 0;
+
+	int userId = GetClientUserId(client);
+	int i = INVALID_ENT_REFERENCE;
+	int killed = 0;
+	while((i = FindEntityByClassname(i, "survivor_death_model")) != INVALID_ENT_REFERENCE)
+	{
+		if(g_iDeathModelOwner[i] == userId)
+		{
+			AcceptEntityInput(i, "Kill");
+			g_iDeathModelOwner[i] = 0;
+			killed++;
+		}
+	}
+	return killed;
 }

@@ -6,10 +6,16 @@
  *   - L4D_All_Infected_HUD_HP (persistent SI HP HUD)
  *   - l4d2_si_hp_hud          (per-SI HP bar on hit)
  *
- * Three display channels — no conflicts:
+ * Display channels — no conflicts:
  *   - PrintCenterText  (upper-center):        kill banner ☠ (skulls + points) + SI HP on-hit
- *   - PrintToChatAll   (chat area):           colored kill feed
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
+ *   (v1.9.6: PrintToChatAll kill feed removed — user: too chaotic in multiplayer)
+ *
+ * Changelog v1.9.6:
+ *   - REMOVE Y 键聊天框特感击杀播报（user 实测多人信息极其混乱）: 删掉三处
+ *     PrintToChatAll（SI 击杀 KILL/HEADSHOT、Witch 击杀、特感自杀/死于意外），
+ *     中心击杀横幅/击杀卡/音效/计分全部保留；si_hud_chat_enable cvar 一并移除。
+ *     过关奖励播报（[过关] 每人获得 N 积分）不受影响。
  *
  * Changelog v1.9.4:
  *   - 免费复活额度改为每图 1 次（user 拍板）: si_hud_respawn_base 默认 2→1
@@ -728,7 +734,12 @@
 #include <sdkhooks>
 #include <left4dhooks>   // v1.7.28: L4D_RespawnPlayer（复活系统并入本插件）
 
-#define PLUGIN_VERSION "1.9.5"
+// v1.9.6: Defib_Fix 提供的清尸 native——L4D_RespawnPlayer 强制复活不清理
+// 死亡模型（survivor_death_model），残留尸体可被电击器再次电击（活人错乱）。
+// 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
+native void L4D2_KillSurvivorDeathModel(int client);
+
+#define PLUGIN_VERSION "1.9.6"
 
 // ============================================================================
 // ConVar handles
@@ -738,7 +749,6 @@ ConVar g_cvEnable;
 ConVar g_cvHPEnable;
 ConVar g_cvHPInterval;
 ConVar g_cvHPShowWitch;
-ConVar g_cvChatEnable;
 ConVar g_cvKillHintEnable;
 ConVar g_cvKillCardEnable;
 ConVar g_cvKillCardTime;
@@ -996,9 +1006,6 @@ public void OnPluginStart()
         "Include Witch in HP display (0=off, 1=on).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     // ── Kill feedback ───────────────────────────────────
-
-    g_cvChatEnable = CreateConVar("si_hud_chat_enable", "1",
-        "PrintToChatAll kill feed.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     g_cvKillHintEnable = CreateConVar("si_hud_kill_hint_enable", "1",
         "PrintCenterText kill banner for attacker (☠ skulls + type + points).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -2498,10 +2505,9 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
 {
     bool headshot = event.GetBool("headshot");
 
-    char weaponEnt[64], weaponDisplay[64], playerName[64], siName[64];
+    char weaponEnt[64], weaponDisplay[64], siName[64];
     event.GetString("weapon", weaponEnt, sizeof(weaponEnt));
     GetWeaponDisplayName(weaponEnt, weaponDisplay, sizeof(weaponDisplay));
-    GetClientName(attacker, playerName, sizeof(playerName));
     GetSIName(victim, siName, sizeof(siName));
 
     bool melee  = IsMeleeWeapon(weaponEnt);
@@ -2537,32 +2543,6 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
             g_cvSoundSI.GetString(sound, sizeof(sound));
 
         PlayClientSound(attacker, sound);
-    }
-
-    // ── Suffix ──────────────────────────────────────────
-
-    // v1.9.3 (user): 爆头不再追加中文"爆头"后缀——动作词 HEADSHOT/KILL
-    // 直接体现（例: Rochelle  [M16] HEADSHOT BOOMER）；近战/坦克标记保留。
-    char suffix[32];
-    if (isTank && headshot)       suffix = " ★";
-    else if (isTank && melee)     suffix = " 近战 ★";
-    else if (isTank)              suffix = " ★";
-    else if (headshot && melee)   suffix = " 近战";
-    else if (melee)               suffix = " 近战";
-
-    // ── Chat ────────────────────────────────────────────
-
-    if (g_cvChatEnable.BoolValue)
-    {
-        char action[16];
-        if (headshot) strcopy(action, sizeof(action), "HEADSHOT");
-        else          strcopy(action, sizeof(action), "KILL");
-
-        char chatMsg[256];
-        Format(chatMsg, sizeof(chatMsg),
-            "\x04%s\x01  [%s] %s \x03%s\x01%s",
-            playerName, weaponDisplay, action, siName, suffix);
-        PrintToChatAll(chatMsg);
     }
 
     // ── Kill display (v1.7.1) ──
@@ -2619,10 +2599,9 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
 {
     bool headshot = event.GetBool("headshot");
 
-    char weaponEnt[64], weaponDisplay[64], playerName[64];
+    char weaponEnt[64], weaponDisplay[64];
     event.GetString("weapon", weaponEnt, sizeof(weaponEnt));
     GetWeaponDisplayName(weaponEnt, weaponDisplay, sizeof(weaponDisplay));
-    GetClientName(attacker, playerName, sizeof(playerName));
 
     // ── Sound (independent cooldown) ────────────────────
 
@@ -2643,20 +2622,6 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
     // v1.7.57: 与 SI 同——入账移出 HUD 门控，kill_hint 关闭时女巫击杀仍计连杀
     if (points > 0)
         StackStreakKill(attacker, points, false);
-
-    // v1.9.3 (user): 动作词 HEADSHOT/KILL；WITCH 不再带"女巫"昵称
-    if (g_cvChatEnable.BoolValue)
-    {
-        char action[16];
-        if (headshot) strcopy(action, sizeof(action), "HEADSHOT");
-        else          strcopy(action, sizeof(action), "KILL");
-
-        char chatMsg[256];
-        Format(chatMsg, sizeof(chatMsg),
-            "\x04%s\x01  [%s] %s \x03WITCH\x01",
-            playerName, weaponDisplay, action);
-        PrintToChatAll(chatMsg);
-    }
 
     // [v1.7.1] Same merged two-line layout as SurvivorKilledSI.
 
@@ -2706,24 +2671,11 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
 
 void SISystemDeath(int victim, Event event)
 {
-    char siName[64], victimName[64];
+    char siName[64];
     GetSIName(victim, siName, sizeof(siName));
-    GetClientName(victim, victimName, sizeof(victimName));
 
     int rawAttacker = event.GetInt("attacker");
     bool suicide = (rawAttacker == event.GetInt("userid"));
-
-    if (g_cvChatEnable.BoolValue)
-    {
-        char chatMsg[256];
-        if (suicide)
-            Format(chatMsg, sizeof(chatMsg),
-                "\x04%s\x01  [\x03%s\x01]  \x05自杀了", victimName, siName);
-        else
-            Format(chatMsg, sizeof(chatMsg),
-                "\x04%s\x01  [\x03%s\x01]  \x05死于意外", victimName, siName);
-        PrintToChatAll(chatMsg);
-    }
 
     // [v1.4.1] Reverted to PrintCenterText — no shadow box to get stuck.
 
@@ -3372,6 +3324,13 @@ Action Timer_Respawn(Handle timer, int userid)
         return Plugin_Continue;
 
     L4D_RespawnPlayer(client);
+
+    // v1.9.6 (bug): 复活后删除残留死亡尸体。L4D_RespawnPlayer 是强制复活，
+    // 引擎不清理 survivor_death_model → 尸体留原地且可被电击器再次电击
+    // （Defib_Fix 会把活人又"电起来"）。Defib_Fix v2.0.2 提供清尸 native。
+    if (GetFeatureStatus(FeatureType_Native, "L4D2_KillSurvivorDeathModel") == FeatureStatus_Available)
+        L4D2_KillSurvivorDeathModel(client);
+
     CreateTimer(0.5, Timer_RespawnTeleport, userid);
 
     return Plugin_Continue;
