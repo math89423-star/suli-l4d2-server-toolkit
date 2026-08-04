@@ -1,1571 +1,1263 @@
-//This program is free software: you can redistribute it and/or modify
-//it under the terms of the GNU General Public License as published by
-//the Free Software Foundation, either version 3 of the License, or
-//(at your option) any later version.
-//This program is distributed in the hope that it will be useful,
-//but WITHOUT ANY WARRANTY; without even the implied warranty of
-//MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//GNU General Public License for more details.
-//You should have received a copy of the GNU General Public License
-//along with this program.  If not, see <http://www.gnu.org/licenses/>.
+// ============================================================
+//  [L4D2] Path To Goal — flow 梯度下降重写版 v5.0.0
+//
+//  弃用 11k 行自建 A* 管线（PTG v4.8.3），核心换成引擎 flow 场：
+//    引擎 flow = 从地图起点沿 nav 的弧长，递增方向 = 出口方向。
+//    从玩家所在 nav area 沿 4 向平面邻接（人类可走连接）做
+//    flow 严格递增的梯度上升，直到到达 RESCUE_VEHICLE /
+//    flow 接近地图最大值，或走到局部极大（死路/机关 → beacon 降级）。
+//
+//  已验证（c1m1_hotel，实验插件 l4d2_flow_path_test）：
+//    69.4% area 可达、0 断链、LOS 1.7%、单次路径 0.9ms、无后台管线
+//
+//  命令（双击 0.5s 内两次触发 toggle，与旧版一致）：
+//    path_to_goal / pathtogoal / wheretogo / imlost / guide / ptg
+//
+//  说明：
+//    - 画线仅发给 toggle 的玩家本人（TE_SendToClient）
+//    - 每段先画 nav-center 连线，LOS 失败用"共享边中点"修正
+//      （两 area 包围盒在相邻方向的交集中心），再失败标红
+//    - 死路/机关断链：路径画到断点 + 红色 beacon（玩家看到线
+//      到电梯口/机关口，自然知道要走的路）
+//    - 无 nav 地图（如 tumtara）：双击提示"此图无导航数据"，安静退出
+// ============================================================
 
 #pragma semicolon 1
 #pragma newdecls required
 
 #include <sourcemod>
 #include <left4dhooks>
-#include <dhooks>
-#include <l4d_path_to_goal>
 
-#define PLUGIN_VERSION 			"4.8.3 2026-08-03"
+#define PLUGIN_VERSION     "5.0.0 2026-08-04"
+#define CONFIG_FILENAME    "l4d_path_to_goal"
 
-// Double-tap toggle state (used in CmdRequestGuide, must be declared before it)
-// Per-client: each player toggles their own guide independently
-bool g_bGuideToggled[MAXPLAYERS+1];
-StringMap g_hReconnectToggle;  // SteamID → 1, persists toggle across disconnect/reconnect
+#define TEAM_SURVIVOR      2
+#define MAX_STEPS          2000
+#define REDRAW_INTERVAL    0.3
+#define FALLBACK_MAXFLOW   999999.0
+
+// 用 white.vmt 而非 laserbeam.vmt：TE beam 默认渲染模式下
+// laserbeam 材质不可见（原版 v4.x 实锤：主线用 g_iLaserWhite）
+#define VMT_LASER          "sprites/white.vmt"
+
+int    g_iLaser;
+bool   g_bGuideToggled[MAXPLAYERS + 1];
 Handle g_hToggleTimer = null;
-int g_iBeamsMissed = 0; // v4.5: beam health tracking
-float g_fLastPtgTime[MAXPLAYERS+1];
+bool   g_bNavReady;          // 当前地图有 nav mesh（OnMapStart 查一次）
+ArrayList g_hPathCache[MAXPLAYERS + 1];   // 路径缓存（移动 <128u 复用，零重算）
+float  g_fPathCacheTime[MAXPLAYERS + 1];  // 上次重算时间（大图 BFS 成本高，≥0.5s 节流）
+float  g_fPathCachePos[MAXPLAYERS + 1][3];
+float  g_fPathCacheFlow[MAXPLAYERS + 1];
+int    g_iPathCacheAttrs[MAXPLAYERS + 1];
+Address g_AreaPathCacheEnd[MAXPLAYERS + 1];
+float  g_fMapMaxFlow;        // 地图 flow 上限（每局懒初始化一次）
+float  g_fFlowCoverage;      // 地图 flow 场覆盖率（0-1，OnMapStart 统计）
+bool   g_bHasGoal;           // 找到出口实体（script_changelevel/trigger 等）
+float  g_fGoalPos[3];        // 出口实体位置（目标）
+Address g_GoalArea;          // 出口实体最近的 nav area（每次路径计算刷新）
+Address g_FarGoalArea;       // fallback 目标：离出生点欧氏最远的同层 area
+bool   g_bFarGoalReady;      // g_FarGoalArea 已计算
+StringMap g_hVirtualEdges;   // 虚拟边缓存: "areaInt" → ArrayList(邻居 areaInts)
+bool   g_bVirtualBuilt;      // 虚拟边已构建（OnMapStart 一次）
+int    g_iEntityBridges;     // 实体桥数量（门/可炸墙配对成功数）
+ArrayList g_hAreaList;       // index → areaInt（BFS index 化用）
+StringMap g_hAreaIndex;      // areaInt → index
+ArrayList g_hNeighborIdx;    // index → ArrayList(邻居 index)（4 向 + 虚拟边合并）
+ArrayList g_hFlowValues;     // index → flow（预构建，BFS 零 native）
+ArrayList g_hCenterX, g_hCenterY, g_hCenterZ;   // index → center 分量
+bool   g_bNavTableReady;     // nav 表已构建
+char   g_sNavMap[PLATFORM_MAX_PATH];  // 表所属地图（reload/换图懒重建）
+float  g_fLastPathDiag;      // path 诊断日志限频
 
-// v4.6: death position tracking — a dead player who isn't observing anyone
-// draws the path anchored near where they died (previously startIndex=0 drew
-// at the map start, invisible). Valid for 120s; cleared on respawn.
-float g_fDeathPos[MAXPLAYERS+1][3];
-bool g_bHasDeathPos[MAXPLAYERS+1];
-float g_fDeathTime[MAXPLAYERS+1];
+ConVar g_hCvarEnable;
+ConVar g_hCvarDuration;
+ConVar g_hCvarMax;
 
 public Plugin myinfo =
 {
-	name = "[L4D1/L4D2] Path To Goal",
-	author = "gvazdas, zyiks",
-	description = "Automatic path to goal indicator for Survivor team.",
+	name = "[L4D2] Path To Goal (flow)",
+	author = "server",
+	description = "Flow gradient descent path indicator for Survivor team.",
 	version = PLUGIN_VERSION,
-	url = "https://forums.alliedmods.net/showthread.php?t=352685, https://github.com/gvazdas/l4d2_zombie_master"
-}
+	url = ""
+};
 
 public void OnPluginStart()
 {
-    AutoExecConfig(true, CONFIG_FILENAME);
-    LoadTranslations("l4d_path_to_goal.phrases");
-
-    g_hReconnectToggle = new StringMap();
-
-    RegConsoleCmd("path_to_goal",       CmdRequestGuide, "Point where to go to progress in the map.");
-    RegConsoleCmd("pathtogoal",         CmdRequestGuide, "Point where to go to progress in the map.");
-    RegConsoleCmd("wheretogo",          CmdRequestGuide, "Point where to go to progress in the map.");
-    RegConsoleCmd("imlost",             CmdRequestGuide, "Point where to go to progress in the map.");
-    RegConsoleCmd("guide",              CmdRequestGuide, "Point where to go to progress in the map.");
-    RegConsoleCmd("ptg",                CmdRequestGuide, "Point where to go to progress in the map.");
-
-    g_bL4D2 = GetEngineVersion()==Engine_Left4Dead2;
-    LoadSDK();
-    InitPlayerCaps();
-    
-    RegAdminCmd("l4d_path_to_goal_recalculate", CmdRecalculate, ADMFLAG_ROOT,"Recalculate guide points.");
-    RegAdminCmd("l4d_path_to_goal_print",       CmdPrint, ADMFLAG_ROOT,"Print g_GuideCells.");
-    if (g_bL4D2) RegAdminCmd("l4d_path_to_goal_rescue", CmdRescue, ADMFLAG_ROOT,"Send in rescue vehicle.");
-    RegAdminCmd("l4d_path_to_goal_ground", CmdGround, ADMFLAG_ROOT,"Check if origin is near ground.");
-    #if DEBUG
-    RegAdminCmd("l4d_path_to_goal_validate", CmdValidate, ADMFLAG_ROOT,"Print validation results for cell index if provided, or closest cell to player.");
-    #endif
-    RegAdminCmd("l4d_path_to_goal_recomputeflow", CmdRecomputeFlow, ADMFLAG_ROOT,"Force TerrorNavMesh::RecomputeFlowDistances to fire.");
-
-    g_hCvarEnable = CreateConVar("l4d_path_to_goal_enable", "1",
-    "0=OFF, 1=ON.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_hCvarEnable.AddChangeHook(ConVarChanged_Cvars);
-  	
-    g_hCvarMax = CreateConVar("l4d_path_to_goal_max", "32",
-    "Max beams per request. Increasing this can potentially cause crashes for clients.",FCVAR_NOTIFY, true, 1.0, true, 1000.0);
-
-    g_hCvarSurvivors = CreateConVar("l4d_path_to_goal_survivor", "1",
-    "Allow survivors to request.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarInfected = CreateConVar("l4d_path_to_goal_infected", "1",
-    "Allow infected to request.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarSpec = CreateConVar("l4d_path_to_goal_spec", "1",
-    "Allow observers/spectators to request.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarAlive = CreateConVar("l4d_path_to_goal_alive", "0",
-    "Allow request based on alive state: 0=all,1=alive only,2=dead only.",FCVAR_NOTIFY, true, 0.0, true, 2.0);
-
-    g_hCvarBudget = CreateConVar("l4d_path_to_goal_budget", "0.5",
-    "Max CPU budget (ms per frame) for escape route calculation. Larger budget makes requests available faster at the expense of server lag. 0 for infinite budget.",FCVAR_NOTIFY, true, 0.0, true, 1000.0);
-
-    g_hCvarDetourBudget = CreateConVar("l4d_path_to_goal_detour_budget", "10.0",
-    "Max CPU budget (ms) for detour beams. 0 for infinite budget.",FCVAR_NOTIFY, true, 0.0, true, 100.0);
-
-    #if DEBUG
-    SetConVarFloat(g_hCvarDetourBudget,0.0);
-    #endif
-
-    g_hCvarFinale = CreateConVar("l4d_path_to_goal_finale", "1",
-    "On Finale maps, connect to rescue vehicle... 0: ALWAYS, 1: FINALE STARTED, 2: RESCUE ARRIVED, 3: NEVER",FCVAR_NOTIFY, true, 0.0, true, 3.0);
-
-    g_hCvarFinaleAuto = CreateConVar("l4d_path_to_goal_finale_auto", "0",
-    "Automatically draw beams to rescue vehicle for all clients. l4d_path_to_goal_finale must be less than 3.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarAutoEnable = CreateConVar("l4d_path_to_goal_auto", "0",
-    "Auto guide mode: periodically draw the full escape route for all players. 0=OFF, 1=ON.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarAutoDuration = CreateConVar("l4d_path_to_goal_auto_duration", "1.0",
-    "Guide beam lifetime in seconds. Keep low for instant OFF, auto-pulse may need higher.",FCVAR_NOTIFY, true, 1.0, true, 60.0);
-
-    g_hCvarAutoInterval = CreateConVar("l4d_path_to_goal_auto_interval", "25.0",
-    "Seconds between auto guide beam pulses.",FCVAR_NOTIFY, true, 5.0, true, 300.0);
-
-    g_hCvarGapDzMax = CreateConVar("l4d_path_to_goal_gap_dz_max", "200.0",
-    "Max vertical (Z) gap between guide cells before a beam is suppressed. 0=disable filter (draw all beams).",FCVAR_NOTIFY, true, 0.0, true, 2000.0);
-
-    g_hCvarGapXyRatio = CreateConVar("l4d_path_to_goal_gap_xy_ratio", "2.0",
-    "When Z gap exceeds gap_dz_max, draw beam only if horizontal distance >= Z_gap * this ratio.",FCVAR_NOTIFY, true, 0.5, true, 10.0);
-
-    g_hCvarBeamMinDist = CreateConVar("l4d_path_to_goal_beam_min_dist", "32.0",
-    "Minimum distance (units) between guide cells to draw a beam. Increase to reduce visual clutter on dense nav meshes.",FCVAR_NOTIFY, true, 0.0, true, 256.0);
-
-    g_hCvarGapVertical = CreateConVar("l4d_path_to_goal_gap_vertical", "1",
-    "When a beam is suppressed due to Z gap, draw a vertical bridge line instead: 0=skip entirely, 1=draw vertical indicator.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarStitchSteps = CreateConVar("l4d_path_to_goal_stitch_steps", "75",
-    "Max steps for nav mesh exploration when stitching gaps between disconnected escape route cells.",FCVAR_NOTIFY, true, 20.0, true, 500.0);
-
-    g_hCvarTraceHull = CreateConVar("l4d_path_to_goal_trace_hull", "1",
-    "Use player-sized hull trace to skip beams blocked by world geometry (walls). 0=draw all beams including through walls.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarNonMesh = CreateConVar("l4d_path_to_goal_nonmesh", "0",
-    "Enable non-mesh connection detection (jumps, vaults, crouch passages). 0=off, 1=on. Disabled by default — nav mesh edges are sufficient for correct pathfinding on most maps.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    // ── v4.0 Advanced Features ──
-
-    g_hCvarFunnel3D = CreateConVar("l4d_path_to_goal_funnel_3d", "0",
-    "Enable 3D funnel algorithm for multi-floor building navigation. 0=2D funnel only (legacy), 1=3D funnel with Z-layer awareness. v4.7: default 0 — the Z-transition pass inserts interpolated waypoints inside floor gaps (dz>80 triggers up to 8 per edge), rendering as vertical beams through floors; cross-level segments are validated/beaconed instead.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarFunnelZStep = CreateConVar("l4d_path_to_goal_funnel_z_step", "80.0",
-    "Max Z height change (units) between consecutive funnel portals before forcing an intermediate waypoint.",FCVAR_NOTIFY, true, 32.0, true, 500.0);
-
-    g_hCvarRepairEnable = CreateConVar("l4d_path_to_goal_repair_enable", "1",
-    "Enable STAGE_REPAIR: auto-fix beams blocked by world geometry after hull trace validation. 0=skip, 1=repair.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarRepairAttempts = CreateConVar("l4d_path_to_goal_repair_attempts", "8",
-    "Max repair attempts per blocked beam before giving up and placing a beacon.",FCVAR_NOTIFY, true, 1.0, true, 20.0);
-
-    g_hCvarBeaconEnable = CreateConVar("l4d_path_to_goal_beacon_enable", "1",
-    "Draw bright beacon pillars at unreachable path break points. 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarThetaStar = CreateConVar("l4d_path_to_goal_theta_star", "1",
-    "Enable Theta* any-angle pathfinding: allows line-of-sight shortcuts during A* search for smoother paths.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarThetaLosMax = CreateConVar("l4d_path_to_goal_theta_los_max", "1500.0",
-    "Theta* LOS check max distance (units). Larger = more aggressive shortcuts, higher CPU cost.",FCVAR_NOTIFY, true, 256.0, true, 5000.0);
-
-    g_hCvarHpaEnable = CreateConVar("l4d_path_to_goal_hpa_enable", "1",
-    "Enable HPA* hierarchical pathfinding for large maps (3000+ nav areas). 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarLazyLargeMaps = CreateConVar("l4d_path_to_goal_lazy_large_maps", "1",
-    "Skip background prebuild on maps with more nav areas than the lazy threshold (see source, default 8000). Path builds on first player request instead — keeps CPU idle on huge third-party maps. 0=always prebuild.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    // v4.6: finale radio (prop_finale_machine) goal override. Third-party maps
-    // often tuck the radio off the main flow — while it's active, guide players
-    // TO the operation point (with a beacon) instead of past it. We only point
-    // at the machine; its logic is handled by the game.
-    g_hCvarRadioGoal = CreateConVar("l4d_path_to_goal_radio_goal", "1",
-    "During finale radio phase, retarget the path goal to the radio operation point (prop_finale_machine) and mark it with a beacon. 0=keep normal rescue goal.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarHpaCellSize = CreateConVar("l4d_path_to_goal_hpa_cell_size", "1024.0",
-    "HPA* cluster cell size (units). Smaller = finer hierarchy, more clusters.",FCVAR_NOTIFY, true, 256.0, true, 4096.0);
-
-    g_hCvarFlowWeight = CreateConVar("l4d_path_to_goal_flow_weight", "0.25",
-    "Flow heuristic weight for A* tie-breaking. 0.0=pure Euclidean, 1.0=pure flow.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarZCostFactor = CreateConVar("l4d_path_to_goal_z_cost_factor", "4.0",
-    "Vertical cost multiplier in A* edge weights. Higher values strongly prefer level paths over climbing.",FCVAR_NOTIFY, true, 0.0, true, 10.0);
-
-    g_hCvarGeomPenalty = CreateConVar("l4d_path_to_goal_geom_penalty", "1",
-    "Penalize A* edges whose straight-line path is blocked by world geometry (walls/floors). Nav connections are logical, not physical — without this the guide path contains many beams that fail hull validation and get beaconed. 0=off, 1=on.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    // ── v4.7 Portal + performance ConVars ──
-    g_hCvarPortals = CreateConVar("l4d_path_to_goal_portals", "1",
-    "Shared-edge portal waypoints + human-capability edge filter (requires left4dhooks L4D_NavArea_GetCorner). 0=legacy nav-center waypoints.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarPortalMinOverlap = CreateConVar("l4d_path_to_goal_portal_min_overlap", "24.0",
-    "Minimum shared-edge overlap (units) for a portal to count as a walkable boundary. Below this the pair is a jump link / gap. v4.7.3: 12→24 — a 12u seam is narrower than the player hull (32u), portal centers sat on walls (side:2-3 + blocked segments).",FCVAR_NOTIFY, true, 4.0, true, 64.0);
-
-    g_hCvarPortalMaxDz = CreateConVar("l4d_path_to_goal_portal_max_dz", "48.0",
-    "Max Z delta (units) across a shared edge treated as plain walking. Above this the edge is classified as vault (arc-validated) or excluded.",FCVAR_NOTIFY, true, 16.0, true, 120.0);
-
-    g_hCvarHumanJump = CreateConVar("l4d_path_to_goal_human_can_jump", "0",
-    "L4D2 human players cannot jump (no jump key — only bots use nav jump links). 0=exclude all jump edges, 1=allow bot-style jump paths.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarAstarCheap = CreateConVar("l4d_path_to_goal_astar_cheap", "1",
-    "Skip per-edge hull LOS traces during A* search (portal classification + string-pull cover the checks; big speedup on large maps). 0=legacy expensive search.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarAstarBudgetMs = CreateConVar("l4d_path_to_goal_astar_budget_ms", "1.5",
-    "Per-frame CPU budget (ms) for the A* stage. Effective cap = min(this, l4d_path_to_goal_budget).",FCVAR_NOTIFY, true, 0.1, true, 10.0);
-
-    g_hCvarAstarNodes = CreateConVar("l4d_path_to_goal_astar_nodes", "300",
-    "Adaptive A* nodes-per-frame base (auto-ranges 50-800).",FCVAR_NOTIFY, true, 50.0, true, 800.0);
-
-    g_hCvarCoarseFirst = CreateConVar("l4d_path_to_goal_coarse_first", "1",
-    "Draw the unvalidated portal line immediately after the path is found; hull validation + REPAIR refresh it in the background. 0=wait for validation.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarStringPull = CreateConVar("l4d_path_to_goal_string_pull", "1",
-    "Multi-hop LOS string-pulling over portal waypoints (removes redundant waypoints in straight corridors). 0=off.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarFunnelSSFA = CreateConVar("l4d_path_to_goal_funnel_ssfa", "0",
-    "Classic SSFA funnel tightening over portal segments (short paths only, <=60 cells). 0=off.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    g_hCvarRedrawMinMove = CreateConVar("l4d_path_to_goal_redraw_min_move", "64.0",
-    "Client redraw dedup: skip the 0.3s redraw when the player moved less than this (units) and the path generation is unchanged. 0=always redraw.",FCVAR_NOTIFY, true, 0.0, true, 512.0);
-
-    // ── v4.5 Accuracy + Legacy ConVars ──
-    g_hCvarAccuracy = CreateConVar("l4d_path_to_goal_accuracy", "1",
-    "Master switch for v4.5 accuracy improvements (expanded trace filter, deeper ground snap, GetZ portal Z). 0=legacy, 1=improved.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_hCvarAccuracy.AddChangeHook(ConVarChanged_Cvars);
-
-    g_hCvarLegacyMode = CreateConVar("l4d_path_to_goal_legacy_mode", "0",
-    "Emergency rollback: set to 1 to disable ALL v3.1+ features and revert to original behavior.",FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_hCvarLegacyMode.AddChangeHook(ConVarChanged_Cvars);
-
-  	g_hCvarMPGameMode = FindConVar("mp_gamemode");
-  	g_hCvarMPGameMode.AddChangeHook(ConVarGameMode);
-    
-    t_nav = -1.0;
-    Check_Guidable();
-    GetCvars();
-    
-    nav_started = true;
-    guide_prep = false;
-    HookEvent("round_start_post_nav",     evtPostNav,        EventHookMode_PostNoCopy);
-    HookEvent("nav_blocked",              evtNavBlocked,     EventHookMode_Post);
-    HookEvent("nav_generate",             evtNavGenerate,    EventHookMode_PostNoCopy);
-	HookEvent("finale_start", 			  evtFinaleStart,    EventHookMode_PostNoCopy);
-	HookEvent("finale_radio_start", 	  evtFinaleStart,    EventHookMode_PostNoCopy);
-    HookEvent("finale_vehicle_ready", 	  evtFinaleVehicle,  EventHookMode_PostNoCopy);
-    HookEvent("player_first_spawn",       evtFirstSpawn,     EventHookMode_PostNoCopy);
-    HookEvent("player_spawn",             evtPlayerSpawn,    EventHookMode_Post);
-    HookEvent("player_death",             evtPlayerDeath,    EventHookMode_Post);
-    if (g_bL4D2)
-    {
-    HookEvent("gauntlet_finale_start", 	  evtGauntletStart,  EventHookMode_PostNoCopy);
-    HookEvent("finale_vehicle_incoming",  evtFinaleVehicle,  EventHookMode_PostNoCopy);
-    }
-
-    // Auto-guide: check periodically if guide is ready, then start pulse timer
-    // Use recursive one-shot timers (TIMER_REPEAT doesn't fire on empty servers)
-    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
-
-    // v4.8.1: mid-map reload — SM does NOT fire OnMapStart when a plugin is
-    // loaded while a map is already running, so map_started stays false and
-    // the guide is dead (every command silently ignored) until the next map
-    // change. If a map is live, adopt it immediately: MapStarted() sets
-    // map_started, recreates the auto-check timer (kills the one just
-    // created above), and resets per-map state. The first AutoCheck tick then
-    // runs a normal full Guide_Prep (fresh instance — search data is empty).
-    char g_sMapName[PLATFORM_MAX_PATH];
-    if (GetCurrentMap(g_sMapName, sizeof(g_sMapName)) && g_sMapName[0] != '\0')
-    {
-        MapStarted();
-    }
-}
-
-public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
-{
-    if(GetEngineVersion()!=Engine_Left4Dead2 && GetEngineVersion()!=Engine_Left4Dead)
-	{
-		strcopy(error,err_max,"Plugin only supports L4D1/L4D2.");
-		return APLRes_SilentFailure;
-	}
-    MarkNativeAsOptional("L4D_NavArea_GetZ");
-    MarkNativeAsOptional("L4D_NavArea_GetElevator");
-    MarkNativeAsOptional("L4D_NavArea_IsBlocked");
-    MarkNativeAsOptional("L4D_NavArea_GetCorner");
-    MarkNativeAsOptional("L4D_NavArea_GetLadder");
-    CreateNative("L4D_Path_To_Goal", Native_RequestGuide);
-	return APLRes_Success;
-}
-
-public void OnAllPluginsLoaded()
-{
-    elevator_available = GetFeatureStatus(FeatureType_Native,"L4D_NavArea_GetElevator")==FeatureStatus_Available;
-    corner_available  = GetFeatureStatus(FeatureType_Native,"L4D_NavArea_GetCorner")==FeatureStatus_Available;
-    blocked_available = GetFeatureStatus(FeatureType_Native,"L4D_NavArea_IsBlocked")==FeatureStatus_Available;
-    if (!elevator_available || !corner_available || !blocked_available) LogMessage("Please update l4dhooks for better performance.");
-    if (g_bL4D2) g_hCvarZM = FindConVar("zm_enable"); // check if zombie master is active
-}
-
-void evtFinaleVehicle(Event event, const char[] name, bool dontBroadcast)
-{
-    #if DEBUG
-    LogMessage("evtFinaleVehicle");
-    #endif
-    if (finale) finale_rescue = true;
-    // v4.6: radio phase over (vehicle incoming/ready) — restore the normal
-    // rescue-vehicle goal. The existing stitch_finale logic below takes over.
-    if (g_bRadioGoalActive)
-    {
-        g_bRadioGoalActive = false;
-        g_aRadioNavArea = Address_Null;
-        delete g_hRadioBeacon;
-        g_hRadioBeacon = null;
-        LogMessage("[PTG] Finale radio goal cleared — restoring rescue vehicle goal");
-        NavChanged(true);
-    }
-    if (!enable) return;
-    if (finale_rescue && g_hCvarFinale.IntValue < FINALE_NEVER)
-    {
-        if (guide_ready && !finale_stitched && should_stitch_finale()) stitch_finale();
-        if (g_hCvarFinaleAuto.BoolValue) CreateTimer(2.0, Timer_Guide_All_Clients, _, TIMER_FLAG_NO_MAPCHANGE);
-    }
-}
-
-void evtFinaleStart(Event event, const char[] name, bool dontBroadcast)
-{
-    #if DEBUG
-    LogMessage("evtFinaleStart");
-    #endif
-    finale = true;
-    // v4.6: finale radio phase (finale_radio_start) — retarget goal to the
-    // radio operation point. No machine logic is simulated; we only guide to
-    // it and beacon it. Cleared by evtFinaleVehicle.
-    if (g_hCvarRadioGoal != null && g_hCvarRadioGoal.BoolValue && strcmp(name, "finale_radio_start") == 0)
-    {
-        int ent = FindEntityByClassname(-1, "prop_finale_machine");
-        if (ent <= 0) ent = FindEntityByClassname(-1, "point_finale_radio");
-        if (ent > 0)
-        {
-            float origin[3];
-            GetEntPropVector(ent, Prop_Send, "m_vecOrigin", origin);
-            g_aRadioNavArea = L4D_GetNearestNavArea(origin, 500.0, true, true, false, TEAM_SURVIVOR);
-            if (g_aRadioNavArea != Address_Null)
-            {
-                if (!g_bRadioGoalActive)
-                {
-                    g_bRadioGoalActive = true;
-                    LogMessage("[PTG] Finale radio goal active — guiding to radio operation point (area %d)", g_aRadioNavArea);
-                    NavChanged(true); // background rebuild applies the new goal
-                }
-                if (g_hRadioBeacon == null) g_hRadioBeacon = new ArrayList(3);
-                else g_hRadioBeacon.Clear();
-                float center[3];
-                L4D_GetNavAreaCenter(g_aRadioNavArea, center);
-                g_hRadioBeacon.PushArray(center, 3);
-            }
-        }
-    }
-    if (guide_ready && !finale_stitched && should_stitch_finale()) stitch_finale();
-}
-
-void evtGauntletStart(Event event, const char[] name, bool dontBroadcast)
-{
-    #if DEBUG
-    LogMessage("evtGauntletStart");
-    #endif
-    finale = true;
-    if (!use_gauntlet_logic() && finale_stitched) Guide_Cleanup(); // need to recalculate cells
-    finale_gauntlet = true;
-    if (!enable) return;
-    if (guide_ready && !finale_stitched && should_stitch_finale()) stitch_finale();
-}
-
-void ConVarChanged_Cvars(ConVar convar, const char[] oldValue, const char[] newValue)
-{
-    GetCvars();
-}
-
-void evtPostNav(Event event, const char[] name, bool dontBroadcast)
-{
-    #if DEBUG>1
-        LogMessage("round_start_post_nav");
-    #endif
-    nav_started = true;
-    finale = false;
-    finale_rescue = false;
-    finale_gauntlet = false;
-    finale_stitched = false; // v4.6: ensure new round re-stitches finale if it starts
-    // v4.6: soft-dirty instead of full cleanup. round_start_post_nav fires every
-    // round — on large maps a full Guide_Cleanup meant a 30s+ blackout and the
-    // death/rejoin "path lost" symptom. NavChanged(true) keeps the old path
-    // drawing for toggled clients while the background rebuild runs (≤2s).
-    // v4.8: the nav mesh WAS rebuilt for this round — the next dirty rebuild
-    // must re-derive node index + portals from the new nav data (soft rebuild
-    // only re-plans the same mesh). evtPostNav is the sole caller that does
-    // this; all other dirty sources (detour failure, geom iteration) reuse.
-    g_bForceFullRebuild = true;
-    NavChanged(true);
-}
-
-void evtNavBlocked(Event event, const char[] name, bool dontBroadcast)
-{
-    if (!enable || !nav_started || !map_started) return;
-    // v4.6.1: debounce — movers (rollercoaster car, elevators) fire bursts
-    // of nav_blocked events while passing; each one used to queue another
-    // detour attempt (c2m3 fired 3 in the same second at 22:21:30: cells
-    // 91/92/93). The 6s PathIntegrityCheck poll covers real stale paths.
-    static float fLastNavBlocked;
-    if (GetEngineTime() - fLastNavBlocked < 3.0) return;
-    fLastNavBlocked = GetEngineTime();
-    Address navArea = L4D_GetNavAreaByID(event.GetInt("area"));
-    if (navArea == Address_Null) return;
-    #if DEBUG>1
-    bool blocked = event.GetBool("blocked");
-    LogMessage("nav_blocked area %d blocked %d on_path %d", navArea, blocked, IsAreaOnPath(navArea));
-    #endif
-    // v4.6: local detour instead of full rebuild when the blocked area is on
-    // our current path — windowed A* around the break, fallback to
-    // NavChanged(true) inside Guide_TryLocalDetour when detour is impossible.
-    if (IsAreaOnPath(navArea))
-        Guide_TryLocalDetour(navArea);
-}
-
-void evtNavGenerate(Event event, const char[] name, bool dontBroadcast)
-{
-    #if DEBUG>1
-    LogMessage("nav_generate");
-    #endif
-    NavChanged();
-}
-
-void ConVarGameMode(ConVar convar, const char[] oldValue, const char[] newValue)
-{
-	RequestFrame(Check_Guidable);
-}
-
-//int client_hint;
-
-Action CmdRequestGuide(int client, int args)
-{
-    if (!enable || !map_started || !nav_started || !gamemode_guidable || !IsValidClient(client) || IsFakeClient(client)) return Plugin_Continue;
-
-    // Double-tap detection: only toggle on two rapid presses within 0.5s
-    float now = GetGameTime();
-    float gap = g_fLastPtgTime[client] > 0.0 ? (now - g_fLastPtgTime[client]) : 999.0;
-    g_fLastPtgTime[client] = now;
-
-    if (gap > 0.5)
-        return Plugin_Continue; // ignore single press, wait for double-tap
-
-    // Double-tap detected — proceed to toggle or force guide prep.
-    // (Don't pre-check MapMaxFlowDistance here — let the pipeline determine
-    //  if the map is guidable. Custom maps without nav_analyze can still
-    //  work via spatial-only A* with Euclidean distance goal detection.)
-
-    // Force guide prep if needed
-    if (!guide_ready)
-    {
-        Guide_Prep();
-        if (!guide_ready || g_GuideCells == null)
-        {
-            ReplyToCommand(client, "[PTG] %t", "ptg_wait");
-            return Plugin_Continue;
-        }
-    }
-
-    if (g_bGuideToggled[client])
-    {
-        // Turn OFF (this client only)
-        g_bGuideToggled[client] = false;
-        ReplyToCommand(client, "[PTG] \x04Guide OFF");
-        Guide_UpdateRedrawTimer();
-    }
-    else
-    {
-        // Turn ON — validate we can actually draw before confirming
-        // v4.2: Don't show "Guide ON" if g_GuideCells is null/empty.
-        // That would mean the path was cleaned up (NavChanged, integrity check, etc.)
-        // and hasn't been rebuilt yet. Tell the user the real status.
-        g_bGuideToggled[client] = true;
-        Guide_UpdateRedrawTimer();
-
-        if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
-        {
-            AutoGuideDrawPath(client);
-            ReplyToCommand(client, "[PTG] \x05Guide ON");
-        }
-        else
-        {
-            // Path not ready — prep is either already running or will start now.
-            // The toggle is ON; beams will appear as soon as the pipeline finishes.
-            if (!guide_prep)
-                Guide_Prep();
-            ReplyToCommand(client, "[PTG] \x04Guide queued — drawing as soon as path is ready...");
-        }
-    }
-
-    return Plugin_Continue;
-}
-
-void Guide_UpdateRedrawTimer()
-{
-    bool anyOn = false;
-    for (int i = 1; i <= MaxClients; i++)
-    {
-        if (g_bGuideToggled[i]) { anyOn = true; break; }
-    }
-
-    // v4.5: Reset beam-missed counter when toggle state changes
-    if (anyOn)
-        g_iBeamsMissed = 0;
-
-    if (anyOn && g_hToggleTimer == null)
-    {
-        // v4.5: Recursive one-shot (TIMER_REPEAT doesn't fire on empty servers).
-        // Reduced interval from 0.6→0.3s for faster beam-loss recovery.
-        g_hToggleTimer = CreateTimer(0.3, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
-    }
-    else if (!anyOn && g_hToggleTimer != null)
-    {
-        KillTimer(g_hToggleTimer);
-        g_hToggleTimer = null;
-        g_iBeamsMissed = 0;
-    }
-}
-
-
-Action Timer_ToggleRedraw(Handle timer)
-{
-    // v4.5: Recursive one-shot — reschedule before any return.
-    // TIMER_REPEAT doesn't fire on empty servers (SourceMod bug).
-    g_hToggleTimer = CreateTimer(0.3, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
-
-    bool anyOn = false;
-    bool pathAvailable = (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2);
-    int beamsDrawn = 0;
-    int beamsSkipped = 0; // v4.7: dedup skips are NOT beam misses
-
-    for (int i = 1; i <= MaxClients; i++)
-    {
-        if (g_bGuideToggled[i] && IsValidClient(i) && !IsFakeClient(i))
-        {
-            anyOn = true;
-            if (pathAvailable)
-            {
-                // v4.7 redraw dedup: nothing changed and the beams are still
-                // alive → skip. The beams have a 1s lifetime on a 0.3s timer,
-                // so stationary players got 3x redundant redraws; skipping
-                // cuts up to 2/3 of the TE traffic. Only for alive players —
-                // observer/death anchors are cheap and stateful.
-                if (IsPlayerAlive(i))
-                {
-                    float now = GetEngineTime();
-                    float duration = g_hCvarAutoDuration.FloatValue;
-                    if (duration <= 0.0) duration = 1.0;
-                    float minMove = (g_hCvarRedrawMinMove != null) ? g_hCvarRedrawMinMove.FloatValue : 64.0;
-                    bool genChanged = (g_iLastDrawGen[i] != g_iPathGen);
-                    bool beamsAlive = (now - g_fLastDrawTime[i]) < duration;
-                    bool moved = false;
-                    float origin[3];
-                    GetEntPropVector(i, Prop_Send, "m_vecOrigin", origin);
-                    if (GetVectorDistance(origin, g_fLastDrawPos[i], false) >= minMove)
-                        moved = true;
-                    if (!genChanged && beamsAlive && !moved)
-                    {
-                        beamsSkipped++;
-                        continue;
-                    }
-                    AutoGuideDrawPath(i);
-                    g_fLastDrawPos[i] = origin;
-                    g_iLastDrawGen[i] = g_iPathGen;
-                    g_fLastDrawTime[i] = now;
-                    beamsDrawn++;
-                }
-                else
-                {
-                    AutoGuideDrawPath(i);
-                    beamsDrawn++;
-                }
-            }
-            else if (!guide_prep)
-            {
-                // v4.2: Path lost while client has toggle ON.
-                // Trigger rebuild — beams will appear when pipeline finishes.
-                Guide_Prep();
-            }
-        }
-    }
-
-    if (!anyOn)
-    {
-        g_hToggleTimer = null;
-        g_iBeamsMissed = 0;
-        return Plugin_Stop;
-    }
-
-    // v4.5: Beam health check.
-    // If path is available but no beams were drawn (path says ready but
-    // g_GuideCells is null/empty — race condition), track consecutive misses.
-    // After 5 misses (1.5s), force a rebuild. v4.7: dedup skips don't count
-    // as misses — the beams are still alive by definition.
-    if (pathAvailable && beamsDrawn == 0 && beamsSkipped == 0)
-    {
-        g_iBeamsMissed++;
-        if (g_iBeamsMissed > 5)
-        {
-            LogMessage("[PTG] Beam health check: %d consecutive ticks with 0 beams drawn — forcing rebuild", g_iBeamsMissed);
-            g_iBeamsMissed = 0;
-            Guide_Prep();
-        }
-    }
-    else
-    {
-        g_iBeamsMissed = 0;
-    }
-
-    return Plugin_Stop;
-}
-
-// v4.5: Immediately redraw beams for all toggled clients.
-// Called after pipeline completion to eliminate the 0-0.3s gap.
-void Guide_RedrawAllToggled()
-{
-    if (g_GuideCells == null || g_GuideCells.Length < 2) return;
-    for (int i = 1; i <= MaxClients; i++)
-    {
-        if (g_bGuideToggled[i] && IsValidClient(i) && !IsFakeClient(i))
-            AutoGuideDrawPath(i);
-    }
-}
-
-//Action TransmitInfoTarget(int entity, int client)
-//{
-//	 if (client==client_hint)
-//   {
-//        static float pos1[3],pos2[3];
-//        GetEntPropVector(entity, Prop_Send, "m_vecOrigin", pos1);
-//        GetEntPropVector(client, Prop_Send, "m_vecOrigin", pos2); pos2[2] += 16.0;
-//        if (GetVectorDistance(pos1,pos2,true)<=1024.0)
-//        {
-//            AcceptEntityInput(entity, "Kill");
-//            return Plugin_Handled;
-//        }
-//        return Plugin_Continue;
-//    }
-//    return Plugin_Handled;
-//}
-
-// add custom flags for client from arg: duration, backward, g_sCustomKeys[client]
-stock void process_cmd_arg(int client, char arg[16], float &duration, bool &backward)
-{
-    float duration_new = StringToFloat(arg);
-    if (duration_new>=0.1)
-    {
-        duration = duration_new;
-        return;
-    }
-    switch (CharToLower(arg[0]))
-    {
-        case 'a':
-        {
-            g_sCustomKeys[client][3] = 'a'; // arrow. beam increases in width from start to end
-            return;
-        }
-        case 'b':
-        {
-            backward = true;
-            return;
-        }
-        case 'c':
-        {
-            if (g_iLaserCustom!=0) g_sCustomKeys[client][0] = 'c'; // VMT_LASERBEAM_CUSTOM
-            return;
-        }
-        case 'd':
-        {
-            g_sCustomKeys[client][4] = 'd'; // delay between beam draws, looks cool
-            return;
-        }
-        case 's':
-        {
-            if (strncmp(arg,"small",5,false)==0) g_sCustomKeys[client][2] = 's'; // small beam size
-            else if (strncmp(arg,"shake",5,false)==0) g_sCustomKeys[client][1] = 's'; // shake beam
-            return;
-        }
-        case 'l':
-        {
-            g_sCustomKeys[client][2] = 'l'; // large beam size
-            return;
-        }
-        case 'w':
-        {
-            if (g_iLaserWhite!=0) g_sCustomKeys[client][0] = 'w'; // VMT_LASERBEAM_WHITE
-            return;
-        }
-    }
-}
-
-Action CmdRecalculate(int client, int args)
-{
-    if (!enable || !map_started || !nav_started || !gamemode_guidable) return Plugin_Continue;
-    if (!guide_prep)
-    {
-        Guide_Cleanup();
-        Guide_Prep();
-    }
-    else ReplyToCommand(client, "[PTG] %t", "ptg_busy");
-    return Plugin_Continue;
-}
-
-Action CmdPrint(int client, int args)
-{
-    if (!guide_ready || g_GuideCells==null || g_GuideCells.Length<=0) return Plugin_Continue;
-    static Cell cell;
-    ReplyToCommand(client, "index navArea flow pos");
-    for (int i = 0; i < g_GuideCells.Length; i++)
-    {
-        g_GuideCells.GetArray(i,cell,sizeof(Cell));
-        ReplyToCommand(client, "%d %d %.1f (%.1f %1.f %.1f)", i, cell.navArea, cell.flow, cell.center[0], cell.center[1], cell.center[2]);
-    }
-    return Plugin_Continue;
-}
-
-#if DEBUG
-Action CmdValidate(int client, int args)
-{
-    if (!guide_ready || g_GuideCells == null || g_GuideCells.Length<1) return Plugin_Continue;
-    int i = 0;
-    if (args>0)
-    {
-        i = GetCmdArgInt(1);
-        if (i<0) i = 0;
-        else if (i>=g_GuideCells.Length) i = g_GuideCells.Length-1;
-    }
-    else if (IsValidClient(client))
-    {
-        if (!RequestGuide(client,5.0,true)) return Plugin_Continue;
-        i = g_iStart;
-    }
-
-    static Cell cell, cell_before, cell_after;
-    
-    g_GuideCells.GetArray(i,cell,sizeof(Cell));
-    ReplyToCommand(client, "%d %d %.1f (%.1f %1.f %.1f)", i, cell.navArea, cell.flow, cell.center[0], cell.center[1], cell.center[2]);
-    ReplyToCommand(client, "valid ground %d", valid_ground(cell.center));
-    if (IsValidClient(client))
-    {
-        static float pos_down[3], pos_up[3];
-        pos_down = cell.center; pos_down[2] -= 1000.0;
-        pos_up = cell.center; pos_up[2] += 1000.0;
-        DrawBeam(client,pos_down,pos_up);
-    }
-    bool cell_behind = (i-1)>=0;
-    bool cell_ahead = (i+1)<g_GuideCells.Length;
-
-    if (cell_behind)
-    {
-        g_GuideCells.GetArray(i-1,cell_before,sizeof(Cell));
-        ReplyToCommand(client, "behind LOS %d (hit %d props %d flags %d name %s)",
-        twopos_traversable(cell_before.center,cell.center), g_iHitEntity, g_iHitSurfaceProps, g_iHitSurfaceFlags, g_sHitSurfaceName);
-    }
-    if (cell_ahead)
-    {
-        g_GuideCells.GetArray(i+1,cell_after,sizeof(Cell));
-        ReplyToCommand(client, "ahead LOS %d (hit %d props %d flags %d name %s)",
-        twopos_traversable(cell_after.center,cell.center), g_iHitEntity, g_iHitSurfaceProps, g_iHitSurfaceFlags, g_sHitSurfaceName);
-    }
-    if (cell_behind && cell_ahead)
-    {
-        ReplyToCommand(client, "ahead-behind LOS %d (hit %d props %d flags %d name %s) mid-ground %d",
-        twopos_traversable(cell_after.center,cell_before.center), g_iHitEntity, g_iHitSurfaceProps, g_iHitSurfaceFlags, g_sHitSurfaceName, midpoint_valid_ground(cell_after.center,cell_before.center));
-    }
-    return Plugin_Continue;
-}
-#endif
-
-Action CmdRescue(int client, int args)
-{
-    L4D2_SendInRescueVehicle();
-    return Plugin_Continue;
-}
-
-Action CmdGround(int client, int args)
-{
-    if (!IsValidClient(client) || IsFakeClient(client)) return Plugin_Stop;
-    static float pos[3];
-    GetEntPropVector(client, Prop_Send, "m_vecOrigin", pos);
-    ReplyToCommand(client,"Ground %d",valid_ground(pos));
-    return Plugin_Continue;
-}
-
-Action CmdRecomputeFlow(int client, int args)
-{
-    if (g_hRecomputeFlow == null) return Plugin_Continue;
-    Address ptr_navmesh = L4D_GetPointer(POINTER_NAVMESH);
-    if (ptr_navmesh == Address_Null) return Plugin_Continue;
-    SDKCall(g_hRecomputeFlow,ptr_navmesh);
-    return Plugin_Continue;
+	RegConsoleCmd("path_to_goal", CmdRequestGuide, "Point where to go to progress in the map.");
+	RegConsoleCmd("pathtogoal",   CmdRequestGuide, "Point where to go to progress in the map.");
+	RegConsoleCmd("wheretogo",    CmdRequestGuide, "Point where to go to progress in the map.");
+	RegConsoleCmd("imlost",       CmdRequestGuide, "Point where to go to progress in the map.");
+	RegConsoleCmd("guide",        CmdRequestGuide, "Point where to go to progress in the map.");
+	RegConsoleCmd("ptg",          CmdRequestGuide, "Point where to go to progress in the map.");
+
+	g_hCvarEnable   = CreateConVar("l4d_path_to_goal_enable",  "1",    "Enable the path-to-goal indicator.", FCVAR_NOTIFY);
+	g_hCvarDuration = CreateConVar("l4d_path_to_goal_duration", "0.5", "Beam lifetime in seconds (must be > redraw interval 0.3s to avoid flicker).", FCVAR_NOTIFY);
+	g_hCvarMax      = CreateConVar("l4d_path_to_goal_max", "32", "Max beam segments per frame (client TE buffer cap).", FCVAR_NOTIFY);
+
+	AutoExecConfig(true, CONFIG_FILENAME);
 }
 
 public void OnMapStart()
 {
-    // v4.6: Bump generation FIRST — OnMapStart is the earliest map-change
-    // callback, so any stale OnFramePrep/Validate/Repair frames queued by the
-    // previous map run AFTER this point and abort on the generation mismatch.
-    // (MapStarted itself is a RequestFrame callback that can fire after old-map
-    // pipeline frames, so it cannot be the only increment point.)
-    g_iMapGeneration++;
-	g_iLaser = PrecacheModel(VMT_LASERBEAM, true);
-    g_iLaserWhite = PrecacheModel(VMT_LASERBEAM_WHITE, true);
-    g_iLaserCustom = PrecacheModel(VMT_LASERBEAM_CUSTOM, true);
-    RequestFrame(MapStarted);
-    //GetCurrentMap(mapName, sizeof(mapName));
+	// 统一入口：reload 后 OnMapStart 不触发，改为懒检测（CmdRequestGuide /
+	// FlowPathFrom 都会调用 EnsureInitForCurrentMap），这里直接强制重建
+	EnsureInitForCurrentMap();
 }
 
-// Global state for auto-guide fallback
-int g_iPrepAttempts = 0;
-int g_iFallbackStage = 0; // 0=normal, 1=fallback pending, 2=fallback done, 3=backoff
-int g_iFallbackRetries = 0;
-float g_fFallbackBackoffUntil = 0.0; // v4.6: engine time until fallback retries are allowed
-#define MAX_FALLBACK_RETRIES 2
-
-void MapStarted()
+// 清理上一张图的所有状态（表/虚拟边/目标缓存跨图残留会全量失效：
+// c5m3 用 silenthill 的表 → AreaToIndex 全 miss → BFS 退化 len=2）
+void ResetMapState()
 {
-    map_started = true;
-    t_nav = -1.0;
-    timer_nav = null;
-    g_iPrepAttempts = 0;
-    g_iFallbackStage = 0;
-    g_iFallbackRetries = 0;
-    g_fFallbackBackoffUntil = 0.0;
-    g_fLastPrepProgressTime = 0.0;
-    g_bPathDirty = false;
-    g_iNavAreaCount = -1;           // v4.6: lazy-build counting starts fresh per map
-    g_bLazyBuildRequested = false;
-    // v4.6: blocked-edge feedback table dies with the map — nav areas change
-    delete g_hBlockedEdges;
-    g_hBlockedEdges = null;
-    g_iGeomIter = 0;
-
-    // Re-create check timer on every map load (OnPluginStart only fires once;
-    // OnMapEnd kills it, so we must recreate here after each map change)
-    if (g_hAutoCheckTimer != null) { KillTimer(g_hAutoCheckTimer); }
-    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
+	g_bNavReady = false;
+	g_fFlowCoverage = 0.0;
+	g_iEntityBridges = 0;
+	g_bVirtualBuilt = false;
+	if (g_hVirtualEdges != null) { delete g_hVirtualEdges; g_hVirtualEdges = null; }
+	g_bNavTableReady = false;
+	if (g_hAreaList != null) { delete g_hAreaList; g_hAreaList = null; }
+	if (g_hAreaIndex != null) { delete g_hAreaIndex; g_hAreaIndex = null; }
+	if (g_hNeighborIdx != null) { delete g_hNeighborIdx; g_hNeighborIdx = null; }
+	if (g_hFlowValues != null) { delete g_hFlowValues; g_hFlowValues = null; }
+	if (g_hCenterX != null) { delete g_hCenterX; g_hCenterX = null; }
+	if (g_hCenterY != null) { delete g_hCenterY; g_hCenterY = null; }
+	if (g_hCenterZ != null) { delete g_hCenterZ; g_hCenterZ = null; }
+	g_fMapMaxFlow = 0.0;
+	g_bHasGoal = false;
+	g_GoalArea = Address_Null;
+	g_bFarGoalReady = false;
+	g_FarGoalArea = Address_Null;
 }
 
-public void OnMapEnd()
+// 懒初始化：插件 reload（OnMapStart 不触发）或换图后首次调用时重建全部表。
+// 幂等：同图重复调用无副作用（Build* 自带 g_b*Ready 守卫）。
+void EnsureInitForCurrentMap()
 {
-    // v4.6: double-insurance bump covering the OnMapEnd→OnMapStart gap —
-    // kills any stale async frames from the ending map's pipeline.
-    g_iMapGeneration++;
-    map_started = false;
-    nav_started = false;
-    t_nav = -1.0;
-    Guide_Cleanup();
-    guide_prep = false;
-    g_iPrepStage = STAGE_NONE;
-    beams_cooldown_reset(_,true); // reset all requests and cooldowns
-    timer_nav = null;
-    finale = false;
+	char map[PLATFORM_MAX_PATH];
+	GetCurrentMap(map, sizeof(map));
+	if (g_sNavMap[0] != 0 && StrEqual(g_sNavMap, map) && g_bNavTableReady)
+		return;
+	strcopy(g_sNavMap, sizeof(g_sNavMap), map);
+	ResetMapState();
 
-    // Stop auto-guide timers
-    if (g_hAutoTimer != null) { KillTimer(g_hAutoTimer); g_hAutoTimer = null; }
-    if (g_hAutoCheckTimer != null) { KillTimer(g_hAutoCheckTimer); g_hAutoCheckTimer = null; }
-    if (g_hToggleTimer != null) { KillTimer(g_hToggleTimer); g_hToggleTimer = null; }
-    for (int i = 1; i <= MaxClients; i++) g_bGuideToggled[i] = false;
-    g_hReconnectToggle.Clear(); // purge stale reconnect toggle entries
+	g_iLaser = PrecacheModel(VMT_LASER, true);
+	if (g_iLaser == 0)
+		g_iLaser = PrecacheModel("sprites/laserbeam.vmt", true);
 
-    // v4.6: finale radio state dies with the map
-    g_bRadioGoalActive = false;
-    g_aRadioNavArea = Address_Null;
-    delete g_hRadioBeacon;
-    g_hRadioBeacon = null;
+	// nav mesh 随地图加载，一局内不变（机关/实体变化只改 flow 值不改 area 集合）
+	// flow 覆盖率：三方图 nav 质量差时引擎 flow 场可能只覆盖极少区域
+	//（死亡厕所迷宫 6%、tumtara 0%）→ 覆盖率过低直接禁用画线
+	ArrayList all = new ArrayList();
+	L4D_GetAllNavAreas(all);
+	g_bNavReady = (all.Length > 0);
+	int flowValid = 0;
+	for (int i = 0; i < all.Length; i++)
+	{
+		if (L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(all.Get(i))) >= 0.0)
+			flowValid++;
+	}
+	g_fFlowCoverage = all.Length > 0 ? float(flowValid) / float(all.Length) : 0.0;
+	delete all;
+
+	FindGoalEntity();
+	BuildVirtualEdges();
+	ComputeFarGoal();
+	BuildNavTables();
 }
 
-public void OnClientDisconnect(int client)
+// ────────────────────────── nav 索引表（BFS 零 native 化） ──────────────────────────
+// BFS 卡顿根治：预构建 area→index、邻居 index 表、flow/center 表。
+// BFS 运行时纯 ArrayList 操作（无 StringMap 哈希、无 native 调用）。
+// 死亡厕所迷宫实测：fallback BFS + StringMap visited/parent 每 0.3s 全遍历
+// → 服务器明显卡顿（SourcePawn VM 哈希开销巨大）。
+
+void BuildNavTables()
 {
-    // v4.2: Save toggle state by SteamID so it can be restored
-    // if the same player reconnects in the same session.
-    if (g_bGuideToggled[client] && !IsFakeClient(client))
-    {
-        char auth[64];
-        if (GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
-        {
-            g_hReconnectToggle.SetValue(auth, 1);
-        }
-    }
-    g_bGuideToggled[client] = false;
-    g_fLastPtgTime[client] = 0.0;
+	if (g_bNavTableReady)
+		return;
+	g_bNavTableReady = true;
+
+	ArrayList all = new ArrayList();
+	L4D_GetAllNavAreas(all);
+	int n = all.Length;
+
+	g_hAreaList = new ArrayList();
+	g_hAreaIndex = new StringMap();
+	g_hFlowValues = new ArrayList();
+	g_hCenterX = new ArrayList();
+	g_hCenterY = new ArrayList();
+	g_hCenterZ = new ArrayList();
+
+	char key[16];
+	float c[3];
+	for (int i = 0; i < n; i++)
+	{
+		int areaInt = all.Get(i);
+		g_hAreaList.Push(areaInt);
+		IntToString(areaInt, key, sizeof(key));
+		g_hAreaIndex.SetValue(key, i);
+		g_hFlowValues.Push(L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(areaInt)));
+		L4D_GetNavAreaCenter(view_as<Address>(areaInt), c);
+		g_hCenterX.Push(c[0]);
+		g_hCenterY.Push(c[1]);
+		g_hCenterZ.Push(c[2]);
+	}
+
+	// 邻居表：4 向 + 虚拟边合并
+	g_hNeighborIdx = new ArrayList();
+	ArrayList adj = new ArrayList();
+	for (int i = 0; i < n; i++)
+	{
+		ArrayList nb = new ArrayList();
+		for (int dir = 0; dir < 4; dir++)
+		{
+			adj.Clear();
+			L4D_NavArea_GetAdjacentAreas(view_as<Address>(g_hAreaList.Get(i)), dir, adj);
+			for (int j = 0; j < adj.Length; j++)
+			{
+				IntToString(adj.Get(j), key, sizeof(key));
+				int idx;
+				if (g_hAreaIndex.GetValue(key, idx))
+					nb.Push(idx);
+			}
+		}
+		ArrayList vnb;
+		if (GetVirtualNeighbors(g_hAreaList.Get(i), vnb))
+		{
+			for (int j = 0; j < vnb.Length; j++)
+			{
+				IntToString(vnb.Get(j), key, sizeof(key));
+				int idx;
+				if (g_hAreaIndex.GetValue(key, idx))
+					nb.Push(idx);
+			}
+		}
+		g_hNeighborIdx.Push(nb);
+	}
+	delete adj;
+	delete all;
+}
+
+int AreaToIndex(Address a)
+{
+	char key[16];
+	IntToString(view_as<int>(a), key, sizeof(key));
+	int idx = -1;
+	if (g_hAreaIndex.GetValue(key, idx))
+		return idx;
+	return -1;
+}
+
+// ────────────────────────── fallback 目标：欧氏最远同层 area ──────────────────────────
+// 无出口实体时，目标是"离出生点欧氏最远的同层 area"（迷宫/大图流程终点
+// 通常在几何最远端）。教训：fallback 用 flow 最大点会把玩家引到
+// flow 孤岛（死亡厕所迷宫唯一 flow 区在 z=384 楼上 → 线往天花板画）。
+
+void ComputeFarGoal()
+{
+	g_bFarGoalReady = true;
+	g_FarGoalArea = Address_Null;
+
+	// 基准 = 所有 PLAYER_START area 的平均位置（地图固定基准，不随玩家漂移）
+	ArrayList all = new ArrayList();
+	L4D_GetAllNavAreas(all);
+	float base[3], bsum[3];
+	int bcount = 0;
+	for (int i = 0; i < all.Length; i++)
+	{
+		Address a = view_as<Address>(all.Get(i));
+		if (L4D_GetNavArea_SpawnAttributes(a) & NAV_SPAWN_PLAYER_START)
+		{
+			float c[3];
+			L4D_GetNavAreaCenter(a, c);
+			bsum[0] += c[0]; bsum[1] += c[1]; bsum[2] += c[2];
+			bcount++;
+		}
+	}
+	if (bcount == 0)
+	{
+		delete all;
+		return;
+	}
+	for (int k = 0; k < 3; k++)
+		base[k] = bsum[k] / bcount;
+
+	// 同层（相对基准 ±150u）+ 欧氏最远
+	float bestD = -1.0;
+	for (int i = 0; i < all.Length; i++)
+	{
+		float c[3];
+		L4D_GetNavAreaCenter(view_as<Address>(all.Get(i)), c);
+		if (FloatAbs(c[2] - base[2]) > 150.0)
+			continue;
+		float d = GetVectorDistance(base, c, false);
+		if (d > bestD)
+		{
+			bestD = d;
+			g_FarGoalArea = view_as<Address>(all.Get(i));
+		}
+	}
+	delete all;
+	LogMessage("[PTG] farGoal dist=%.0f", bestD);
+}
+
+// ────────────────────────── 虚拟边构建（补 nav 缺失连接） ──────────────────────────
+// 大量三方图的 nav 没记录"门洞/机关通道"连接（玩家实际能走，nav 显示孤岛，
+// 死亡厕所迷宫验证：261 次测试找到 74 条地面 LOS 通道，28 岛→21 岛）。
+// 策略：4 向连通组件间，距离 <400u + 高度差 <90u + 地面视线(+30u，实体放行
+// =门也算通) 的 area 对 → 双向注册虚拟边。BFS 时 4 向 + 虚拟边一起搜。
+// OnMapStart 一次性构建缓存；渲染时每段 LOS 验证（直的绿线，转弯标红）。
+
+void BuildVirtualEdges()
+{
+	if (g_bVirtualBuilt)
+		return;
+	g_bVirtualBuilt = true;
+	if (g_hVirtualEdges != null)
+		delete g_hVirtualEdges;
+	g_hVirtualEdges = new StringMap();
+
+	float t0 = GetEngineTime();
+	ArrayList all = new ArrayList();
+	L4D_GetAllNavAreas(all);
+	int n = all.Length;
+	if (n == 0)
+	{
+		delete all;
+		return;
+	}
+
+	// 1. 4 向连通组件（同组件内部 4 向已连，虚拟边只跨组件）
+	StringMap compId = new StringMap();
+	ArrayList compSize = new ArrayList();
+	char key[16];
+	for (int i = 0; i < n; i++)
+	{
+		IntToString(all.Get(i), key, sizeof(key));
+		if (compId.ContainsKey(key)) continue;
+		int cid = compSize.Length;
+		compSize.Push(0);
+		ArrayList queue = new ArrayList();
+		queue.Push(all.Get(i));
+		compId.SetValue(key, cid);
+		int head = 0;
+		while (head < queue.Length)
+		{
+			int areaInt = queue.Get(head);
+			head++;
+			compSize.Set(cid, compSize.Get(cid) + 1);
+			ArrayList adj = new ArrayList();
+			for (int dir = 0; dir < 4; dir++)
+			{
+				adj.Clear();
+				L4D_NavArea_GetAdjacentAreas(view_as<Address>(areaInt), dir, adj);
+				for (int j = 0; j < adj.Length; j++)
+				{
+					int aInt = adj.Get(j);
+					IntToString(aInt, key, sizeof(key));
+					if (!compId.ContainsKey(key))
+					{
+						compId.SetValue(key, cid);
+						queue.Push(aInt);
+					}
+				}
+			}
+			delete adj;
+		}
+		delete queue;
+	}
+
+	// 2. 128u 网格桶预筛（只测近邻 area 对）
+	StringMap grid = new StringMap();
+	float center[3];
+	for (int i = 0; i < n; i++)
+	{
+		L4D_GetNavAreaCenter(view_as<Address>(all.Get(i)), center);
+		char gkey[32];
+		Format(gkey, sizeof(gkey), "%d_%d",
+			RoundToFloor(center[0] / 128.0), RoundToFloor(center[1] / 128.0));
+		ArrayList bucket;
+		if (!grid.GetValue(gkey, bucket))
+		{
+			bucket = new ArrayList();
+			grid.SetValue(gkey, bucket);
+		}
+		bucket.Push(all.Get(i));
+	}
+
+	// 3. 跨组件近邻对 → 地面 LOS → 双向注册虚拟边
+	int edges = 0;
+	StringMapSnapshot snap = grid.Snapshot();
+	for (int bi = 0; bi < snap.Length; bi++)
+	{
+		char gkey[64];
+		snap.GetKey(bi, gkey, sizeof(gkey));
+		ArrayList bucketA;
+		if (!grid.GetValue(gkey, bucketA)) continue;
+
+		char parts[2][16];
+		ExplodeString(gkey, "_", parts, 2, 16);
+		int gx = StringToInt(parts[0]);
+		int gy = StringToInt(parts[1]);
+		for (int dx = -1; dx <= 1; dx++)
+		{
+			for (int dy = -1; dy <= 1; dy++)
+			{
+				char nkey[32];
+				Format(nkey, sizeof(nkey), "%d_%d", gx + dx, gy + dy);
+				ArrayList bucketB;
+				if (!grid.GetValue(nkey, bucketB)) continue;
+
+				for (int i = 0; i < bucketA.Length; i++)
+				{
+					int aInt = bucketA.Get(i);
+					for (int j = (bucketA == bucketB) ? i + 1 : 0; j < bucketB.Length; j++)
+					{
+						int bInt = bucketB.Get(j);
+						if (aInt == bInt) continue;
+						IntToString(aInt, key, sizeof(key));
+						int cida;
+						if (!compId.GetValue(key, cida)) continue;
+						IntToString(bInt, key, sizeof(key));
+						int cidb;
+						if (!compId.GetValue(key, cidb)) continue;
+						if (cida == cidb) continue;   // 同组件内部不补
+
+						float pa[3], pb[3];
+						L4D_GetNavAreaCenter(view_as<Address>(aInt), pa);
+						L4D_GetNavAreaCenter(view_as<Address>(bInt), pb);
+						if (GetVectorDistance(pa, pb, false) > 400.0) continue;
+						if (FloatAbs(pa[2] - pb[2]) > 90.0) continue;
+
+						float ta[3], tb[3];
+						ta = pa; ta[2] += 30.0;
+						tb = pb; tb[2] += 30.0;
+						TR_TraceRayFilter(ta, tb, MASK_SOLID, RayType_EndPoint, TraceFilterWorldOnly);
+						if (TR_DidHit()) continue;
+
+						RegisterVirtualEdge(aInt, bInt);
+						RegisterVirtualEdge(bInt, aInt);
+						edges++;
+					}
+				}
+			}
+		}
+	}
+	delete snap;
+
+	// 清理网格桶
+	snap = grid.Snapshot();
+	for (int i = 0; i < snap.Length; i++)
+	{
+		char gkey[64];
+		snap.GetKey(i, gkey, sizeof(gkey));
+		ArrayList bucket;
+		if (grid.GetValue(gkey, bucket)) delete bucket;
+	}
+	delete snap;
+	delete grid;
+	delete compSize;
+	delete compId;
+	delete all;
+
+	// 实体桥：门/可炸墙 = nav 作者故意不连的通道（交互后才通）→ 补连接。
+	// 位置用 brush bounds 中心（brush origin 恒 0 不可用）。
+	g_iEntityBridges = BuildEntityBridges();
+
+	LogMessage("[PTG] virtual edges=%d (los=%d entity=%d) areas=%d time=%.1fms", edges + g_iEntityBridges, edges, g_iEntityBridges, n, (GetEngineTime() - t0) * 1000.0);
+}
+
+// ────────────────────────── 实体桥（门/可炸墙） ──────────────────────────
+// 死亡厕所迷宫验证：nav 孤岛间的真实通道是 func_breakable（炸墙）、
+// prop_door_rotating/func_door（门）——nav 作者没画连接，但实体表里有。
+// 做法：实体中心 ± 垂直门面方向 70u → 两侧各取最近同层 nav area → 配对注册。
+// 返回注册的边数。
+
+int BuildEntityBridges()
+{
+	int edges = 0;
+	ArrayList used = new ArrayList();   // 已处理的实体（防 func_door_rotating 与 prop 重复）
+
+	// 门类：prop_door_rotating / func_door / func_door_rotating
+	char doorClasses[3][24] = { "prop_door_rotating", "func_door", "func_door_rotating" };
+	for (int ci = 0; ci < 3; ci++)
+	{
+		int ent = -1;
+		while ((ent = FindEntityByClassname(ent, doorClasses[ci])) != -1)
+		{
+			if (used.FindValue(ent) != -1) continue;
+			used.Push(ent);
+			if (BridgeEntitySides(ent, true))
+				edges++;
+		}
+	}
+
+	// 可炸墙：func_breakable（还有可打碎的 func_breakable 装饰——两侧配对无害，
+	// 打碎即可通行，符合逻辑）
+	int ent = -1;
+	while ((ent = FindEntityByClassname(ent, "func_breakable")) != -1)
+	{
+		if (used.FindValue(ent) != -1) continue;
+		used.Push(ent);
+		if (BridgeEntitySides(ent, false))
+			edges++;
+	}
+
+	delete used;
+	return edges;
+}
+
+// 单个实体两侧配对；返回是否注册了边
+bool BridgeEntitySides(int ent, bool useYaw)
+{
+	// 中心 = origin + (mins+maxs)/2（brush 的 origin 恒 0，mins/maxs 是世界坐标；
+	// prop 的 mins/maxs 相对 origin —— 统一公式两者都对）
+	float origin[3], mins[3], maxs[3], center[3];
+	GetEntPropVector(ent, Prop_Send, "m_vecOrigin", origin);
+	GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
+	GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
+	for (int k = 0; k < 3; k++)
+		center[k] = origin[k] + (mins[k] + maxs[k]) * 0.5;
+
+	// 两侧方向：默认 ±X；有朝向（门）则用垂直门面的方向
+	float sx = 1.0, sy = 0.0;
+	if (useYaw)
+	{
+		float ang[3];
+		GetEntPropVector(ent, Prop_Data, "m_angRotation", ang);
+		float yaw = ang[1] * 0.0174533;   // deg → rad
+		// L4D2: fwd = (Sine(yaw), -Cosine(yaw))；side 垂直 fwd
+		float fx = Sine(yaw), fy = -Cosine(yaw);
+		sx = -fy;
+		sy = fx;
+	}
+
+	float p1[3], p2[3];
+	p1 = center; p2 = center;
+	p1[0] += sx * 70.0; p1[1] += sy * 70.0;
+	p2[0] -= sx * 70.0; p2[1] -= sy * 70.0;
+
+	Address a1 = GetSameFloorArea(p1);
+	Address a2 = GetSameFloorArea(p2);
+	if (a1 == Address_Null || a2 == Address_Null || a1 == a2)
+		return false;
+
+	RegisterVirtualEdge(view_as<int>(a1), view_as<int>(a2));
+	RegisterVirtualEdge(view_as<int>(a2), view_as<int>(a1));
+	return true;
+}
+
+// 取最近同层 nav area（Z 差 <=150u）
+Address GetSameFloorArea(const float pos[3])
+{
+	Address a = L4D_GetNearestNavArea(pos, 300.0, false, false, false, TEAM_SURVIVOR);
+	if (a == Address_Null)
+		return Address_Null;
+	float c[3];
+	L4D_GetNavAreaCenter(a, c);
+	if (FloatAbs(c[2] - pos[2]) > 150.0)
+		return Address_Null;
+	return a;
+}
+
+void RegisterVirtualEdge(int a, int b)
+{
+	char key[16];
+	IntToString(a, key, sizeof(key));
+	ArrayList list;
+	if (!g_hVirtualEdges.GetValue(key, list))
+	{
+		list = new ArrayList();
+		g_hVirtualEdges.SetValue(key, list);
+	}
+	list.Push(b);
+}
+
+// 查询 area 的虚拟邻居（无则返回空 list）
+bool GetVirtualNeighbors(int areaInt, ArrayList &out)
+{
+	char key[16];
+	IntToString(areaInt, key, sizeof(key));
+	return g_hVirtualEdges.GetValue(key, out);
+}
+
+// ────────────────────────── 出口目标实体 ──────────────────────────
+// flow 递增方向 = "离出生点弧长更远"，在绕行结构地图（如 c2m3 过山车轨道）
+// 上弧长最大点是轨道中段而非出口 → 线指向天花板。
+// 正确目标 = 地图出口实体位置（章节出口 trigger / finale 救援区）。
+// 找不到出口实体（部分三方图）→ fallback 到 flow 最大（旧行为）。
+
+void FindGoalEntity()
+{
+	g_bHasGoal = false;
+	float pos[3];
+
+	// L4D2 章节出口：script_changelevel（玩家走过安全门触发切图）
+	int ent = -1;
+	while ((ent = FindEntityByClassname(ent, "script_changelevel")) != -1)
+	{
+		GetEntPropVector(ent, Prop_Send, "m_vecOrigin", pos);
+		if (pos[0] != 0.0 || pos[1] != 0.0 || pos[2] != 0.0)
+		{
+			g_fGoalPos = pos;
+			g_bHasGoal = true;
+			LogMessage("[PTG] goal=script_changelevel pos=(%.0f %.0f %.0f)", pos[0], pos[1], pos[2]);
+			return;
+		}
+	}
+
+	// 老式章节出口 trigger
+	ent = -1;
+	while ((ent = FindEntityByClassname(ent, "trigger_changelevel")) != -1)
+	{
+		GetEntPropVector(ent, Prop_Send, "m_vecOrigin", pos);
+		if (pos[0] != 0.0 || pos[1] != 0.0 || pos[2] != 0.0)
+		{
+			g_fGoalPos = pos;
+			g_bHasGoal = true;
+			LogMessage("[PTG] goal=trigger_changelevel pos=(%.0f %.0f %.0f)", pos[0], pos[1], pos[2]);
+			return;
+		}
+	}
+
+	// finale 救援区（救援车位置已在梯度判定中用 RESCUE_VEHICLE 属性覆盖，
+	// 此处兜底 trigger_finale）
+	ent = -1;
+	while ((ent = FindEntityByClassname(ent, "trigger_finale")) != -1)
+	{
+		GetEntPropVector(ent, Prop_Send, "m_vecOrigin", pos);
+		if (pos[0] != 0.0 || pos[1] != 0.0 || pos[2] != 0.0)
+		{
+			g_fGoalPos = pos;
+			g_bHasGoal = true;
+			LogMessage("[PTG] goal=trigger_finale pos=(%.0f %.0f %.0f)", pos[0], pos[1], pos[2]);
+			return;
+		}
+	}
 }
 
 public void OnPluginEnd()
 {
-    Guide_Cleanup();
-    guide_prep = false;
-    g_iPrepStage = STAGE_NONE;
-    delete g_hReconnectToggle;
+	if (g_hToggleTimer != null)
+	{
+		KillTimer(g_hToggleTimer);
+		g_hToggleTimer = null;
+	}
 }
 
-// --- Auto-Guide System (Overwatch-style pulse beacon) ---
-
-Action Timer_AutoCheck(Handle timer)
+public void OnMapEnd()
 {
-    // Always reschedule (recursive one-shot — TIMER_REPEAT won't fire on empty servers)
-    g_hAutoCheckTimer = CreateTimer(2.0, Timer_AutoCheck, _, TIMER_FLAG_NO_MAPCHANGE);
-
-    // v4.6 watchdog: stage-level progress detection. OnFramePrep refreshes
-    // g_fLastPrepProgressTime on every frame; if the frame chain stalls for
-    // >PREP_STALL_SECONDS (lost RequestFrame, event race), reset the pipeline.
-    // The prep block below restarts it. Does NOT touch g_bPathDirty — a dirty
-    // rebuild request is still valid and is handled by the dirty block.
-    if (guide_prep && g_fLastPrepProgressTime > 0.0
-        && (GetEngineTime() - g_fLastPrepProgressTime) > PREP_STALL_SECONDS)
-    {
-        LogMessage("[PTG] Watchdog: pipeline stalled (no frame progress for %.0fs, prep started %.1fs ago) — resetting",
-            PREP_STALL_SECONDS, g_fPrepStartTime > 0.0 ? GetEngineTime() - g_fPrepStartTime : 0.0);
-        guide_prep = false;
-        g_iPrepStage = STAGE_NONE;
-        g_fLastPrepProgressTime = 0.0;
-        g_fPrepStartTime = 0.0;
-        timer_nav = null;
-    }
-
-    // Always keep guide prepped in background, even when auto pulse is off.
-    // This way !ptg is instant when a player uses it.
-    if (!guide_ready && !guide_prep && g_iFallbackStage < 2)
-    {
-        // v4.6: backoff gate — maps where every build strategy fails burn CPU
-        // forever in the old loop (standard 2x → fallback 2x → reset → repeat).
-        // After fallback exhausts retries we enter 60s backoff for background
-        // prebuilding only; explicit player requests bypass this gate entirely.
-        if (g_iFallbackStage >= 3)
-        {
-            if (GetEngineTime() < g_fFallbackBackoffUntil)
-                return Plugin_Stop; // still in backoff window — no background work
-            g_iFallbackStage = 0;   // backoff over — retry standard prep
-            g_iFallbackRetries = 0;
-            g_iPrepAttempts = 0;
-        }
-
-        // v4.6: lazy build gate for large maps — count nav areas once (cheap,
-        // µs-level fill) and skip the background prebuild until a player
-        // actually requests the guide. Dirty rebuilds and fallback recovery
-        // below bypass this gate (they are real needs).
-        if (g_hCvarLazyLargeMaps != null && g_hCvarLazyLargeMaps.BoolValue && g_iNavAreaCount < 0 && nav_started)
-        {
-            ArrayList tmp = new ArrayList();
-            L4D_GetAllNavAreas(tmp);
-            g_iNavAreaCount = tmp.Length;
-            delete tmp;
-        }
-        if (g_hCvarLazyLargeMaps != null && g_hCvarLazyLargeMaps.BoolValue
-            && g_iNavAreaCount > LAZY_MAP_THRESHOLD && !g_bLazyBuildRequested)
-        {
-            return Plugin_Stop; // large map, nobody asked — keep CPU idle
-        }
-
-        if (g_iPrepAttempts >= 2 && g_iFallbackStage == 0)
-        {
-            LogMessage("[PTG] Standard prep failed after %d attempts. Trying fallback nav collection...", g_iPrepAttempts);
-            g_iFallbackStage = 1;
-            Guide_Prep_Fallback();
-        }
-        else if (g_iFallbackStage == 0)
-        {
-            g_iPrepAttempts++;
-            Guide_Prep();
-        }
-        return Plugin_Stop;
-    }
-
-    // Fallback pipeline failure recovery: if fallback was attempted (stage==2),
-    // but neither prep nor ready, the pipeline errored out. Retry a few times.
-    if (!guide_ready && !guide_prep && g_iFallbackStage >= 2)
-    {
-        // v4.6 FIX: honor the 60s backoff here too. The backoff gate above
-        // only guards the `stage < 2` block, but stage==3 (backoff) also
-        // matches `>= 2` — and g_iFallbackRetries was reset to 0 on entry,
-        // so the retry fired every 2s forever, defeating the backoff and
-        // hammering unbuildable maps (e.g. tumtara ships without a nav mesh).
-        if (g_iFallbackStage >= 3)
-        {
-            if (GetEngineTime() < g_fFallbackBackoffUntil)
-                return Plugin_Stop; // still in backoff window — no background work
-            g_iFallbackStage = 0;   // backoff over — retry standard prep next tick
-            g_iFallbackRetries = 0;
-            g_iPrepAttempts = 0;
-            return Plugin_Stop;
-        }
-        if (g_iFallbackRetries < MAX_FALLBACK_RETRIES)
-        {
-            g_iFallbackRetries++;
-            LogMessage("[PTG] Fallback pipeline failed, retry %d/%d...", g_iFallbackRetries, MAX_FALLBACK_RETRIES);
-            g_iFallbackStage = 1;
-            g_iPrepAttempts = 0;
-            Guide_Prep_Fallback();
-        }
-        else
-        {
-            // v4.6: give up on fallback AND stop hammering standard prep.
-            // 60s backoff — map may be inherently unbuildable (broken nav,
-            // no flow data, unreachable goal). Player requests still work:
-            // CmdRequestGuide → Guide_Prep() bypasses Timer_AutoCheck.
-            LogMessage("[PTG] Fallback exhausted retries. Entering 60s backoff.");
-            g_iFallbackStage = 3;
-            g_iFallbackRetries = 0;
-            g_iPrepAttempts = 0;
-            g_fFallbackBackoffUntil = GetEngineTime() + 60.0;
-        }
-        return Plugin_Stop;
-    }
-
-    // v4.2: Dirty path rebuild — NavChanged(true) flagged the path as stale
-    // (blocked cells detected by PathIntegrityCheck or nav_blocked events).
-    // Now it's safe to tear down the old path and rebuild in the background.
-    // We delay the rebuild to this timer tick so toggled clients continue to see
-    // the old (slightly stale) path rather than nothing at all.
-    // This fires regardless of auto pulse mode — manual toggle clients also
-    // need their path rebuilt when it goes stale.
-    // v4.6: condition relaxed from guide_ready && ... — NavChanged(true) can
-    // now fire while guide_ready is false (round_start_post_nav soft-dirty).
-    // Cleanup only when a path actually exists to tear down.
-    if (g_bPathDirty && !guide_prep)
-    {
-        LogMessage("[PTG] Rebuilding dirty path (%d cells, auto=%d)%s",
-            g_GuideCells != null ? g_GuideCells.Length : 0,
-            g_hCvarAutoEnable.BoolValue,
-            g_bForceFullRebuild ? " — FULL (nav data changed)" : "");
-        g_bPathDirty = false;
-        // v4.8: soft rebuild — reuse node index + portal cache unless the
-        // nav mesh itself changed (evtPostNav set g_bForceFullRebuild).
-        Guide_Prep(true);
-    }
-
-    // Auto pulse mode (only when cvar enabled)
-    if (!g_hCvarAutoEnable.BoolValue) return Plugin_Stop;
-
-    if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
-    {
-        if (g_hAutoTimer == null)
-        {
-            LogMessage("[PTG] Guide ready (%d cells), starting pulse timer every %.0fs, duration %.0fs",
-                g_GuideCells.Length, g_hCvarAutoInterval.FloatValue, g_hCvarAutoDuration.FloatValue);
-            g_hAutoTimer = CreateTimer(g_hCvarAutoInterval.FloatValue, Timer_AutoGuidePulse, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
-            AutoGuideDrawPath();
-        }
-        g_iPrepAttempts = 0;
-        g_iFallbackStage = 0;
-        g_iFallbackRetries = 0;
-        g_fFallbackBackoffUntil = 0.0;
-    }
-
-    // --- Path integrity poll: check every 6s (every 3rd 2s tick) ---
-    // Detects blocked path areas that didn't fire nav_blocked events
-    // (prop physics, dynamic obstacles, etc.)
-    {
-        static int integrityTick = 0;
-        integrityTick++;
-        if (integrityTick >= 3 && blocked_available)
-        {
-            integrityTick = 0;
-            PathIntegrityCheck();
-        }
-    }
-
-    return Plugin_Stop;
+	if (g_hToggleTimer != null)
+	{
+		KillTimer(g_hToggleTimer);
+		g_hToggleTimer = null;
+	}
 }
 
-// Fallback: Use A* over all nav areas (skip ESCAPE_ROUTE requirement).
-// If A* fails, falls through to old flow-sort method as last resort.
-void Guide_Prep_Fallback()
+// ────────────────────────── 双击 toggle ──────────────────────────
+
+Action CmdRequestGuide(int client, int args)
 {
-    if (!enable || !gamemode_guidable || !map_started || !nav_started) return;
+	if (!g_hCvarEnable.BoolValue || client < 1 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client))
+		return Plugin_Handled;
 
-    // v4.6 FIX: fallback jumps into STAGE_ASTAR, skipping the STAGE_PREP
-    // resets — a stale g_iSmoothStep (e.g. 4 from an aborted build) lands
-    // SMOOTH directly on case 4 with a deleted g_GuideCells → Invalid Handle 0.
-    g_iSmoothStep = 0;
-    g_iPostStep = 0;
-    g_iIGStage = 0;
+	// reload 后 OnMapStart 不触发：这里兜底懒初始化（换图也会重建）
+	EnsureInitForCurrentMap();
 
-    // Build A* node index if not already done (may have been built by standard prep)
-    if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
-    {
-        AStar_BuildNodeIndex();
-    }
+	if (!g_bNavReady)
+	{
+		ReplyToCommand(client, "[PTG] 此图无导航数据（nav mesh 缺失），无法指引");
+		return Plugin_Handled;
+	}
+	if (g_fFlowCoverage < 0.2)
+	{
+		// 极低 flow 覆盖 = 谜题/陷阱/特殊机制图（死亡厕所迷宫 6%）。
+		// 有实体桥（门/可炸墙 = 真实交互通道）→ 桥接模式放行，线引导到
+		// 机关/炸墙点，玩家按逻辑推进（用户拍板：迷宫越复杂越需要导航线）。
+		// 无实体桥 → 数据层面无解，禁用。
+		if (g_iEntityBridges == 0)
+		{
+			ReplyToCommand(client, "[PTG] 此图为谜题/陷阱型地图（flow 场仅 %.0f%%），自动导航不可用", g_fFlowCoverage * 100.0);
+			return Plugin_Handled;
+		}
+		PrintToChat(client, "[PTG] \x05谜题图（flow 场 %.0f%%）已启用实体桥模式：线引导至机关/炸墙点，按逻辑推进",
+			g_fFlowCoverage * 100.0);
+	}
 
-    if (g_hAStarNodes == null || g_hAStarNodes.Length <= 1)
-    {
-        LogMessage("[PTG] Fallback failed: A* node index is empty");
-        g_iFallbackStage = 2;
-        return;
-    }
-
-    // Compute max flow — prefer engine value, fall back to per-area scan
-    g_fMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
-    if (g_fMaxFlow <= 0.0)
-    {
-        float maxAreaFlow = 0.0;
-        for (int fi = 0; fi < g_hAStarNodes.Length; fi++)
-        {
-            int areaInt = g_hAStarNodes.Get(fi);
-            float areaFlow = L4D2Direct_GetTerrorNavAreaFlow(view_as<Address>(areaInt));
-            if (areaFlow > maxAreaFlow)
-                maxAreaFlow = areaFlow;
-        }
-        if (maxAreaFlow > 0.0)
-        {
-            g_fMaxFlow = maxAreaFlow;
-            LogMessage("[PTG] Fallback: engine MapMaxFlowDistance was 0, computed from nav areas: %.1f", g_fMaxFlow);
-        }
-        else
-        {
-            // No valid flow data — keep g_fMaxFlow=0 as sentinel for spatial-only A*
-            LogMessage("[PTG] Fallback: no flow data available — using spatial-only A*");
-        }
-    }
-
-    // Track rescue vehicle
-    g_fFlowRescueVehicle = -1.0;
-    g_bFoundRescueVehicle = false;
-    g_aNavRescueVehicle = Address_Null;
-    for (int i = 0; i < g_hAStarNodes.Length; i++)
-    {
-        int areaInt = g_hAStarNodes.Get(i);
-        Address area = view_as<Address>(areaInt);
-        float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
-        int spawnAttrs = L4D_GetNavArea_SpawnAttributes(area);
-
-        if ((spawnAttrs & NAV_SPAWN_RESCUE_VEHICLE) && g_hCvarFinale.IntValue < FINALE_NEVER)
-        {
-            if (flow > g_fFlowRescueVehicle)
-            {
-                g_bFoundRescueVehicle = true;
-                g_fFlowRescueVehicle = flow;
-                g_aNavRescueVehicle = area;
-            }
-        }
-    }
-
-    // Set up rescue vehicle cells
-    delete RescueVehicleCells;
-    RescueVehicleCells = new ArrayList(sizeof(Cell));
-    if (g_bFoundRescueVehicle)
-    {
-        Cell rvc;
-        rvc.navArea = g_aNavRescueVehicle;
-        rvc.flow = g_fFlowRescueVehicle;
-        float rpos[3];
-        L4D_GetNavAreaCenter(g_aNavRescueVehicle, rpos);
-        rpos[2] += 16.0;
-        if (pos_underwater(rpos)) rpos[2] += 16.0;
-        rvc.center = rpos;
-        RescueVehicleCells.PushArray(rvc);
-    }
-
-    finale_stitched = false;
-    finale_backwards = false;
-
-    // Identify start and goal
-    int startIdx = AStar_IdentifyStart();
-    int goalIdx = AStar_IdentifyGoal(startIdx);
-
-    if (startIdx < 0 || goalIdx < 0)
-    {
-        LogMessage("[PTG] Fallback A*: cannot identify start (%d) or goal (%d)", startIdx, goalIdx);
-        g_iFallbackStage = 2;
-        return;
-    }
-
-    g_aAStarStart = g_hAStarNodes.Get(startIdx);
-    g_aAStarGoal = g_hAStarNodes.Get(goalIdx);
-    g_iAStarGoalIndex = goalIdx;
-
-    LogMessage("[PTG] Fallback A*: %d nav areas, start=%d goal=%d",
-        g_hAStarNodes.Length, startIdx, goalIdx);
-
-    // Initialize A* and start search
-    AStar_Init();
-    AStar_SetStart(startIdx);
-    DetectNonMeshConnections_Init();
-
-    // Jump into pipeline at STAGE_ASTAR
-    g_iPrepStage = STAGE_ASTAR;
-    g_iLoop = 0;
-    guide_prep = true;
-    g_iFallbackStage = 2;
-
-    RequestFrame(OnFramePrep, true);
+	// 单击 toggle：输入一次开，再输入一次关
+	g_bGuideToggled[client] = !g_bGuideToggled[client];
+	LogMessage("[PTG] toggle client=%d on=%d laser=%d navReady=%d", client, g_bGuideToggled[client], g_iLaser, g_bNavReady);
+	if (g_bGuideToggled[client])
+		PrintToChat(client, "[PTG] \x05导航线 ON — 沿橙色线走向安全屋/出口");
+	else
+		PrintToChat(client, "[PTG] \x04导航线 OFF");
+	Guide_UpdateRedrawTimer();
+	return Plugin_Handled;
 }
 
-// Wrapper: expose SortFlow from include to our fallback code
-// SortFlow is defined in the include file, called via SortCustom
-// We can't call it directly since it's file-static, but SortCustom with SortFlow works
-// because SortFlow is in scope during compilation (include is inlined)
-
-void AutoGuideDrawPath(int client = -1)
+void Guide_UpdateRedrawTimer()
 {
-    // v4.6: snapshot while REPAIR is rewriting g_GuideCells — Clone() is O(n)
-    // on the 0.3s redraw cadence, trivially cheap; prevents reading arrays
-    // between REPAIR's in-place ShiftUp/SetArray mutations.
-    ArrayList cells = g_GuideCells;
-    ArrayList beams = g_bBeamWalkable;
-    bool snapped = false;
-    if (g_bGuideCellsBusy)
-    {
-        cells = (g_GuideCells != null) ? g_GuideCells.Clone() : null;
-        beams = (g_bBeamWalkable != null) ? g_bBeamWalkable.Clone() : null;
-        snapped = true;
-    }
-    if (cells == null || cells.Length < 2)
-    {
-        if (snapped) { delete cells; delete beams; }
-        return;
-    }
+	bool anyOn = false;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (g_bGuideToggled[i]) { anyOn = true; break; }
+	}
 
-    // Trail: thin, semi-transparent amber — subtle guide that doesn't block the view
-    int color_trail[4]   = {255, 200, 75, 150};
-    // Arrow: brighter, more opaque — direction must be clear
-    int color_chevron[4] = {255, 170, 30, 220};
-
-    float duration = g_hCvarAutoDuration.FloatValue;
-    int laser = g_iLaserWhite;
-    if (laser == 0) laser = g_iLaser;
-    if (laser == 0)
-    {
-        if (snapped) { delete cells; delete beams; }
-        return;
-    }
-
-    int count = cells.Length;
-
-    // v2.2/v4.2: For per-client requests, start drawing from the nearest cell to the player.
-    // This auto-updates as the player moves because the redraw timer fires every 0.6s.
-    // v4.2: Handle dead/spectating/idle players — use observer target position instead
-    // of falling back to index 0 (which draws beams at the map start, invisible to the
-    // dead player's camera following another survivor).
-    // v4.6: dead player NOT observing anyone — anchor to their death position
-    // (within 120s) so the path is visible from where they died. Without a
-    // usable position we deliberately keep startIndex=0 (invisible but harmless)
-    // rather than skipping the draw — skipping would trip the beam health check.
-    int startIndex = 0;
-    if (client > 0 && IsValidClient(client) && !IsFakeClient(client))
-    {
-        float clientPos[3];
-        bool alive = IsPlayerAlive(client);
-        int target = client;
-        bool useDeathPos = false;
-
-        if (!alive)
-        {
-            // Dead/spectating/idle — get the position of who they're watching
-            int observermode = GetEntProp(client, Prop_Send, "m_iObserverMode");
-            if (observermode == 4 || observermode == 5) // in-eye or chase cam
-            {
-                target = GetEntPropEnt(client, Prop_Send, "m_hObserverTarget");
-                if (target < 1 || target > MaxClients || !IsClientInGame(target))
-                    target = client;
-            }
-            else if (g_bHasDeathPos[client] && (GetGameTime() - g_fDeathTime[client]) < 120.0)
-            {
-                useDeathPos = true;
-            }
-        }
-
-        if (alive || target != client || useDeathPos)
-        {
-            if (useDeathPos)
-                clientPos = g_fDeathPos[client]; // v4.6: death position anchor
-            else
-                GetEntPropVector(target, Prop_Send, "m_vecOrigin", clientPos);
-            float bestDist = -1.0;
-            int bestIdx = 0;
-            for (int j = 0; j < count; j++)
-            {
-                Cell cell;
-                cells.GetArray(j, cell, sizeof(Cell));
-                float d = GetVectorDistance(clientPos, cell.center, true); // sq dist
-                if (bestDist < 0.0 || d < bestDist)
-                {
-                    bestDist = d;
-                    bestIdx = j;
-                }
-            }
-            // Start 1-2 cells before nearest so the player can see the immediate next step
-            // Also shows the path behind — important for maps that require backtracking
-            startIndex = bestIdx > 1 ? bestIdx - 2 : 0;
-        }
-    }
-
-    // v4.6: adaptive beam density. Old uniform step=count/32 subsampled long
-    // paths so aggressively on large maps that nothing was visible. Now the
-    // near zone (600u, 1/4 of the beam budget) draws EVERY cell — the player
-    // sees their immediate next steps — and the far zone shares the remaining
-    // budget over the remaining path (step recomputed per draw).
-    int maxBeams = g_hCvarMax.IntValue;
-    float NEAR_RADIUS = 600.0;
-    int nearBudget = (maxBeams > 8) ? maxBeams / 4 : 1;
-    bool inNearZone = true;
-    float distFromStart = 0.0;
-    int step = 1;
-
-    // Trail: thin, close to ground, subtle amber shimmer
-    int trailDrawn = 0;
-    for (int i = startIndex; i < count - 1 && trailDrawn < maxBeams; )
-    {
-        Cell cell1, cell2;
-        cells.GetArray(i, cell1, sizeof(Cell));
-        cells.GetArray(i + 1, cell2, sizeof(Cell));
-
-        if (i > startIndex)
-            distFromStart += GetVectorDistance(cell1.center, cell2.center, false);
-        if (inNearZone && (distFromStart > NEAR_RADIUS || trailDrawn >= nearBudget))
-            inNearZone = false;
-
-        step = 1;
-        if (!inNearZone)
-        {
-            int remaining = (count - 1) - i;
-            int remainingBudget = maxBeams - trailDrawn;
-            if (remainingBudget > 1)
-                step = remaining / remainingBudget;
-            if (step < 1) step = 1;
-        }
-
-        // v2.2: Skip beams blocked by world geometry (hull trace validation).
-        // Doors, breakables, and trigger barriers are entity-based and pass through.
-        // v4.6: draw a proper beacon pillar at the break point (old 28u dot was
-        // invisible in 3D space) so players know the path continues.
-        if (beams != null && i < beams.Length && beams.Get(i) == 0)
-        {
-            Guide_DrawBeaconPillar(cell1.center, client, duration * 0.5, 2.0);
-            trailDrawn++;
-            i += step;
-            continue;
-        }
-
-        float distSq = GetVectorDistance(cell1.center, cell2.center, true);
-        float minDist = g_hCvarBeamMinDist.FloatValue;
-        if (minDist > 0.0 && distSq < minDist * minDist) { i += step; continue; }
-
-        // Skip or bridge beams between cells at drastically different heights.
-        // On multi-floor buildings this prevents confusing diagonal beams through walls.
-        float dz = FloatAbs(cell1.center[2] - cell2.center[2]);
-        float dzMax = g_hCvarGapDzMax.FloatValue;
-        float xyRatio = g_hCvarGapXyRatio.FloatValue;
-        float distXY = GetVectorDistance(cell1.center, cell2.center, false);
-
-        if (dzMax > 0.0 && dz > dzMax && distXY < dz * xyRatio)
-        {
-            // Draw vertical bridge instead of skipping entirely
-            if (g_hCvarGapVertical.BoolValue)
-            {
-                float vpos[3];
-                vpos[0] = cell1.center[0];
-                vpos[1] = cell1.center[1];
-                vpos[2] = cell2.center[2];
-
-                // Vertical segment: thin, cool blue-white tint — lift above floor
-                int color_vert[4] = {200, 220, 255, 180};
-                float ve1[3], ve2[3];
-                ve1 = cell1.center; ve1[2] += 28.0;
-                ve2 = vpos; ve2[2] += 28.0;
-                TE_SetupBeamPoints(ve1, ve2, laser, 0, 0, 0,
-                    duration, 0.3, 3.0, 0, 0.0, color_vert, 0);
-                if (client > 0) TE_SendToClient(client);
-                else TE_SendToAll();
-
-                // Horizontal bridge to next cell
-                float pos1_bridge[3], pos2_bridge[3];
-                pos1_bridge = vpos; pos1_bridge[2] += 28.0;
-                pos2_bridge = cell2.center; pos2_bridge[2] += 28.0;
-                TE_SetupBeamPoints(pos1_bridge, pos2_bridge, laser, 0, 0, 0,
-                    duration, 0.6, 2.0, 0, 0.0, color_trail, 0);
-                if (client > 0) TE_SendToClient(client);
-                else TE_SendToAll();
-                trailDrawn += 2;
-            }
-            i += step;
-            continue;
-        }
-
-        float pos1[3], pos2[3];
-        pos1 = cell1.center; pos1[2] += 28.0;
-        pos2 = cell2.center; pos2[2] += 28.0;
-
-        TE_SetupBeamPoints(pos1, pos2, laser, 0, 0, 0,
-            duration, 0.8, 2.5, 0, 0.0, color_trail, 0);
-        if (client > 0) TE_SendToClient(client);
-        else TE_SendToAll();
-        trailDrawn++;
-        i += step;
-    }
-
-    // Arrows — clear directional indicators, subsampled for dense meshes
-    // v4.6: interval follows the adaptive density (step = last far-zone step)
-    int chevronInterval = 5 * step;
-    if (chevronInterval < 5) chevronInterval = 5;
-    for (int i = startIndex; i < count - 1; i += chevronInterval)
-    {
-        Cell cell1, cell2;
-        cells.GetArray(i, cell1, sizeof(Cell));
-        cells.GetArray(i + 1, cell2, sizeof(Cell));
-
-        float dir[3];
-        SubtractVectors(cell2.center, cell1.center, dir);
-        float dist = GetVectorLength(dir);
-        if (dist < 1.0) continue;
-
-        dir[2] = 0.0;
-        NormalizeVector(dir, dir);
-
-        float perp[3];
-        perp[0] = -dir[1];
-        perp[1] = dir[0];
-        perp[2] = 0.0;
-
-        float tip[3], baseLeft[3], baseRight[3];
-        float arrowLen = 28.0;
-        float halfWidth = 16.0;
-
-        tip[0] = cell1.center[0] + dir[0] * arrowLen;
-        tip[1] = cell1.center[1] + dir[1] * arrowLen;
-        tip[2] = cell1.center[2] + 28.0;
-
-        baseLeft[0] = cell1.center[0] + perp[0] * halfWidth;
-        baseLeft[1] = cell1.center[1] + perp[1] * halfWidth;
-        baseLeft[2] = cell1.center[2] + 28.0;
-
-        baseRight[0] = cell1.center[0] - perp[0] * halfWidth;
-        baseRight[1] = cell1.center[1] - perp[1] * halfWidth;
-        baseRight[2] = cell1.center[2] + 28.0;
-
-        // Left blade
-        TE_SetupBeamPoints(tip, baseLeft, laser, 0, 0, 0,
-            duration, 3.5, 1.0, 0, 0.0, color_chevron, 0);
-        if (client > 0) TE_SendToClient(client);
-        else TE_SendToAll();
-
-        // Right blade
-        TE_SetupBeamPoints(tip, baseRight, laser, 0, 0, 0,
-            duration, 3.5, 1.0, 0, 0.0, color_chevron, 0);
-        if (client > 0) TE_SendToClient(client);
-        else TE_SendToAll();
-    }
-
-    // v4.6: draw REPAIR beacons (unreachable break points) on every redraw
-    Guide_DrawBeacons(client);
-
-    // Warn if beam cap was hit (indicates subsampling may be hiding cells)
-    if (trailDrawn >= maxBeams && count > maxBeams)
-    {
-        LogMessage("[PTG] Beam cap reached: %d trails drawn out of %d cells (max %d, step %d). Increase l4d_path_to_goal_max or adjust filter cvars.",
-            trailDrawn, count, maxBeams, step);
-    }
-
-    if (snapped) { delete cells; delete beams; }
+	if (anyOn && g_hToggleTimer == null)
+	{
+		// 递归 one-shot：TIMER_REPEAT 空服不触发（SourceMod bug，v4.5 教训）
+		g_hToggleTimer = CreateTimer(REDRAW_INTERVAL, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
+	}
+	else if (!anyOn && g_hToggleTimer != null)
+	{
+		KillTimer(g_hToggleTimer);
+		g_hToggleTimer = null;
+	}
 }
 
-Action Timer_AutoGuidePulse(Handle timer)
+Action Timer_ToggleRedraw(Handle timer)
 {
-    if (!g_hCvarAutoEnable.BoolValue) { g_hAutoTimer = null; return Plugin_Stop; }
-    if (!guide_ready || g_GuideCells == null || g_GuideCells.Length < 2) return Plugin_Continue;
-    if (!gamemode_guidable || !map_started || !nav_started) return Plugin_Continue;
-    AutoGuideDrawPath();
-    return Plugin_Continue;
+	// 递归 one-shot — 先排下一次再干活
+	g_hToggleTimer = CreateTimer(REDRAW_INTERVAL, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
+
+	bool anyOn = false;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!g_bGuideToggled[i] || !IsClientInGame(i) || IsFakeClient(i))
+			continue;
+		anyOn = true;
+
+		float origin[3];
+		GetClientAbsOrigin(i, origin);
+
+		// 移动 <128u 且缓存有效 → 用缓存路径画线（零路径计算）
+		// 重算节流 ≥0.5s：全图 BFS 成本随图线性增长，快跑也不逐帧算
+		//（大三方图 2 万 areas 单次 BFS 可达百 ms 级，0.3s 逐帧会卡）
+		// 缓存有效性双保险：句柄非 null + 时间戳>0（悬垂句柄 ≠ null 但时间戳永不为负，
+		// 防"某处 delete 未置 null"同类回归——DrawPathList 曾误删缓存引发 788 连环崩）
+		if (g_fPathCacheTime[i] > 0.0 && g_hPathCache[i] != null
+			&& (GetVectorDistance(origin, g_fPathCachePos[i], false) < 128.0
+				|| GetEngineTime() - g_fPathCacheTime[i] < 0.5))
+		{
+			if (GetEngineTime() - g_fLastPathDiag > 5.0)
+			{
+				LogMessage("[PTG] diag cache-hit draw");
+				g_fLastPathDiag = GetEngineTime();
+			}
+			DrawPathList(i, origin, g_hPathCache[i],
+				g_fPathCacheFlow[i], g_iPathCacheAttrs[i], g_AreaPathCacheEnd[i]);
+			continue;
+		}
+
+		// 重算路径并缓存
+		g_fPathCacheTime[i] = GetEngineTime();
+		float endFlow = -1.0;
+		int endAttrs = 0;
+		Address endArea = Address_Null;
+		ArrayList path = FlowPathFrom(origin, endFlow, endAttrs, endArea);
+		if (path != null)
+		{
+			delete g_hPathCache[i];
+			g_hPathCache[i] = path.Clone();
+			g_fPathCachePos[i] = origin;
+			g_fPathCacheFlow[i] = endFlow;
+			g_iPathCacheAttrs[i] = endAttrs;
+			g_AreaPathCacheEnd[i] = endArea;
+		}
+		else if (GetEngineTime() - g_fLastPathDiag > 5.0)
+		{
+			LogMessage("[PTG] diag FlowPathFrom returned NULL");
+			g_fLastPathDiag = GetEngineTime();
+		}
+		DrawPathList(i, origin, path, endFlow, endAttrs, endArea);
+		delete path;
+	}
+
+	if (!anyOn)
+	{
+		g_hToggleTimer = null;
+		return Plugin_Stop;
+	}
+	return Plugin_Continue;
 }
 
-public void OnClientPutInServer(int client)
+// ────────────────────────── 画线 ──────────────────────────
+
+void DrawPathList(int client, const float startPos[3], ArrayList path, float endFlow, int endAttrs, Address endArea)
 {
-    if (!IsValidClient(client) || IsFakeClient(client)) return;
-    beams_cooldown_reset(client,true); // reset cooldown and last request from client
-    g_sCustomKeys[client] = "";
+	if (g_iLaser == 0)
+		return;
+	if (path == null || path.Length < 1)
+		return;
+	// 注意：path 由调用方管理，本函数不 delete（缓存路径复用）
+	LogMessage("[PTG] draw client=%d laser=%d len=%d flow=%.0f attrs=%d pos=(%.0f %.0f %.0f)", client, g_iLaser, path.Length, endFlow, endAttrs, startPos[0], startPos[1], startPos[2]);
+
+	int colorGood[4] = {255, 200, 75, 255};   // amber trail（全不透明，醒目）
+	int colorBad[4]  = {255, 60, 0, 255};     // blocked 段 / 断链 beacon
+	int len = path.Length;
+
+	// 玩家当前位置 → 第一个 path area 的衔接段（无条件画：nav area 可能
+	// 长几十米，玩家在 area 内走动时 line 起点必须贴玩家脚，否则线
+	// 固定在 area 中心不动 — "线停留在原地"教训）
+	float cur[3];
+	cur = startPos;
+	cur[2] += 10.0;   // 地面之上 10u（-13 会埋进地面不可见）
+	float firstC[3];
+	L4D_GetNavAreaCenter(view_as<Address>(path.Get(0)), firstC);
+	firstC[2] += 10.0;
+	// Z 差 >150u 不画衔接段（起点 area 跨层时防竖直线段上天花板）
+	if (GetVectorDistance(cur, firstC, false) > 0.5 && FloatAbs(cur[2] - firstC[2]) <= 150.0)
+		BeamSegment(client, cur, firstC, colorGood);
+
+	// 逐段画线（抽样）：nav-center 连线，LOS 失败用共享边中点修正。
+	// 一次画 300+ 段会塞爆客户端 TE/beam 缓冲，第一批之后全部创建失败
+	// → "线停留在原地"（原版 maxBeams=32 教训）
+	int maxBeams = g_hCvarMax.IntValue;
+	if (maxBeams <= 0) maxBeams = 32;
+	int step = 1;
+	if (len > maxBeams)
+	{
+		step = (len + maxBeams - 1) / maxBeams;
+		if (step < 1) step = 1;
+	}
+
+	// 近段全量画（脚下连续有线），远段抽样（客户端 TE 缓冲上限）
+	// 一次画 300+ 段会塞爆客户端 beam 池 → "线停留在原地"（原版 maxBeams 教训）
+	int nearSegs = 6;
+	int trailDrawn = 0;
+	for (int i = 0; i < len - 1 && trailDrawn < maxBeams; i += (i < nearSegs ? 1 : step))
+	{
+		trailDrawn++;
+		float a[3], b[3];
+		L4D_GetNavAreaCenter(view_as<Address>(path.Get(i)), a);
+		L4D_GetNavAreaCenter(view_as<Address>(path.Get(i + 1)), b);
+		a[2] += 10.0;
+		b[2] += 10.0;
+
+		if (LosClear(a, b))
+		{
+			BeamSegment(client, a, b, colorGood);
+			continue;
+		}
+
+		// 中心连线穿墙 → 共享边中点中转（A→M→B）
+		float mid[3];
+		if (SharedEdgeMidpoint(view_as<Address>(path.Get(i)), view_as<Address>(path.Get(i + 1)), mid))
+		{
+			mid[2] = (a[2] + b[2]) * 0.5;
+			if (LosClear(a, mid) && LosClear(mid, b))
+			{
+				BeamSegment(client, a, mid, colorGood);
+				BeamSegment(client, mid, b, colorGood);
+				continue;
+			}
+		}
+
+		// 修正失败：标红（路径完整可见，玩家知道此段异常）
+		BeamSegment(client, a, b, colorBad);
+	}
+
+	// 终点 beacon：到达出口竖绿线；断链（死路/机关）竖红线
+	// 判定：救援车 / 到达出口实体 / fallback flow 最大
+	bool reached = (endAttrs & NAV_SPAWN_RESCUE_VEHICLE) ? true : false;
+	if (!reached && g_GoalArea != Address_Null)
+		reached = (endArea == g_GoalArea) ? true : false;
+	if (!reached && g_GoalArea == Address_Null
+		&& g_fMapMaxFlow < FALLBACK_MAXFLOW && endFlow >= g_fMapMaxFlow * 0.95)
+		reached = true;
+	float endC[3];
+	L4D_GetNavAreaCenter(endArea, endC);
+	endC[2] += 10.0;
+	float top[3];
+	top = endC;
+	top[2] += 200.0;
+	BeamSegment(client, endC, top, reached ? colorGood : colorBad);
+	// ⚠️ 不 delete path！调用方管理（缓存分支复用 g_hPathCache，重算分支 771 释放）。
+	// 曾在此 delete → 缓存句柄悬垂 → 第二次画线起 Timer 每 0.3s 崩（error 3）→ 线消失。
 }
 
-// v4.2: Restore guide toggle state for players who rejoin after disconnecting.
-// OnClientPostAdminCheck fires after Steam auth is complete, so GetClientAuthId
-// returns a valid SteamID. OnClientPutInServer is too early for auth.
-public void OnClientPostAdminCheck(int client)
+void BeamSegment(int client, const float p1[3], const float p2[3], const int color[4])
 {
-    if (!IsValidClient(client) || IsFakeClient(client)) return;
-
-    char auth[64];
-    if (GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
-    {
-        int toggleVal;
-        if (g_hReconnectToggle.GetValue(auth, toggleVal) && toggleVal == 1)
-        {
-            g_hReconnectToggle.Remove(auth); // consume — don't reapply on further callbacks
-            g_bGuideToggled[client] = true;
-            Guide_UpdateRedrawTimer();
-
-            // Immediate draw if path is ready; otherwise queue a rebuild
-            if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
-            {
-                AutoGuideDrawPath(client);
-            }
-            else if (!guide_prep && !g_bPathDirty)
-            {
-                Guide_Prep();
-            }
-        }
-    }
+	// beam 寿命必须与重画节奏匹配（~1s）：寿命过长旧位置的线残留叠加，
+	// 看起来"线固定原处不跟随"（10s 寿命的教训）
+	float life = g_hCvarDuration.FloatValue;
+	if (life <= 0.0) life = 1.0;
+	TE_SetupBeamPoints(p1, p2, g_iLaser, 0, 0, 0, life, 1.0, 3.0, 0, 0.0, color, 0);
+	if (client > 0 && IsClientInGame(client))
+		TE_SendToClient(client);
+	else
+		TE_SendToAll();
 }
 
-void evtFirstSpawn(Event event, const char[] name, bool dontBroadcast)
+// ────────────────────────── 核心：flow 梯度上升 ──────────────────────────
+
+ArrayList FlowPathFrom(const float pos[3], float &endFlow, int &endAttrs, Address &endArea)
 {
-    if (event == null) return;
-    int userid = event.GetInt("userid");
-    if (userid <= 0) return;
-    // Delay bind until after client config.cfg has executed (~5s after first spawn)
-    CreateTimer(5.0, Timer_FirstSpawnBind, userid, TIMER_FLAG_NO_MAPCHANGE);
+	// 懒初始化兜底（reload/换图后首次画线）
+	EnsureInitForCurrentMap();
+
+	// 懒初始化地图 flow 上限
+	if (g_fMapMaxFlow <= 0.0)
+	{
+		g_fMapMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
+		if (g_fMapMaxFlow <= 0.0)
+			g_fMapMaxFlow = FALLBACK_MAXFLOW;
+	}
+
+	ArrayList path = new ArrayList();
+	// 起点选择：同层优先逐级放大 + Z 差 150u 硬过滤 + 邻居检查。
+	// 教训1：anyZ=true 会把起点捞到楼上 area（死亡厕所迷宫 z=16 玩家 → z=384
+	//   楼上 area，500u 垂直距离内）→ 衔接段竖直画向天花板
+	// 教训2：迷宫图出生点可能是"零邻居孤岛 area"（nav 存在但无连接）→
+	//   BFS 可达集=1 → 无解。起点必须是有邻居的 area（孤岛 area 跳过）
+	Address start = Address_Null;
+	for (int range = 500; range <= 2000 && start == Address_Null; range *= 2)
+	{
+		Address cand = L4D_GetNearestNavArea(pos, float(range), false, false, false, TEAM_SURVIVOR);
+		if (cand == Address_Null)
+			continue;
+		float c[3];
+		L4D_GetNavAreaCenter(cand, c);
+		if (FloatAbs(c[2] - pos[2]) > 150.0)
+			continue;
+		// 孤岛 area（无 4 向/虚拟邻居）跳过——无路可走
+		if (g_bNavTableReady)
+		{
+			int idx = AreaToIndex(cand);
+			if (idx < 0 || view_as<ArrayList>(g_hNeighborIdx.Get(idx)).Length == 0)
+				continue;
+		}
+		start = cand;
+	}
+	if (start == Address_Null)
+	{
+		// 跨层兜底（电梯井/特殊位置）：anyZ=true 且 Z 差放宽
+		start = L4D_GetNearestNavArea(pos, 500.0, true, false, false, TEAM_SURVIVOR);
+	}
+	if (start == Address_Null)
+	{
+		delete path;
+		return null;
+	}
+
+	// 目标 area：出口实体优先；无实体 → 欧氏最远同层 area（流程终点方向）。
+	// 教训：fallback 用 flow 最大点会把玩家引到 flow 孤岛（迷宫图唯一 flow
+	// 区在楼上 → 线往天花板画）
+	Address goalArea = Address_Null;
+	float goalFlow = -1.0;
+	if (g_bHasGoal)
+	{
+		goalArea = L4D_GetNearestNavArea(g_fGoalPos, 1000.0, true, false, false, TEAM_SURVIVOR);
+		if (goalArea != Address_Null)
+			goalFlow = L4D2Direct_GetTerrorNavAreaFlow(goalArea);
+	}
+	else if (g_bFarGoalReady)
+	{
+		goalArea = g_FarGoalArea;
+	}
+	g_GoalArea = goalArea;
+
+	Address cur = start;
+	float curFlow = L4D2Direct_GetTerrorNavAreaFlow(cur);
+	int guard = 0;
+	int bridges = 0;
+	ArrayList adj = new ArrayList();
+
+	// 混合主循环：梯度上升为主；梯度卡住（无更大 flow 邻居/无 flow）时
+	// BFS 桥接（4 向 + 虚拟边）跳到"有 flow 的 area"或目标 area，继续梯度
+	while (guard < MAX_STEPS)
+	{
+		guard++;
+		path.Push(view_as<int>(cur));
+
+		endAttrs = L4D_GetNavArea_SpawnAttributes(cur);
+		if (endAttrs & NAV_SPAWN_RESCUE_VEHICLE)
+			break;   // 到达救援车
+		if (goalArea != Address_Null && cur == goalArea)
+			break;   // 到达出口实体（安全门/切图 trigger 附近）
+		if (curFlow >= 0.0)
+		{
+			if (goalFlow > 0.0 && curFlow >= goalFlow)
+				break;   // flow 已到出口区域（在轨道段时立即断，玩家下车回走）
+			if (goalArea == Address_Null && g_fMapMaxFlow < FALLBACK_MAXFLOW && curFlow >= g_fMapMaxFlow * 0.95)
+				break;   // fallback：无出口实体时用 flow 最大判定
+		}
+
+		// 梯度步（只在有 flow 时）：4 向邻接中 flow 严格递增
+		Address best = Address_Null;
+		float bestFlow = curFlow;
+		if (curFlow >= 0.0)
+		{
+			for (int dir = 0; dir < 4; dir++)
+			{
+				adj.Clear();
+				L4D_NavArea_GetAdjacentAreas(cur, dir, adj);
+				for (int j = 0; j < adj.Length; j++)
+				{
+					Address a = view_as<Address>(adj.Get(j));
+					float f = L4D2Direct_GetTerrorNavAreaFlow(a);
+					if (f >= 0.0 && f > bestFlow)
+					{
+						bestFlow = f;
+						best = a;
+					}
+				}
+			}
+			if (best != Address_Null)
+			{
+				cur = best;
+				curFlow = bestFlow;
+				continue;
+			}
+		}
+
+		// 梯度卡住（局部极大/无 flow）→ 一次 BFS 全图直达。
+		// 根治：BFS 深限 = 全节点数、目标 = goal 直达（或可达集最优），
+		// 且 BFS 后直接结束（不再碎步回来继续 gradient）——每次路径计算
+		// 最多 1 次 BFS，成本与图大小线性，与 flow 场质量解耦。
+		//（c5m3 教训：旧版"第一个 flow 邻居就停"→ 366 次碎步桥接 + guard
+		//  2000 撞顶 → 每帧全图级计算 → 卡顿）
+		ArrayList bridge = new ArrayList();
+		float startZ = 0.0;
+		{
+			float szc[3];
+			L4D_GetNavAreaCenter(cur, szc);
+			startZ = szc[2];
+		}
+		Address next = BfsBridge(cur, curFlow, goalArea, startZ, bridge, false);
+		if (next == Address_Null)
+		{
+			// 正常 BFS 无解 → 降级：画到"可达集最远点"（部分导航）。
+			// 迷宫/孤岛图玩家至少被引导穿过整个可达组件，走到最深处自己推进
+			delete bridge;
+			bridge = new ArrayList();
+			next = BfsBridge(cur, curFlow, goalArea, startZ, bridge, true);
+		}
+		if (next != Address_Null && bridge.Length > 0)
+		{
+			for (int bi = bridge.Length - 1; bi >= 0; bi--)
+				path.Push(bridge.Get(bi));   // bridge 是 目标→起点 反序，反转 push
+			cur = next;
+			curFlow = L4D2Direct_GetTerrorNavAreaFlow(cur);
+			bridges++;
+		}
+		delete bridge;
+		break;   // BFS 已补完全程（goal 直达 / flow 最大 / 最远可达）——循环结束
+	}
+
+	endArea = cur;
+	endFlow = curFlow;
+	int startNb = -1;
+	if (g_bNavTableReady)
+	{
+		int sIdx = AreaToIndex(start);
+		if (sIdx >= 0)
+			startNb = view_as<ArrayList>(g_hNeighborIdx.Get(sIdx)).Length;
+	}
+	// 异常态（len<=3 断链）每次打；正常态 10s 限频（避免每秒 3 条刷屏）
+	if (path.Length <= 3 || GetEngineTime() - g_fLastPathDiag > 10.0)
+	{
+		LogMessage("[PTG] path len=%d bridges=%d guard=%d startNb=%d", path.Length, bridges, guard, startNb);
+		g_fLastPathDiag = GetEngineTime();
+	}
+	delete adj;
+	return path;
 }
 
-void evtPlayerDeath(Event event, const char[] name, bool dontBroadcast)
-{
-    if (event == null) return;
-    int userid = event.GetInt("userid");
-    int client = GetClientOfUserId(userid);
-    if (client < 1 || client > MaxClients) return;
-    if (!IsClientInGame(client) || IsFakeClient(client)) return;
+// ────────────────────────── BFS 桥接 ──────────────────────────
+// 根治版：gradient 卡住时一次 BFS 全图扩展（深限 = 全节点数，无硬性
+// 2000 上限——图多大走多大）。目标优先级：① goalArea（出口实体直达）
+// ② flow 最大可达节点（同层优先，跨层需显著更优防爬楼）
+// ③ fallback 模式：可达集欧氏最远点。返回目标 area；bridgeOut 收集
+// "目标→起点"反序路径（调用方反转 push）。每次路径计算最多调用 1 次
+//（主循环 BFS 后即 break）——成本与图大小线性，不再碎步。
 
-    // v4.6: capture death position — the corpse still exists at event time.
-    // Used by AutoGuideDrawPath for dead non-observing players.
-    GetEntPropVector(client, Prop_Send, "m_vecOrigin", g_fDeathPos[client]);
-    g_fDeathTime[client] = GetGameTime();
-    g_bHasDeathPos[client] = true;
+Address BfsBridge(Address start, float startFlow, Address goalArea, float startZ, ArrayList bridgeOut, bool fallbackMode)
+{
+	// 预构建表未就绪时退化为旧逻辑（防御）
+	if (!g_bNavTableReady)
+		return Address_Null;
+
+	int n = g_hAreaList.Length;
+	int startIdx = AreaToIndex(start);
+	if (startIdx < 0)
+		return Address_Null;
+
+	// visited/parent 用 int 数组（index 直接寻址，零哈希）
+	ArrayList visited = new ArrayList();
+	ArrayList parent = new ArrayList();
+	for (int i = 0; i < n; i++)
+	{
+		visited.Push(0);
+		parent.Push(-1);
+	}
+	visited.Set(startIdx, 1);
+
+	int goalIdx = -1;
+	if (goalArea != Address_Null)
+		goalIdx = AreaToIndex(goalArea);
+
+	float startX = g_hCenterX.Get(startIdx);
+	float startY = g_hCenterY.Get(startIdx);
+
+	// 目标候选：goal 命中；flow 最大可达（同层优先）；fallback 欧氏最远
+	int foundGoal = -1;
+	int bestFlowIdx = -1;
+	float bestFlowV = -1.0;
+	int farthestIdx = -1;
+	float farthestD = -1.0;
+
+	ArrayList queue = new ArrayList();
+	queue.Push(startIdx);
+
+	int head = 0;
+	while (head < queue.Length)   // 全图扩展一次（深限 = 节点数，天然有界）
+	{
+		int curIdx = queue.Get(head);
+		head++;
+
+		// fallback 模式：记录离起点欧氏最远的可达 area
+		if (fallbackMode)
+		{
+			float dx = g_hCenterX.Get(curIdx) - startX;
+			float dy = g_hCenterY.Get(curIdx) - startY;
+			float d = dx * dx + dy * dy;
+			if (d > farthestD)
+			{
+				farthestD = d;
+				farthestIdx = curIdx;
+			}
+		}
+
+		ArrayList nb = g_hNeighborIdx.Get(curIdx);
+		for (int j = 0; j < nb.Length; j++)
+		{
+			int nIdx = nb.Get(j);
+			if (visited.Get(nIdx))
+				continue;
+			visited.Set(nIdx, 1);
+			parent.Set(nIdx, curIdx);
+
+			if (nIdx == goalIdx)
+			{
+				foundGoal = nIdx;
+				break;
+			}
+
+			// flow 最大候选：同层（±150u）直接竞争；跨层需显著更优
+			//（防被楼上 flow 孤岛带走——死亡厕所迷宫 z=384 教训）
+			float f = g_hFlowValues.Get(nIdx);
+			if (f >= 0.0)
+			{
+				if (FloatAbs(g_hCenterZ.Get(nIdx) - startZ) <= 150.0)
+				{
+					if (f > bestFlowV)
+					{
+						bestFlowV = f;
+						bestFlowIdx = nIdx;
+					}
+				}
+				else if (f > bestFlowV + 500.0)
+				{
+					bestFlowV = f;
+					bestFlowIdx = nIdx;
+				}
+			}
+			queue.Push(nIdx);
+		}
+		if (foundGoal != -1)
+			break;
+	}
+
+	// 目标选择：goal → fallback 最远 → flow 最大
+	int target = -1;
+	if (foundGoal != -1)
+		target = foundGoal;
+	else if (fallbackMode && farthestIdx != -1 && farthestIdx != startIdx)
+		target = farthestIdx;
+	else if (bestFlowIdx != -1)
+		target = bestFlowIdx;
+
+	if (target != -1)
+	{
+		// 回溯：目标 → 起点，存入 bridgeOut（areaInt，调用方反转 push）
+		int node = target;
+		int guard = 0;
+		while (node != startIdx && guard <= n)
+		{
+			guard++;
+			bridgeOut.Push(g_hAreaList.Get(node));
+			int p = parent.Get(node);
+			if (p < 0) break;
+			node = p;
+		}
+	}
+
+	delete queue;
+	delete visited;
+	delete parent;
+	if (target == -1)
+		return Address_Null;
+	return view_as<Address>(g_hAreaList.Get(target));
 }
 
-// v4.2: Redraw beams immediately when a player respawns after death or takes over a bot.
-// The redraw timer fires every 0.6s and would eventually pick up the new position,
-// but immediate redraw eliminates the visible gap after respawn.
-void evtPlayerSpawn(Event event, const char[] name, bool dontBroadcast)
-{
-    if (event == null) return;
-    int userid = event.GetInt("userid");
-    int client = GetClientOfUserId(userid);
-    if (client < 1 || client > MaxClients) return;
-    if (!IsClientInGame(client) || IsFakeClient(client)) return;
-    g_bHasDeathPos[client] = false; // v4.6: death position no longer valid after respawn
-    if (!g_bGuideToggled[client]) return;
+// ────────────────────────── 共享边中点 ──────────────────────────
+// 两 4 向相邻 area 的共享边中点：用 center+size 包围盒推算
+// （left4dhooks 无 corner API；不改内存偏移，PTG 时代 Prop_Data 教训）
 
-    if (guide_ready && g_GuideCells != null && g_GuideCells.Length >= 2)
-    {
-        AutoGuideDrawPath(client);
-    }
-    else if (!guide_prep && !g_bPathDirty)
-    {
-        // Path lost while player was dead — try to rebuild
-        Guide_Prep();
-    }
+bool SharedEdgeMidpoint(Address a, Address b, float mid[3])
+{
+	float ca[3], sa[3], cb[3], sb[3];
+	L4D_GetNavAreaCenter(a, ca);
+	L4D_GetNavAreaSize(a, sa);
+	L4D_GetNavAreaCenter(b, cb);
+	L4D_GetNavAreaSize(b, sb);
+
+	// A、B 包围盒
+	float minAx = ca[0] - sa[0] * 0.5, maxAx = ca[0] + sa[0] * 0.5;
+	float minAy = ca[1] - sa[1] * 0.5, maxAy = ca[1] + sa[1] * 0.5;
+	float minBx = cb[0] - sb[0] * 0.5, maxBx = cb[0] + sb[0] * 0.5;
+	float minBy = cb[1] - sb[1] * 0.5, maxBy = cb[1] + sb[1] * 0.5;
+
+	float dx = cb[0] - ca[0];
+	float dy = cb[1] - ca[1];
+	float lo, hi;
+
+	if (FloatAbs(dx) >= FloatAbs(dy))
+	{
+		// 水平相邻：共享边竖直，x = A 朝向 B 的侧边，y = 两盒交集中心
+		mid[0] = ca[0] + (dx > 0.0 ? sa[0] * 0.5 : -sa[0] * 0.5);
+		lo = (minAy > minBy) ? minAy : minBy;
+		hi = (maxAy < maxBy) ? maxAy : maxBy;
+		if (lo > hi)
+			return false;
+		mid[1] = (lo + hi) * 0.5;
+	}
+	else
+	{
+		// 垂直相邻：共享边水平，y = A 朝向 B 的侧边，x = 两盒交集中心
+		mid[1] = ca[1] + (dy > 0.0 ? sa[1] * 0.5 : -sa[1] * 0.5);
+		lo = (minAx > minBx) ? minAx : minBx;
+		hi = (maxAx < maxBx) ? maxAx : maxBx;
+		if (lo > hi)
+			return false;
+		mid[0] = (lo + hi) * 0.5;
+	}
+
+	mid[2] = (ca[2] + cb[2]) * 0.5;
+	return true;
 }
 
-Action Timer_FirstSpawnBind(Handle timer, int userid)
+// ────────────────────────── LOS（世界几何，实体放行） ──────────────────────────
+// 可推开/可撞碎/会动的实体不算墙 — 画线是引导不是碰撞体积
+
+bool LosClear(const float p1[3], const float p2[3])
 {
-    int client = GetClientOfUserId(userid);
-    if (client > 0 && IsClientInGame(client) && !IsFakeClient(client))
-    {
-        ClientCommand(client, "bind m \"say !ptg\"");
-        PrintToChat(client, "\x04[PTG] \x01Press \x05M\x01 or type \x05!ptg\x01 for navigation guide (double-tap to toggle)");
-    }
-    return Plugin_Stop;
+	TR_TraceRayFilter(p1, p2, MASK_SOLID, RayType_EndPoint, TraceFilterWorldOnly);
+	return !TR_DidHit();
 }
 
-// NATIVE //
-
-void Native_RequestGuide(Handle plugin, int numParams)
+public bool TraceFilterWorldOnly(int entity, int contentsMask, any data)
 {
-    if (!enable || !gamemode_guidable || !nav_started || !map_started) return;
-    int client = (numParams>0) ? GetNativeCell(1) : -1;
-    float duration = (numParams>1) ? view_as<float>(GetNativeCell(2)) : 5.0;
-    bool backward = (numParams>2) ? view_as<bool>(GetNativeCell(3)) : false;
-    bool join_client = (numParams>3) ? view_as<bool>(GetNativeCell(4)) : true;
-    RequestGuide(client,duration,backward,join_client);
+	return false;   // 忽略所有实体
 }
