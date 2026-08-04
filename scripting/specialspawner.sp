@@ -48,13 +48,32 @@
 // 实时计算（无 cvar 写入）→ 复活后下一波自动恢复，不存在陈旧值。
 // 强度 ss_incap_compensation [0-1]：1 = 全比例，0 = 关闭，0.5 = 半补偿。
 // si_comp 播报镜像同公式（v2.3.8），改公式必须两处同步。
+// v1.6.0 方向随机化：引擎每次 L4D_GetRandomPZSpawnPosition 调用会读脚本值
+// "PreferredSpecialDirection"（插件在 L4D_OnGetScriptValueInt 拦截返回 g_iDirection）。
+// 旧逻辑普通波次固定 SPAWN_LARGE_VOLUME(9) → 候选点全在队伍正前方锥形区 +
+// 引擎 flow 校验偏前 → 实测"只会正前方"；且前方墙后点 LOS 全灭 → 全走不可见
+// 兜底 → 2026-08-04 单日 210 次处决。v1.6.0：普通波次改 SPAWN_NO_PREFERENCE(-1)
+// → 引擎每次调用随机方向（前/后/上/任意），ss_random_direction 可切回旧行为。
+// v1.7.0 三段定向（单面受敌修复）：队伍拉长时按权重把本波特感分配到
+// 前/中/后三段，每只独立方向+独立参照者——前段 IN_FRONT(7) 拦截、中段
+// NO_PREFERENCE(-1) 侧翼、后段 BEHIND(1) 身后断后。段边界按 flow gap 自然切
+// （蛇形/断裂队伍每段都能吃到特感）。防贴脸不变式：守卫查的是"落点离所有
+// 生还者的地理 3D 距离"（v1.3.8 全队扫描），与参照者/方向无关，段划分只改变
+// 特感出现的方位、不改变离人距离的下限。
 #define SPAWN_GUARD_MAX_TRIES					10
+
+// v1.7.0 波次最大规模（ss_spawn_size 上限 32，留余量给段分配数组）
+#define MAX_WAVE								48
 
 Handle
 	g_hSpawnTimer,
 	g_hRetryTimer,
 	g_hUpdateTimer,
-	g_hSuicideTimer;
+	g_hSuicideTimer,
+	g_hBatchTimer;				// v1.7.0 分批释放续刷 timer
+
+ArrayList
+	g_hBatchQueue;				// v1.7.0 本波类型队列（跨批持有，批间存活）
 
 ConVar
 	g_cSILimit,
@@ -82,7 +101,15 @@ ConVar
 	g_cSpawnRange,
 	g_cDiscardRange,
 	g_cSafeSpawnRange,
-	g_cIncapCompensation;
+	g_cIncapCompensation,
+	g_cRandomDirection,
+	g_cDirFront,
+	g_cDirMid,
+	g_cDirBack,
+	g_cDirSplitSpread,
+	g_cDirSplitGap,
+	g_cWaveSplit,
+	g_cWaveSplitInterval;
 
 float
 	g_fSpawnTimeMin,
@@ -94,7 +121,14 @@ float
 	g_fFirstSpawnTime,
 	g_fSpawnTimes[MAXPLAYERS + 1],
 	g_fActionTimes[MAXPLAYERS + 1],
-	g_fIncapCompensation;
+	g_fIncapCompensation,
+	g_fDirFront,
+	g_fDirMid,
+	g_fDirBack,
+	g_fDirSplitSpread,
+	g_fDirSplitGap,
+	g_fWaveSplitInterval,
+	g_bRandomDirection;
 
 static const char
 	g_sZombieClass[SI_MAX_SIZE][] = {
@@ -151,20 +185,44 @@ int
 	g_iSpawnCounts[SI_MAX_SIZE],
 	g_iBaseLimit,
 	g_iBaseSize,
-	g_iCurrentClass = -1;
+	g_iCurrentClass = -1,
+	g_iWaveSplit,
+	// v1.7.0 三段定向：每只特感的段类型（0=前/1=中/2=后）
+	g_iSegs[MAX_WAVE],
+	// v1.7.0 分批状态（跨 timer 存活）
+	g_iBatchNext,
+	g_iBatchTotal,
+	g_iBatchBatchSize,
+	g_iBatchSuccess,
+	g_iBatchGuardBlocked,
+	g_iBatchGuardVis,
+	g_iBatchGuardInvis,
+	g_iBatchSegA,				// 中段参照子集起点（前段结束处）
+	g_iBatchSegB;				// 后段参照子集起点（最后自然段起点）
 
 bool
 	g_bLateLoad,
 	g_bInSpawnTime,
 	g_bScaleWeights,
 	g_bLeftSafeArea,
-	g_bFinaleStarted;
+	g_bFinaleStarted,
+	// v1.7.0 分批状态
+	g_bBatchSegs,				// 本波是否启用三段定向
+	g_bBatchRetry,				// 本波是否 retry 波（整波零成功时 1s 后重试）
+	g_bBatchFind;				// 本波是否 rusher（跑图）
+
+// v1.7.0 参照者/flow 数组（全局持有——分批跨 timer 续刷需要存活）
+int
+	g_iBatchSurvivors[MAXPLAYERS + 1],
+	g_iBatchSurvivorCount;
+float
+	g_fBatchFlows[MAXPLAYERS + 1];
 
 public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "1.5.0",
+	version = "1.7.0",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -217,6 +275,20 @@ public void OnPluginStart() {
 	// v1.5.0: 倒地补偿强度 [0-1]。1 = 全比例（波次与上限 ×站立/总人数），0 = 关闭，
 	// 0-1 = 线性插值。实时计算，复活后下一波自动恢复。
 	g_cIncapCompensation =			CreateConVar("ss_incap_compensation",	"1.0",						"倒地补偿强度: 刷怪时按站立/总人数比例收缩本波数量与有效上限 [0=关闭|1=全比例]", _, true, 0.0, true, 1.0);
+	// v1.6.0: 普通波次刷怪方向 [1=引擎随机(-1, 各方向随机) | 0=固定大体积(旧行为, 实测全正前方)]
+	g_cRandomDirection =			CreateConVar("ss_random_direction",		"1",						"普通波次刷怪方向: 1=引擎随机(各方向) | 0=固定大体积(旧: 只会正前方)", _, true, 0.0, true, 1.0);
+	// v1.7.0 三段定向刷新（单面受敌修复）：队伍拉长时把本波特感按权重分配到
+	// 前/中/后三段，每只独立方向+独立参照者。前段=正前方拦截(领队压力减半以上)、
+	// 中段=侧翼包抄(中部玩家有目标)、后段=身后断后(尾部玩家被迫参战)。
+	// 段边界按 flow gap 自然切（蛇形/断裂队伍每段都吃特感），权重只决定数量分配。
+	g_cDirFront =					CreateConVar("ss_dir_front",			"40",						"三段定向: 前段(正前方拦截)权重 [%]", _, true, 0.0, true, 100.0);
+	g_cDirMid =						CreateConVar("ss_dir_mid",				"30",						"三段定向: 中段(侧翼随机)权重 [%]", _, true, 0.0, true, 100.0);
+	g_cDirBack =					CreateConVar("ss_dir_back",				"30",						"三段定向: 后段(身后断后)权重 [%]", _, true, 0.0, true, 100.0);
+	g_cDirSplitSpread =				CreateConVar("ss_dir_split_spread",		"400.0",					"三段定向: 队伍前后 flow 总差(单位)低于该值视为紧凑队伍, 不分段保持原逻辑(防贴脸)", _, true, 0.0);
+	g_cDirSplitGap =				CreateConVar("ss_dir_split_gap",			"400.0",					"三段定向: 相邻生还者 flow 差超过该值视为队伍断裂, 段边界在此断开(蛇形/断裂队伍适配)", _, true, 0.0);
+	// v1.7.0 波次分批释放：总数量不变，分 N 批间隔刷出，缓解窄地形一波全堆正面的瞬间压力
+	g_cWaveSplit =					CreateConVar("ss_wave_split",			"2",						"波次分批释放批数 [1=不分批]", _, true, 1.0, true, 4.0);
+	g_cWaveSplitInterval =			CreateConVar("ss_wave_split_interval",	"2.5",						"波次分批释放间隔(秒)", _, true, 0.5, true, 10.0);
 
 	g_cSpawnRange =					FindConVar("z_spawn_range");
 	g_cDiscardRange =				FindConVar("z_discard_range");
@@ -242,6 +314,7 @@ public void OnPluginStart() {
 	g_cRushDistance.AddChangeHook(CvarChanged_General);
 	g_cFirstSpawnTime.AddChangeHook(CvarChanged_General);
 	g_cIncapCompensation.AddChangeHook(CvarChanged_General);
+	g_cRandomDirection.AddChangeHook(CvarChanged_General);
 
 	g_cTankStatusAction.AddChangeHook(CvarChanged_TankStatus);
 	g_cTankStatusLimits.AddChangeHook(CvarChanged_TankCustom);
@@ -273,6 +346,13 @@ public void OnPluginStart() {
 
 public void OnPluginEnd() {
 	TweakSettings(true);
+	// v1.7.0: 清理跨批状态（TIMER_FLAG_NO_MAPCHANGE 会随换图取消，此处兜底）
+	delete g_hBatchTimer;
+	if (g_hBatchQueue) {
+		delete g_hBatchQueue;
+		g_hBatchQueue = null;
+	}
+	g_bInSpawnTime = false;
 }
 
 void TweakSettings(bool restore) {
@@ -718,6 +798,14 @@ void GetCvars_General() {
 	g_fRushDistance =	g_cRushDistance.FloatValue;
 	g_fFirstSpawnTime =	g_cFirstSpawnTime.FloatValue;
 	g_fIncapCompensation = g_cIncapCompensation.FloatValue;
+	g_bRandomDirection = g_cRandomDirection.BoolValue;
+	g_fDirFront = g_cDirFront.FloatValue;
+	g_fDirMid = g_cDirMid.FloatValue;
+	g_fDirBack = g_cDirBack.FloatValue;
+	g_fDirSplitSpread = g_cDirSplitSpread.FloatValue;
+	g_fDirSplitGap = g_cDirSplitGap.FloatValue;
+	g_iWaveSplit = g_cWaveSplit.IntValue;
+	g_fWaveSplitInterval = g_cWaveSplitInterval.FloatValue;
 }
 
 void CvarChanged_TankStatus(ConVar convar, const char[] oldValue, const char[] newValue) {
@@ -800,6 +888,13 @@ public void OnMapEnd() {
 
 	EndSpawnTimer();
 	delete g_hSuicideTimer;
+	// v1.7.0: 清理跨批状态（TIMER_FLAG_NO_MAPCHANGE 会随换图取消，此处兜底）
+	delete g_hBatchTimer;
+	if (g_hBatchQueue) {
+		delete g_hBatchQueue;
+		g_hBatchQueue = null;
+	}
+	g_bInSpawnTime = false;
 	TankStatusActoin(false);
 
 	if (g_iCurrentClass >= SI_MAX_SIZE)
@@ -1140,43 +1235,177 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 		find = true;
 	}
 
-	// v1.3.9: 提前提取存活生还者数组（随机参照用，参照者=引擎生成点的中心）
+	// v1.3.9: 提前提取存活生还者数组（随机参照用，参照者=引擎生成点的中心）。
+	// v1.7.0: 改为全局持有——分批续刷跨 timer 需要参照者/flow 存活。
 	int aLen = aList.Length;
-	int[] survivors = new int[aLen];
-	for (i = 0; i < aLen; i++)
-		survivors[i] = aList.Get(i, 1);
+	g_iBatchSurvivorCount = aLen;
+	for (i = 0; i < aLen; i++) {
+		g_iBatchSurvivors[i] = aList.Get(i, 1);
+		g_fBatchFlows[i] = aList.Get(i, 0);
+	}
 
 	delete aList;
 	g_bInSpawnTime = true;
 	//g_cSpawnRange.IntValue = retry ? 1000 : 1500;
-	g_iDirection = g_bFinaleStarted ? SPAWN_NEAR_IT_VICTIM : (!retry ? SPAWN_NO_PREFERENCE : (!find ? SPAWN_LARGE_VOLUME/*SPAWN_SPECIALS_ANYWHERE*/ : SPAWN_IN_FRONT_OF_SURVIVORS));
 
-	count = 0;
-	find = false;
-	int zombie;
-	float vPos[3];
-	int guardBlocked = 0;
-	int guardFallbackVisible = 0;
-	int guardFallbackInvisible = 0;
+	// v1.7.0 三段定向刷新（单面受敌修复）：队伍拉长时把本波特感按权重分配到
+	// 前/中/后三段（前拦截/中侧翼/后断后），每只独立方向 + 独立参照者：
+	//   前段 = SPAWN_IN_FRONT_OF_SURVIVORS(7)，参照前段成员（正面对手减半以上）
+	//   中段 = SPAWN_NO_PREFERENCE(-1)，参照中部成员（侧翼包抄，中部玩家有目标）
+	//   后段 = SPAWN_BEHIND_SURVIVORS(1)，参照尾部成员（身后断后，尾部玩家参战）
+	// 段边界按 flow gap 自然切（相邻 gap > ss_dir_split_gap 断开）——蛇形环绕/
+	// 断裂队伍每段都能吃到特感，而非机械三等分。防贴脸不受影响：守卫检查落点
+	// 离"所有"生还者的地理 3D 距离（v1.3.8），与参照者/方向无关，段划分只改变
+	// 特感出现的方位、不改变离人距离的下限。
+	// 紧凑队伍（flow 总差 < ss_dir_split_spread）不分段，走 v1.6.0 原逻辑。
+	// 终章（NEAR_IT_VICTIM）不分段，防守场景保持不变。
+	int segA = 0;
+	int segB = 0;
+	bool useSegs = false;
+	if (!g_bFinaleStarted && aLen >= 3 && (flow - lastFlow) >= g_fDirSplitSpread) {
+		useSegs = true;
+		// 自然段划分：segA = 第一处断裂（前段参照子集 [0,segA)），
+		// segB = 最后自然段起点（后段参照子集 [segB,aLen)），中间段们 =
+		// [segA,segB)（侧翼）。无断裂（单段拉长）退化为均匀三分。
+		segA = aLen;
+		int segLastStart = 0;
+		int k = 0;
+		for (i = 1; i < aLen; i++) {
+			if (g_fBatchFlows[i - 1] - g_fBatchFlows[i] > g_fDirSplitGap) {
+				if (segA == aLen)
+					segA = i;			// 第一处断裂 = 前段结束
+				segLastStart = i;
+				k++;
+			}
+		}
+		if (k >= 1) {
+			segB = segLastStart;
+		} else {
+			// 单段拉长：均匀三分
+			segA = aLen / 3;
+			segB = aLen * 2 / 3;
+		}
+		if (segA < 1)
+			segA = 1;
+		if (segB <= segA)
+			segB = segA + 1;
+		if (segB > aLen)
+			segB = aLen;
+
+		// 按权重精确分配各段特感数 + Fisher-Yates 洗牌（比例精确、波内顺序随机）
+		float totalW = g_fDirFront + g_fDirMid + g_fDirBack;
+		if (totalW <= 0.0)
+			totalW = 100.0;
+		int frontN = RoundToNearest(float(spawnSize) * g_fDirFront / totalW);
+		if (frontN > spawnSize)
+			frontN = spawnSize;
+		if (frontN < 0)
+			frontN = 0;
+		int backN = RoundToNearest(float(spawnSize) * g_fDirBack / totalW);
+		if (backN > spawnSize - frontN)
+			backN = spawnSize - frontN;
+		if (backN < 0)
+			backN = 0;
+		int midN = spawnSize - frontN - backN;
+		for (i = 0; i < spawnSize; i++)
+			g_iSegs[i] = (i < frontN) ? 0 : (i < frontN + midN) ? 1 : 2;
+		for (i = spawnSize - 1; i > 0; i--) {
+			int j = GetRandomInt(0, i);
+			int tmp = g_iSegs[i];
+			g_iSegs[i] = g_iSegs[j];
+			g_iSegs[j] = tmp;
+		}
+	}
+
+	// v1.7.0 波次分批释放：总数量不变，分 N 批间隔刷出（缓解窄地形一波全堆
+	// 正面）。批次状态全局持有，续刷走 tmrBatchContinue，收尾统一 FinishWave
+	// （guard 统计跨批累计 + retry 判定 + 队列释放）。
+	g_iBatchSuccess = 0;
+	g_iBatchGuardBlocked = 0;
+	g_iBatchGuardVis = 0;
+	g_iBatchGuardInvis = 0;
+	g_iBatchTotal = spawnSize;
+	g_iBatchNext = 0;
+	g_iBatchSegA = segA;
+	g_iBatchSegB = segB;
+	g_bBatchSegs = useSegs;
+	g_bBatchRetry = retry;
+	g_bBatchFind = find;
+	int batches = g_iWaveSplit;
+	if (batches > spawnSize)
+		batches = spawnSize;
+	if (batches < 1)
+		batches = 1;
+	g_iBatchBatchSize = spawnSize / batches + ((spawnSize % batches) ? 1 : 0);
+
+	g_hBatchQueue = aQueue;
+	SpawnSliced(0, (g_iBatchBatchSize < spawnSize) ? g_iBatchBatchSize : spawnSize);
+
+	#if BENCHMARK
+	g_profiler.Stop();
+	PrintToServer("[SS] ProfilerTime: %f", g_profiler.Time);
+	#endif
+
+	if (g_iBatchNext >= g_iBatchTotal)
+		FinishWave();
+	else
+		g_hBatchTimer = CreateTimer(g_fWaveSplitInterval, tmrBatchContinue, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// v1.7.0: 刷取队列 [from, to) 区间。每只特感按段类型决定方向与参照者子集，
+// 守卫逻辑与 v1.4.0 相同（落点须离所有生还者 ≥guard，分层兜底防饿死）。
+void SpawnSliced(int from, int to) {
 	float guard = g_cSpawnRangeGuard.FloatValue;
 	float guardMin = g_cSpawnRangeGuardMin.FloatValue;
-	for (i = 0; i < spawnSize; i++) {
-		index = aQueue.Get(i) + 1;
-		// v1.4.0 贴脸守卫 v3：v1.3.9 已随机参照者（分散刷），但保底 250 点常在
-		// 队伍侧后方 → 看不见生还者 → m_hasVisibleThreats 恒 false → 25s 自杀
-		// 计时处决（玩家实测"刷新基本都被处决"）。修复：候选点必须 LOS 可见
-		// 至少一个生还者（看得见 → 有威胁 → 不处决，特感立刻投入进攻）。
-		// 分层：≥guard(400) 且可见 > 10 次耗尽取 ≥guard_min(250) 且可见的最佳
-		// > 再兜底 250 不可见（窄室内 AI 可自行转向找人，防饿死）> 跳过。
-		find = false;
+
+	for (int i = from; i < to; i++) {
+		int index = g_hBatchQueue.Get(i) + 1;
+
+		// 段类型 → 方向 + 参照者子集 [refMin, refMax]（闭区间）
+		int dir;
+		int refMin;
+		int refMax;
+		if (g_bFinaleStarted) {
+			dir = SPAWN_NEAR_IT_VICTIM;
+			refMin = 0;
+			refMax = g_iBatchSurvivorCount - 1;
+		} else if (!g_bBatchSegs) {
+			// 紧凑队伍/未分段：v1.6.0 原逻辑
+			dir = g_bBatchRetry ? (g_bBatchFind ? SPAWN_IN_FRONT_OF_SURVIVORS : (g_bRandomDirection ? SPAWN_NO_PREFERENCE : SPAWN_LARGE_VOLUME)) : SPAWN_NO_PREFERENCE;
+			refMin = 0;
+			refMax = g_iBatchSurvivorCount - 1;
+		} else {
+			int seg = g_iSegs[i];
+			if (seg == 0) {
+				dir = SPAWN_IN_FRONT_OF_SURVIVORS;
+				refMin = 0;
+				refMax = g_iBatchSegA - 1;
+			} else if (seg == 1) {
+				dir = SPAWN_NO_PREFERENCE;
+				refMin = g_iBatchSegA;
+				refMax = g_iBatchSegB - 1;
+			} else {
+				dir = SPAWN_BEHIND_SURVIVORS;
+				refMin = g_iBatchSegB;
+				refMax = g_iBatchSurvivorCount - 1;
+			}
+		}
+		g_iDirection = dir;
+
+		// v1.4.0 贴脸守卫 v3：候选点必须 LOS 可见至少一个生还者（看得见 → 有威胁
+		// → 不处决，特感立刻投入进攻）。分层：≥guard(400) 且可见 > 10 次耗尽取
+		// ≥guard_min(250) 且可见的最佳 > 再兜底 250 不可见（窄室内 AI 可自行转向
+		// 找人，防饿死）> 跳过。
+		bool find = false;
 		bool hasBestPos = false;
 		float bestDist = 0.0;
 		float bestPos[3];
 		bool hasBestVisible = false;
 		float bestVisibleDist = 0.0;
 		float bestVisiblePos[3];
+		float vPos[3];
 		for (int tries = 0; tries < SPAWN_GUARD_MAX_TRIES; tries++) {
-			int ref = survivors[GetRandomInt(0, aLen - 1)];
+			int ref = g_iBatchSurvivors[GetRandomInt(refMin, refMax)];
 			if (!L4D_GetRandomPZSpawnPosition(ref, index, 10, vPos))
 				continue;
 			float d = DistanceToNearestSurvivor(vPos);
@@ -1204,7 +1433,7 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 			if (hasBestVisible && guard > 0.0 && guardMin > 0.0 && bestVisibleDist >= guardMin) {
 				vPos = bestVisiblePos;
 				find = true;
-				guardFallbackVisible++;
+				g_iBatchGuardVis++;
 			}
 			// 保底 2：不可见但 ≥guard_min（极窄地形，AI 会自行转向找人）
 			// ⚠️ 残余处决源：不可见点 → m_hasVisibleThreats false → 25s 自杀计时。
@@ -1212,54 +1441,73 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 			else if (hasBestPos && guard > 0.0 && guardMin > 0.0 && bestDist >= guardMin) {
 				vPos = bestPos;
 				find = true;
-				guardFallbackInvisible++;
+				g_iBatchGuardInvis++;
 			}
 			else {
-				guardBlocked++;
+				g_iBatchGuardBlocked++;
 				continue;
 			}
 		}
 
 		vPos[2] += 5.0;
+		int zombie;
 		if ((zombie = L4D2_SpawnSpecial(index, vPos, NULL_VECTOR)) > 0) {
 			SetEntProp(zombie, Prop_Send, "m_bDucked", 1);
 			SetEntityFlags(zombie, GetEntityFlags(zombie)|FL_DUCKING);
-			count++;
+			g_iBatchSuccess++;
 		}
-
 		vPos[2] -= 5.0;
 	}
+	g_iBatchNext = to;
+}
 
-	// v1.3.9: 守卫统计（跳过 / 保底放行，波内有任何拦截才记一条，防日志刷屏）
-	// v1.4.1: fallback 拆 visible/invisible——invisible 是残余处决源，观测用
-	if (guardBlocked || guardFallbackVisible || guardFallbackInvisible) {
-		LogMessage("[SS] spawn guard: %d/%d skipped, %d vis-fb(>=%.0f), %d invis-fb, prefer >=%.0f",
-			guardBlocked, spawnSize, guardFallbackVisible, guardMin, guardFallbackInvisible, guard);
+// v1.7.0: 分批续刷。下一片刷完若仍有剩余继续定时，否则收尾。
+Action tmrBatchContinue(Handle timer) {
+	g_hBatchTimer = null;
+
+	int end = g_iBatchNext + g_iBatchBatchSize;
+	if (end > g_iBatchTotal)
+		end = g_iBatchTotal;
+	SpawnSliced(g_iBatchNext, end);
+
+	if (g_iBatchNext >= g_iBatchTotal)
+		FinishWave();
+	else
+		g_hBatchTimer = CreateTimer(g_fWaveSplitInterval, tmrBatchContinue, _, TIMER_FLAG_NO_MAPCHANGE);
+	return Plugin_Continue;
+}
+
+// v1.7.0: 整波收尾——guard 统计日志（跨批累计）、刷怪窗口关闭、retry 判定、
+// 队列释放。
+void FinishWave() {
+	// v1.3.9/v1.4.1: 守卫统计（跳过 / 保底放行，波内有任何拦截才记一条，防日志刷屏）
+	if (g_iBatchGuardBlocked || g_iBatchGuardVis || g_iBatchGuardInvis) {
+		LogMessage("[SS] spawn guard: %d/%d skipped, %d vis-fb(>=%.0f), %d invis-fb, prefer >=%.0f, dir=%d",
+			g_iBatchGuardBlocked, g_iBatchTotal, g_iBatchGuardVis, g_cSpawnRangeGuardMin.FloatValue,
+			g_iBatchGuardInvis, g_cSpawnRangeGuard.FloatValue, g_iDirection);
 	}
 
 	g_bInSpawnTime = false;
 
-	#if BENCHMARK
-	g_profiler.Stop();
-	PrintToServer("[SS] ProfilerTime: %f", g_profiler.Time);
-	#endif
-
-	if (retry) {
-		if (!count) {
+	if (g_bBatchRetry) {
+		if (!g_iBatchSuccess) {
 			#if DEBUG
-			PrintToServer("[SS] Retry spawn SI! spawned:%d failed:%d", count, aQueue.Length - count);
+			PrintToServer("[SS] Retry spawn SI! spawned:%d failed:%d", g_iBatchSuccess, g_iBatchTotal - g_iBatchSuccess);
 			#endif
 			g_hRetryTimer = CreateTimer(1.0, tmrRetrySpawn, false);
 		}
 	}
 	#if DEBUG
 	else {
-		if (!count)
-			PrintToServer("[SS] Spawn SI failed! spawned:%d failed:%d", count, aQueue.Length - count);
+		if (!g_iBatchSuccess)
+			PrintToServer("[SS] Spawn SI failed! spawned:%d failed:%d", g_iBatchSuccess, g_iBatchTotal - g_iBatchSuccess);
 	}
 	#endif
 
-	delete aQueue;
+	if (g_hBatchQueue) {
+		delete g_hBatchQueue;
+		g_hBatchQueue = null;
+	}
 }
 
 // v1.3.9: 落点离最近存活生还者的距离（含倒地，IsPlayerAlive 对倒地返回 true）。
