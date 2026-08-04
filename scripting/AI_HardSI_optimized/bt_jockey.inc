@@ -35,6 +35,24 @@ BT_Status JockeyAct_SteerRide(int client) {
     float vPos[3];
     GetClientAbsOrigin(victim, vPos);
 
+    // v5.0 毒压搬运：骑乘航向优先级 1 —— 把被骑者拖进 Spitter 酸液池。
+    // 酸液落在脚下（<80u）说明已被吐中无需再拖；拖向 80-900u 的酸池 =
+    // 酸伤持续 + 队友救人必须趟酸（用户定位：地面有酸时 Jockey 把人往酸里带）。
+    float acidPos[3];
+    float acidDist = SI_GetNearestAcid(vPos, acidPos, 900.0);
+    if (acidDist >= 80.0) {
+        float aDir[3];
+        MakeVectorFromPoints(vPos, acidPos, aDir);
+        aDir[2] = 0.0;
+        if (GetVectorLength(aDir) > 10.0) {
+            float ang[3];
+            GetVectorAngles(aDir, ang);
+            BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+            BT_AddButton(client, IN_FORWARD);
+            return BT_RUNNING;
+        }
+    }
+
     // 队伍中心（除 victim 外其他存活生还者平均位置）
     float center[3];
     int count = 0;

@@ -470,6 +470,27 @@ stock int BT_CreateHunterTree() {
     );
     BT_AddChild(coordPounceSeq, BT_CreateCooldown(1.0, coordPounceAttack));
 
+    // ==========================================
+    // v5.0 枪线扰乱者（任何模式生效）：优先扑"正在输出的人"——
+    // 高火力威胁目标（SI_GetHighestThreatSurvivor：狙击/霰弹/榴弹枪手）。
+    // 扑掉枪手 = 打乱幸存者火力网，为近战 SI 创造突破窗口。
+    // 与 coordPounce（mode 4/6 分散）区分：这是通用身份行为，优先级
+    // 放在分散扑之后 —— 分散模式仍优先防 dogpile，其余模式优先打枪手。
+    // ==========================================
+    int disruptionSeq = BT_CreateSequence(4,
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateCondition(CND_IsDucking),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(fPounceRange)
+    );
+    int disruptionAttack = BT_CreateSequence(4,
+        BT_CreateAction(ACT_AcquireThreatTarget),
+        BT_CreateAction(ACT_SnapAimToBlackboardTarget),
+        BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(ACT_SignalAttack)
+    );
+    BT_AddChild(disruptionSeq, BT_CreateCooldown(1.0, disruptionAttack));
+
     int wander = BT_CreateAction(ACT_Wander);
 
     // --- Build main tree ---
@@ -502,6 +523,7 @@ stock int BT_CreateHunterTree() {
     BT_AddChild(root, highPounceSeq);           // 2. high-ground positioning
     BT_AddChild(root, narrowPounceSeq);         // 3. v3.2: narrow → straight pounce
     BT_AddChild(root, coordPounceSeq);          // 3.5. v4.0: mode 4/6 分散扑（防 dogpile）
+    BT_AddChild(root, disruptionSeq);           // 3.6. v5.0: 枪线扰乱 → 扑火力输出者
     BT_AddChild(root, openStrategyRoll);        // 4a. v3.5: open → roll token
     BT_AddChild(root, openStrat0_WidePounce);   // 4b. v3.5: open strat0 → wide pounce
     BT_AddChild(root, openStrat1_ErraticPounce);// 4c. v3.5: open strat1 → erratic pounce

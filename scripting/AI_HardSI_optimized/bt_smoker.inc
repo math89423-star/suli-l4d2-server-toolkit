@@ -152,6 +152,31 @@ BT_Status SmokerAct_ApproachOutside(int client) {
 }
 
 // ============================================================================
+// v5.0: 控制链核心 —— 拉中人后的拖拽 steering。
+// 舌头把人拉向 Smoker 自身：Smoker 朝酸液池方向移动 = 被拉者被拖向酸液
+// （拖进酸 = 酸伤 + 队友救人必须趟酸）。无酸液时保持原地引擎托管拉。
+// ============================================================================
+
+BT_Status SmokerAct_SteerPinToAcid(int client) {
+    float myPos[3];
+    GetClientAbsOrigin(client, myPos);
+    float acidPos[3];
+    float acidDist = SI_GetNearestAcid(myPos, acidPos, 900.0);
+    if (acidDist >= 100.0) {
+        float dir[3], ang[3];
+        MakeVectorFromPoints(myPos, acidPos, dir);
+        dir[2] = 0.0;
+        if (GetVectorLength(dir) > 10.0) {
+            GetVectorAngles(dir, ang);
+            BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+            BT_AddButton(client, IN_FORWARD);
+            return BT_RUNNING;
+        }
+    }
+    return BT_SUCCESS;  // 无酸液/酸在脚下：引擎托管拉
+}
+
+// ============================================================================
 // v3.2: Terrain-aware target acquisition
 // ============================================================================
 
@@ -389,7 +414,14 @@ stock int BT_CreateSmokerTree() {
 
     // Root selector — v4.0.3: 攻击簇冷却 → 走位/选人，挠击消除。
     int root = BT_Create(BTN_SELECTOR);
-    BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor)); // 1
+    // v5.0 控制链核心：拉中 → SI_SignalAttack 开窗（队友跟进集火被拉者，
+    // 原逻辑拉中不开窗 = 控制链断裂）+ 拖向酸液池（无酸则引擎托管拉）。
+    int pinSeq = BT_CreateSequence(3,
+        BT_CreateCondition(CND_IsPinningSurvivor),
+        BT_CreateAction(ACT_SignalAttack),
+        BT_CreateAction(SmokerAct_SteerPinToAcid)
+    );
+    BT_AddChild(root, pinSeq); // 1. v5.0: 拉中 → 开窗 + 拖酸
     BT_AddChild(root, cooldownPull);          // 2. v4.0.3: 全部拉人分支（1.8s 冷却）
     BT_AddChild(root, mode3Approach);         // 3. v4.0: mode 3 → 外侧走位接近
     BT_AddChild(root, openStrategyRoll);      // 4a. open → roll token

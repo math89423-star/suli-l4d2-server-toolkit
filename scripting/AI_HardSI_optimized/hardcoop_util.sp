@@ -552,6 +552,9 @@ new Handle:g_hCvarActiveMode;     // v4.0: tactical mode from si_composition_man
 stock SI_UpdateCoordination() {
 	g_bSIBoomerHit = (g_fSIBoomerHitExpire > 0.0 && GetGameTime() < g_fSIBoomerHitExpire);
 
+	// v5.0: 谁控谁映射更新（Boomer 补刀/Hunter 补压的感知层）
+	SI_UpdatePinMap();
+
 	// v4.0: 战术模式读取（si_composition_manager 写入，1s 粒度足够）
 	// 加载时序兜底：AI_HardSI 比 si_composition_manager 先加载时，
 	// OnPluginStart 的 FindConVar 拿不到句柄 —— 这里每秒重试一次。
@@ -835,4 +838,248 @@ public Action:Timer_KickBot(Handle:timer, any:client) {
 		KickClient(client);
 	}
 	return Plugin_Handled;  // FIXED: missing return
+}
+
+// ===================================================================================
+// v5.0: 战场感知基础设施 —— 身份定位系统的数据层
+// 用户拍板"每个特感明确进攻身份"（Charger 突破手/Boomer 补刀/Spitter 区域毒压/
+// Jockey 拖人进酸/Hunter 打乱枪线/Smoker 控制链/Tank 开团）。
+// 身份分支需要的感知接口全部在此：
+//   1. 酸液锚点 —— 哪里有酸（Spitter 的产出，Jockey/Smoker/Charger 的消费）
+//   2. 谁控谁映射 —— 谁被控制、被谁控制、控了多久（Boomer 补刀/Hunter 补压）
+//   3. 阵型分析 —— 密集区中心/散布度（Charger 突破目标、Spitter 封锁目标）
+//   4. 孤立度公共化 —— 原 Smoker 私有，提为全员可用
+//   5. 火力威胁评估 —— 输出核心识别（Charger/Hunter 打枪手）
+// ===================================================================================
+
+// ---------------------------------------------------------------------------
+// 1. 酸液锚点（SPIT ACID ANCHOR）
+//    Spitter 的酸液是特感阵营的"地形锚点"。实现：直接扫描 spit_acid 实体
+//    （实体存在 = 酸液有效，被删 = 失效，天然准确无需事件/过期计时；
+//    Charger 的 acidCharge 早已这么用）。
+// ---------------------------------------------------------------------------
+
+// 距 pos 最近的酸液池：落点写 acidPos；返回距离，无酸液返回 -1.0。
+stock float SI_GetNearestAcid(const float pos[3], float acidPos[3], float maxRange = 0.0) {
+	// native 要求非 const 数组，复制一份
+	float center[3];
+	center[0] = pos[0];
+	center[1] = pos[1];
+	center[2] = pos[2];
+	int acid = L4D_FindEntityByClassnameNearest("spit_acid", center, maxRange > 0.0 ? maxRange : 99999.0);
+	if (acid > 0) {
+		GetEntPropVector(acid, Prop_Send, "m_vecOrigin", acidPos);
+		return GetVectorDistance(pos, acidPos);
+	}
+	return -1.0;
+}
+
+// ---------------------------------------------------------------------------
+// 2. 谁控谁映射（PIN OWNER MAP）
+//    SI_UpdateCoordination 的 pin 边沿检测已广播集火目标，但缺"谁控谁 +
+//    控了多久"——Boomer 补刀、Hunter 补压需要知道目标正被哪类特感控制。
+// ---------------------------------------------------------------------------
+
+int g_iPinOwnerOf[MAXPLAYERS + 1];   // survivor → 控制他的 SI（0 = 无）
+int g_iPinVictimOf[MAXPLAYERS + 1];  // SI → 他控制的 survivor（0 = 无）
+float g_fPinSince[MAXPLAYERS + 1];   // 控制开始时刻（SI_GetPinDuration 用）
+
+// 更新映射（SI_UpdateCoordination 每 tick 调用，幂等）
+stock void SI_UpdatePinMap() {
+	for (int s = 1; s <= MaxClients; s++) {
+		if (!IsSurvivor(s) || !IsPlayerAlive(s) || !IsPinned(s)) {
+			if (g_iPinOwnerOf[s] > 0) {
+				g_iPinVictimOf[g_iPinOwnerOf[s]] = 0;
+				g_iPinOwnerOf[s] = 0;
+			}
+			continue;
+		}
+		// 被控者：查五类 pin 表找控制者
+		int owner = GetEntPropEnt(s, Prop_Send, "m_tongueOwner");
+		if (owner <= 0) owner = GetEntPropEnt(s, Prop_Send, "m_pounceAttacker");
+		if (owner <= 0) owner = GetEntPropEnt(s, Prop_Send, "m_carryAttacker");
+		if (owner <= 0) owner = GetEntPropEnt(s, Prop_Send, "m_pummelAttacker");
+		if (owner <= 0) owner = GetEntPropEnt(s, Prop_Send, "m_jockeyAttacker");
+		if (owner <= 0 || owner > MaxClients) continue;
+		if (g_iPinOwnerOf[s] != owner) {
+			g_iPinOwnerOf[s] = owner;
+			g_iPinVictimOf[owner] = s;
+			g_fPinSince[s] = GetGameTime();
+		}
+	}
+}
+
+// 被控者的控制者 SI（无/失效返回 0）
+stock int SI_GetPinOwner(int survivor) {
+	if (survivor <= 0 || survivor > MaxClients) return 0;
+	return g_iPinOwnerOf[survivor];
+}
+
+// 控制时长（秒）
+stock float SI_GetPinDuration(int survivor) {
+	if (survivor <= 0 || survivor > MaxClients || g_iPinOwnerOf[survivor] <= 0) return 0.0;
+	return GetGameTime() - g_fPinSince[survivor];
+}
+
+// 最近的被控者（Boomer 补刀/Hunter 补压用），距离 ≤ maxDist 才返回
+stock int SI_GetNearestPinnedSurvivor(const float pos[3], float maxDist = 99999.0) {
+	int best = -1;
+	float bestDist = 0.0;
+	for (int s = 1; s <= MaxClients; s++) {
+		if (!IsSurvivor(s) || !IsPlayerAlive(s) || !IsPinned(s)) continue;
+		float sPos[3];
+		GetClientAbsOrigin(s, sPos);
+		float d = GetVectorDistance(pos, sPos);
+		if (d > maxDist) continue;
+		if (best < 0 || d < bestDist) {
+			best = s;
+			bestDist = d;
+		}
+	}
+	return best;
+}
+
+// ---------------------------------------------------------------------------
+// 3. 阵型分析（FORMATION ANALYSIS）
+//    Charger 突破需要"哪里人最密"（冲密集区撕火力网），Spitter 封锁需要
+//    "队伍重心"。O(n²) 距离矩阵，n ≤ 24，调用方自限频。
+// ---------------------------------------------------------------------------
+
+// 密集区分析：对每个站立幸存者统计 radius 内邻居数，返回邻居最多的簇心
+// 成员索引（-1 = 无密集区），center 写簇中心坐标（邻居平均位置）。
+// 语义：簇总人数（含簇心）= 邻居数 + 1，≥ minCount 才算密集区。
+stock int SI_GetDenseCluster(const float radius, int minCount, float center[3]) {
+	int survivors[MAXPLAYERS + 1];
+	int sCount = 0;
+	float pos[MAXPLAYERS + 1][3];
+
+	for (int s = 1; s <= MaxClients; s++) {
+		if (IsSurvivor(s) && IsPlayerAlive(s) && !IsIncapacitated(s)) {
+			survivors[sCount] = s;
+			GetClientAbsOrigin(s, pos[sCount]);
+			sCount++;
+		}
+	}
+	if (sCount < minCount) return -1;
+
+	int bestMember = -1;
+	int bestCount = 0;
+	for (int i = 0; i < sCount; i++) {
+		int cnt = 0;
+		float cx = 0.0, cy = 0.0, cz = 0.0;
+		for (int j = 0; j < sCount; j++) {
+			if (i == j) continue;
+			if (GetVectorDistance(pos[i], pos[j]) <= radius) {
+				cnt++;
+				cx += pos[j][0]; cy += pos[j][1]; cz += pos[j][2];
+			}
+		}
+		if (cnt > bestCount) {
+			bestCount = cnt;
+			bestMember = survivors[i];
+			if (cnt > 0) {
+				center[0] = cx / float(cnt);
+				center[1] = cy / float(cnt);
+				center[2] = cz / float(cnt);
+			} else {
+				center = pos[i];
+			}
+		}
+	}
+	return (bestCount >= minCount - 1) ? bestMember : -1;
+}
+
+// 队伍散布度：全队两两平均距离（越大 = 队伍拉得越散）
+stock float SI_GetSurvivorSpread() {
+	int survivors[MAXPLAYERS + 1];
+	int sCount = 0;
+	float pos[MAXPLAYERS + 1][3];
+	for (int s = 1; s <= MaxClients; s++) {
+		if (IsSurvivor(s) && IsPlayerAlive(s) && !IsIncapacitated(s)) {
+			survivors[sCount] = s;
+			GetClientAbsOrigin(s, pos[sCount]);
+			sCount++;
+		}
+	}
+	if (sCount < 2) return 0.0;
+	float total = 0.0;
+	int pairs = 0;
+	for (int i = 0; i < sCount; i++) {
+		for (int j = i + 1; j < sCount; j++) {
+			total += GetVectorDistance(pos[i], pos[j]);
+			pairs++;
+		}
+	}
+	return total / float(pairs);
+}
+
+// ---------------------------------------------------------------------------
+// 4. 孤立度公共化（原 Smoker 私有逻辑 bt_smoker.inc:38 提为公共 API）——
+//    队伍中离队友最远的人（≥ minIsolation 才认为孤立）
+// ---------------------------------------------------------------------------
+
+stock int SI_GetLoneliestSurvivor(float minIsolation = 350.0) {
+	int best = -1;
+	float bestDist = 0.0;
+	for (int s = 1; s <= MaxClients; s++) {
+		if (!IsSurvivor(s) || !IsPlayerAlive(s) || IsPinned(s) || IsIncapacitated(s)) continue;
+		float sPos[3];
+		GetClientAbsOrigin(s, sPos);
+		float nearest = 999999.0;
+		for (int o = 1; o <= MaxClients; o++) {
+			if (o == s || !IsSurvivor(o) || !IsPlayerAlive(o) || IsIncapacitated(o)) continue;
+			float oPos[3];
+			GetClientAbsOrigin(o, oPos);
+			float d = GetVectorDistance(sPos, oPos);
+			if (d < nearest) nearest = d;
+		}
+		if (nearest >= minIsolation && nearest > bestDist) {
+			best = s;
+			bestDist = nearest;
+		}
+	}
+	return best;
+}
+
+// ---------------------------------------------------------------------------
+// 5. 火力威胁评估（WEAPON THREAT）—— 输出核心识别
+//    Charger 突破目标 = 高威胁枪手（撕火力网），Hunter 枪线目标同理。
+//    武器权重（社区共识火力输出排序）：
+//    榴弹 3.0 > 狙击 2.5 > 霰弹 2.0 > 冲锋 1.5 > 步枪 1.2 > 手枪 0.5 > 近战 0.3
+// ---------------------------------------------------------------------------
+
+stock float SI_GetWeaponThreat(int survivor) {
+	int slot = GetPlayerWeaponSlot(survivor, 0);  // 主武器槽
+	if (slot <= 0) return 0.3;  // 无主武器 = 近战/空手
+	char cls[32];
+	GetEntityClassname(slot, cls, sizeof(cls));
+	if (StrEqual(cls, "weapon_grenade_launcher")) return 3.0;
+	if (StrEqual(cls, "weapon_sniper_scout") || StrEqual(cls, "weapon_sniper_military")
+		|| StrEqual(cls, "weapon_sniper_awp")) return 2.5;
+	if (StrContains(cls, "shotgun") != -1) return 2.0;
+	if (StrContains(cls, "smg") != -1) return 1.5;
+	if (StrEqual(cls, "weapon_rifle") || StrEqual(cls, "weapon_rifle_ak47")
+		|| StrEqual(cls, "weapon_rifle_desert") || StrEqual(cls, "weapon_rifle_sg552")
+		|| StrEqual(cls, "weapon_rifle_m60")) return 1.2;
+	if (StrEqual(cls, "weapon_pistol") || StrEqual(cls, "weapon_pistol_magnum")) return 0.5;
+	return 0.3;
+}
+
+// 距 siPos 高威胁目标（含距离衰减：score = 权重 / (1 + dist/1000)）
+stock int SI_GetHighestThreatSurvivor(const float siPos[3], float maxDist = 0.0) {
+	int best = -1;
+	float bestScore = -1.0;
+	for (int s = 1; s <= MaxClients; s++) {
+		if (!IsSurvivor(s) || !IsPlayerAlive(s) || IsPinned(s) || IsIncapacitated(s)) continue;
+		float sPos[3];
+		GetClientAbsOrigin(s, sPos);
+		float d = GetVectorDistance(siPos, sPos);
+		if (maxDist > 0.0 && d > maxDist) continue;
+		float score = SI_GetWeaponThreat(s) / (1.0 + d / 1000.0);
+		if (score > bestScore) {
+			bestScore = score;
+			best = s;
+		}
+	}
+	return best;
 }

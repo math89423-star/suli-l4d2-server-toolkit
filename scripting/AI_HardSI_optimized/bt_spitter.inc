@@ -30,14 +30,26 @@ BT_Status SpitterCnd_HasSpit(int client) {
     if (spitTime <= 0.0) return BT_FAILURE;
     if (GetGameTime() - spitTime > 8.0) {
         BB_SetFloat(client, "_spitter_spit_time", 0.0);
-        BB_SetBool(client, "_spitter_approach", false);
+        BB_SetInt(client, "_spitter_post_mode", 1);
         return BT_FAILURE;
     }
     return BT_SUCCESS;
 }
 
-BT_Status SpitterCnd_PostSpitApproach(int client) {
-    return BB_GetBool(client, "_spitter_approach", false) ? BT_SUCCESS : BT_FAILURE;
+// v5.0: 吐后行为 —— 区域毒压身份：吐完据守封锁位（8s 喷吐冷却内保持压制
+// 距离重新占位），不再 80% 贴脸送死。_spitter_post_mode：
+//   0 = 靠近压迫（25%）  1 = 撤退保持距离（35%）  2 = 据守封锁位（40%）
+BT_Status SpitterCnd_PostSpitMode(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    int expected = RoundToNearest(g_fBTNodeUserParam1[nodeId]);
+    return (BB_GetInt(client, "_spitter_post_mode", 1) == expected) ? BT_SUCCESS : BT_FAILURE;
+}
+
+stock int BT_CreatePostSpitMode(int mode) {
+    int id = BT_Create(BTN_CONDITION);
+    g_hBTFunc[id] = SpitterCnd_PostSpitMode;
+    g_fBTNodeUserParam1[id] = float(mode);
+    return id;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,9 +140,9 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
     }
     BT_AddButton(client, IN_ATTACK);
 
-    // 决定 post-spit 行为（同普通吐）
-    bool approach = (GetRandomFloat(0.0, 1.0) < 0.8);
-    BB_SetBool(client, "_spitter_approach", approach);
+    // 决定 post-spit 行为（同普通吐）—— v5.0 三分：40% 据守 / 35% 撤退 / 25% 靠近
+    int r = GetRandomInt(0, 9);
+    BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
     BB_SetFloat(client, "_spitter_spit_time", GetGameTime());
 
     return BT_SUCCESS;
@@ -162,7 +174,7 @@ BT_Status SpitterAct_SpitTankCover(int client) {
     BT_AddButton(client, IN_ATTACK);
 
     // 掩护吐完稍微后退（保持距离）
-    BB_SetBool(client, "_spitter_approach", false);
+    BB_SetInt(client, "_spitter_post_mode", 1);
     BB_SetFloat(client, "_spitter_spit_time", GetGameTime());
     return BT_SUCCESS;
 }
@@ -183,10 +195,10 @@ BT_Status SpitterAct_Spit(int client) {
     }
     BT_AddButton(client, IN_ATTACK);
 
-    // Decide post-spit behavior once at spit time
-    // 80% approach (body-block/distract), 20% retreat
-    bool approach = (GetRandomFloat(0.0, 1.0) < 0.8);
-    BB_SetBool(client, "_spitter_approach", approach);
+    // v5.0: 吐后行为三分 —— 40% 据守封锁位 / 35% 撤退保持距离 / 25% 贴脸压迫
+    // （原 80% 贴脸送死：Spitter 血 100，贴脸 = 白送，区域毒压应保持压制距离）
+    int r = GetRandomInt(0, 9);
+    BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
     BB_SetFloat(client, "_spitter_spit_time", GetGameTime());  // v3.2 FIX: timestamp, not permanent flag
 
     return BT_SUCCESS;
@@ -229,18 +241,29 @@ stock int BT_CreateSpitterTree() {
     );
     // Strat 1: Direct spit — standard behavior (falls through to defaultSpit)
 
-    // --- Post-spit behavior: approach (80%) or retreat (20%) ---
+    // --- Post-spit behavior (v5.0 三分：40% 据守 / 35% 撤退 / 25% 靠近) ---
     int postSpitApproach = BT_CreateSequence(3,
-        BT_CreateCondition(SpitterCnd_PostSpitApproach),
+        BT_CreatePostSpitMode(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
-    int postSpitRetreat = BT_CreateAction(ACT_Retreat);
+    int postSpitRetreat = BT_CreateSequence(2,
+        BT_CreatePostSpitMode(1),
+        BT_CreateAction(ACT_Retreat)
+    );
+
+    // v5.0: 据守封锁位 —— 吐完原地面向队伍保持压制距离，等 8s 冷却重新吐
+    int postSpitHold = BT_CreateSequence(3,
+        BT_CreatePostSpitMode(2),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_HoldPosition)
+    );
 
     int postSpitSelector = BT_Create(BTN_SELECTOR);
     BT_AddChild(postSpitSelector, postSpitApproach);
     BT_AddChild(postSpitSelector, postSpitRetreat);
+    BT_AddChild(postSpitSelector, postSpitHold);
 
     int postSpitSeq = BT_CreateSequence(2,
         BT_CreateCondition(SpitterCnd_HasSpit),
@@ -291,6 +314,21 @@ stock int BT_CreateSpitterTree() {
         BT_CreateAction(SpitterAct_PredictiveSpit)
     );
 
+    // ==========================================
+    // v5.0 区域毒压：幸存者密集（≥3 人 500u 内）→ 吐密集区中心。
+    // 密集区 = 队伍火力最集中处/推进咽喉 —— 酸液砸中心逼全员改道，
+    // 封锁整片区域（用户定位：Spitter 是区域毒压，不是单兵吐）。
+    // 落点自动成为全插件酸液锚点（SI_GetNearestAcid 扫描 spit_acid），
+    // Jockey/Smoker/Charger 的拖人进酸/冲酸里人以此为基础。
+    // ==========================================
+    int spitCluster = BT_CreateSequence(5,
+        BT_CreateSurvivorsClustered(3, 500.0),
+        BT_CreateAction(ACT_AcquireClusterTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(900.0),
+        BT_CreateAction(SpitterAct_PredictiveSpit)
+    );
+
     // --- Default: find any target, check LOS, then spit ---
     // v3.2 FIX: added CND_HasLOS — without it, Spitter would spit toward the
     // closest survivor even when a wall was in the way, wasting the ability.
@@ -308,12 +346,13 @@ stock int BT_CreateSpitterTree() {
     BT_AddChild(root, mode6Spit);              // 0.5. v4.0: mode 6 → 吐 Tank 前方
     BT_AddChild(root, spitOnPinned);           // 1. combo: spit on pinned
     BT_AddChild(root, spitOnBoomed);           // 2. combo: spit on boomed
-    BT_AddChild(root, narrowBlockSpit);        // 3. v3.2: narrow → area denial
-    BT_AddChild(root, openStrategyRoll);       // 4a. v3.5: open → roll token
-    BT_AddChild(root, openS0_Spit);            // 4b. v3.5: open strat0 → flank spit
-    BT_AddChild(root, openS0_Approach);        // 4c. v3.5: open strat0 → flank approach
-    // 4d: open strat1 → falls through to defaultSpit
-    BT_AddChild(root, defaultSpit);            // 5. ← FALLBACK: default spit
+    BT_AddChild(root, spitCluster);            // 3. v5.0: 区域毒压 → 吐密集区中心
+    BT_AddChild(root, narrowBlockSpit);        // 4. v3.2: narrow → area denial
+    BT_AddChild(root, openStrategyRoll);       // 5a. v3.5: open → roll token
+    BT_AddChild(root, openS0_Spit);            // 5b. v3.5: open strat0 → flank spit
+    BT_AddChild(root, openS0_Approach);        // 5c. v3.5: open strat0 → flank approach
+    // 5d: open strat1 → falls through to defaultSpit
+    BT_AddChild(root, defaultSpit);            // 6. ← FALLBACK: default spit
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
 
     return root;

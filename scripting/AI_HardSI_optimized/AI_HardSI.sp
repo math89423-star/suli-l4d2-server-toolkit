@@ -77,6 +77,27 @@
 //         被电脑处死。修复：目标 >1500u 不伏击直接接近（approach 分支
 //         先拉近距离）+ 伏击超时 8s 转主动接近（ACT_AmbushHold 加
 //         UserParam1 超时参数，≤0 = 不超时保持原行为，仅 Boomer 使用）
+// v5.0: 身份定位全面修正（用户拍板：每特感明确进攻身份，行为树承担
+//       压力调节，替代波次数量操作）——
+//       [基础设施] hardcoop_util.sp 新增战场感知层：
+//         酸液锚点 SI_GetNearestAcid（spit_acid 实体扫描，全插件统一）、
+//         谁控谁映射 SI_UpdatePinMap/g_iPinOwnerOf（谁控谁+控了多久）、
+//         阵型分析 SI_GetDenseCluster/SI_GetSurvivorSpread（密集区/散布）、
+//         孤立度公共化 SI_GetLoneliestSurvivor、火力威胁评估
+//         SI_GetWeaponThreat/SI_GetHighestThreatSurvivor（输出核心识别）；
+//       [公共节点] bt_common.inc：CND_HasNearbyAcid/CND_SurvivorsClustered/
+//         ACT_AcquirePinnedTarget/ACT_AcquireLonelyTarget/
+//         ACT_AcquireThreatTarget/ACT_AcquireClusterTarget/
+//         ACT_SnapAimToBlackboardTarget
+//       [身份分支] 各树 root 加身份行为（详细注释在各 bt_*.inc）：
+//         Charger 突破手 —— 密集区(≥3人/500u) → 绕侧后 CircleFlank → 冲
+//         Spitter 区域毒压 —— 吐密集区中心；吐后 40% 据守/35% 撤退/25% 贴脸
+//         Jockey 毒压搬运 —— SteerRide 骑乘航向优先拖向酸液池
+//         Boomer 补刀者 —— CND_AnySurvivorPinned(启用) + 逼近被控者 600u 喷
+//         Hunter 枪线扰乱 —— 优先扑高火力威胁者（打枪手）
+//         Smoker 控制链 —— 拉中 SI_SignalAttack 开窗 + 拖向酸液
+//         Tank 开团者 —— 密集区目标分支 + 投石/bhop 开团信号
+//       部署名 AI_HardSI_bt.smx（源码 AI_HardSI.sp，编译后改名）。
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -119,7 +140,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "4.1.2",
+    version = "5.0.0",
     url = "github.com/breezyplease"
 };
 

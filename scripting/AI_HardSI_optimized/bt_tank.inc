@@ -135,6 +135,32 @@ BT_Status TankAct_SelectDefault(int client) {
 }
 
 // ============================================================================
+// v5.0: 开团者 —— 不被风筝手牵制时主动冲幸存者密集区（撕开阵型）。
+// Tank 是特感阵营的坦克：冲散站位 = 为 C/H/J/Sp 创造进攻窗口。
+// 条件：密集区存在（≥3 人 500u 内）且距 Tank ≤1200u —— 远时仍优先追
+// 射手防风筝（damager 分支在前）；近时从"追单兵"切换为"冲整片火力网"。
+// ============================================================================
+
+BT_Status TankCond_ClusterReady(int client) {
+    float myPos[3];
+    GetClientAbsOrigin(client, myPos);
+    float center[3];
+    int member = SI_GetDenseCluster(500.0, 3, center);
+    if (member <= 0) return BT_FAILURE;
+    float cPos[3];
+    GetClientAbsOrigin(member, cPos);
+    return (GetVectorDistance(myPos, cPos) <= 1200.0) ? BT_SUCCESS : BT_FAILURE;
+}
+
+BT_Status TankAct_SelectClusterMember(int client) {
+    float center[3];
+    int member = SI_GetDenseCluster(500.0, 3, center);
+    if (member <= 0) return BT_FAILURE;
+    BB_SetInt(client, "target", member);
+    return BT_SUCCESS;
+}
+
+// ============================================================================
 // Punch-Jump Combo
 // ============================================================================
 
@@ -342,6 +368,11 @@ BT_Status TankCond_BhopEligible(int client) {
 }
 
 BT_Status TankAct_Bhop(int client) {
+    // v5.0: 开团预告 —— Tank 连跳逼近 = 队友跟进窗口（mode6 巨兽协同除外：
+    // 该模式设计是"Tank 锁定、小队分散控制"，与 v4.1 出拳信号同逻辑）
+    if (SI_GetActiveMode() != 6)
+        SI_SignalAttack(client);
+
     float eyeAng[3];
     GetClientEyeAngles(client, eyeAng);
 
@@ -503,6 +534,11 @@ stock int BT_CreateTankTree() {
         BT_CreateCondition(TankCond_HasDamager),
         BT_CreateAction(TankAct_SelectDamager)
     );
+    // v5.0: 开团者 —— 密集区近旁时冲密集区（撕阵型制造窗口）
+    int selectCluster = BT_CreateSequence(2,
+        BT_CreateCondition(TankCond_ClusterReady),
+        BT_CreateAction(TankAct_SelectClusterMember)
+    );
     int selectLowHP = BT_CreateAction(TankAct_SelectLowestHP);
     int selectDefault = BT_CreateAction(TankAct_SelectDefault);
 
@@ -518,7 +554,8 @@ stock int BT_CreateTankTree() {
 
     int targetSelector = BT_Create(BTN_SELECTOR);
     BT_AddChild(targetSelector, coordPinSeq);         // v4.1: 窗口内锁 pin 目标
-    BT_AddChild(targetSelector, selectDamager);
+    BT_AddChild(targetSelector, selectDamager);      // 防风筝：有人打 Tank 追射手
+    BT_AddChild(targetSelector, selectCluster);      // v5.0: 开团 → 冲密集区
     BT_AddChild(targetSelector, selectLowHP);
     BT_AddChild(targetSelector, selectDefault);
 
@@ -543,13 +580,14 @@ stock int BT_CreateTankTree() {
     );
     // Strategy 0: Rock throw at long range (suppress from distance)
     // v4.1: +TankAct_AimRock —— 投石前把视角对准提前点（移动靶预判）
-    int openStrat0_Rock = BT_CreateSequence(6,
+    int openStrat0_Rock = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea),
         BT_CreateStrategyIs(0),
         BT_CreateCondition(TankCond_RockEligible),
         BT_CreateCondition(CND_HasLOS),
         BT_CreateAction(TankAct_AimRock),      // v4.1: 预判瞄准
-        BT_CreateAction(ACT_Attack2)           // throw rock
+        BT_CreateAction(ACT_Attack2),          // throw rock
+        BT_CreateAction(ACT_SignalAttack)      // v5.0: 投石压制 = 开团信号（队友跟进）
     );
     // Strategy 1: Direct charge — rush up and punch (instakill threat)
     // v4.0.5: 已移入下方近战簇（meleeCluster）—— 与 ledge punch 共享
@@ -580,10 +618,11 @@ stock int BT_CreateTankTree() {
         BT_CreateCondition(TankCond_IncappedNearby),
         BT_CreateAction(TankAct_ExecuteIncapped)
     );
-    int rockSeq = BT_CreateSequence(3,
+    int rockSeq = BT_CreateSequence(4,
         BT_CreateCondition(TankCond_RockEligible),
         BT_CreateAction(TankAct_AimRock),      // v4.1: 预判瞄准（fallback 路径同样接管）
-        BT_CreateAction(ACT_Attack2)
+        BT_CreateAction(ACT_Attack2),
+        BT_CreateAction(ACT_SignalAttack)      // v5.0: 投石开团信号
     );
     int bhopSeq = BT_CreateSequence(2,
         BT_CreateCondition(TankCond_BhopEligible),

@@ -303,6 +303,21 @@ stock int BT_CreateChargerTree() {
         BT_CreateAction(ChargerAct_Charge)
     );
 
+    // ==========================================
+    // v5.0 突破手：幸存者密集（≥3 人 500u 内）→ 锁定密集区中心成员
+    // （ACT_AcquireClusterTarget）→ 冲锋撕开火力网。密集区 = 队伍火力最
+    // 集中处，冲散阵型后 Hunter/Jockey/Boomer 跟进收割。与"抓最近者"
+    // 不同：目标是整片火力网，不是单兵（用户定位：Charger 是突破手）。
+    // ==========================================
+    int breakthroughCharge = BT_CreateSequence(6,
+        BT_CreateSurvivorsClustered(3, 500.0),
+        BT_CreateAction(ACT_AcquireClusterTarget),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(fChargeProx),
+        BT_CreateAction(ChargerAct_AimAtTarget),
+        BT_CreateAction(ChargerAct_Charge)
+    );
+
     // Default charge: in range + LOS → charge (v3.2 fix: was missing)
     int defaultChargeSeq = BT_CreateSequence(5,
         BT_CreateAction(ACT_AcquireClosestTarget),
@@ -376,6 +391,7 @@ stock int BT_CreateChargerTree() {
     BT_AddChild(chargeCluster, mode0Charge);       // v4.0: mode 0 → 900u 正面直冲
     BT_AddChild(chargeCluster, coordSeq);          // v4.0: coordination 冲被 pin 者
     BT_AddChild(chargeCluster, acidCharge);        // v4.0: 冲酸液里的人
+    BT_AddChild(chargeCluster, breakthroughCharge);// v5.0: 突破手 → 冲密集区中心
     BT_AddChild(chargeCluster, ledgeChargeSeq);    // v3.2: ledge → charge
     BT_AddChild(chargeCluster, narrowChargeSeq);   // v3.2/v4.0.2: narrow → charge
     BT_AddChild(chargeCluster, openS0_Charge);     // v3.5: open strat0 → flank charge
@@ -383,6 +399,16 @@ stock int BT_CreateChargerTree() {
     BT_AddChild(chargeCluster, lowHpSeq);          // FALLBACK: low HP charge
     BT_AddChild(chargeCluster, defaultChargeSeq);  // FALLBACK: default charge
     int cooldownCharge = BT_CreateCooldown(12.0, chargeCluster);  // v4.0.3: 对齐 z_charge_interval=12s
+
+    // v5.0 突破手绕行：12s 冲锋冷却期间绕侧后接近密集区（CircleFlank 大弧线，
+    // 从生还者视线外绕到侧后方），技能冷却一好立即被 cooldownCharge 的
+    // breakthroughCharge 接手冲锋 —— 冷却期绕行、冷却好就冲，节奏自洽。
+    int breakthroughApproach = BT_CreateSequence(4,
+        BT_CreateSurvivorsClustered(3, 500.0),
+        BT_CreateAction(ACT_AcquireClusterTarget),
+        BT_CreateIsNotInRange(fChargeProx),
+        BT_CreateAction(ACT_CircleFlank)
+    );
 
     // Root selector — terrain branches fail when disabled → fallback to standard.
     int root = BT_Create(BTN_SELECTOR);
@@ -394,14 +420,15 @@ stock int BT_CreateChargerTree() {
     BT_AddChild(root, spawnProtect);                               // 0. v4.0.1
     BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor)); // 1
     BT_AddChild(root, cooldownCharge);          // 2. v4.0.3: 全部冲锋分支（2s 冷却）
-    BT_AddChild(root, openStrategyRoll);         // 3. v3.5: open → roll token
-    BT_AddChild(root, openS0_Approach);          // 4. v3.5: open strat0 → flank approach
-    BT_AddChild(root, openS1_Approach);          // 5. v3.5: open strat1 → erratic approach
+    BT_AddChild(root, breakthroughApproach);    // 3. v5.0: 冷却期绕侧后接近密集区
+    BT_AddChild(root, openStrategyRoll);         // 4. v3.5: open → roll token
+    BT_AddChild(root, openS0_Approach);          // 5. v3.5: open strat0 → flank approach
+    BT_AddChild(root, openS1_Approach);          // 6. v3.5: open strat1 → erratic approach
     // open strat2 → falls through to generic approaches
-    BT_AddChild(root, noLosApproach);            // 6. FALLBACK: in-range no-LOS approach
-    BT_AddChild(root, approachSeq);              // 7. FALLBACK: approach from far
-    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 8. 冷却期间站桩（不按 ATTACK）
-    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 9. last resort
+    BT_AddChild(root, noLosApproach);            // 7. FALLBACK: in-range no-LOS approach
+    BT_AddChild(root, approachSeq);              // 8. FALLBACK: approach from far
+    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 9. 冷却期间站桩（不按 ATTACK）
+    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 10. last resort
 
     return root;
 }

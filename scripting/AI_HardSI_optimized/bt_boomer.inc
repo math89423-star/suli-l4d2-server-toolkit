@@ -152,6 +152,28 @@ stock int BT_CreateBoomerTree() {
         BT_CreateAction(BoomerAct_Vomit)
     );
 
+    // ==========================================
+    // v5.0 补刀者：有幸存者被控（Smoker 拉/Charger 撞/Jockey 骑等）→
+    // 专程逼近被控者 → 300u 内喷。被控者无法躲闪吐必中；救人者挤上来 =
+    // 全家被喷（用户定位：Boomer 是补刀者，贴近已被控制的人造成更多伤害）。
+    // 与 mode1Vomit 的区别：mode1 只在窗口内靠 pin 广播（3s 过期）吐，
+    // 这里用实时谁控谁映射（SI_GetNearestPinnedSurvivor），任何模式生效。
+    // 目标限定 600u（射程 300，被控者 300-600u 之间接近期不浪费呕吐）。
+    // ==========================================
+    int finishApproach = BT_CreateSequence(4,
+        BT_CreateCondition(CND_AnySurvivorPinned),
+        BT_CreateAcquirePinnedTarget(600.0),
+        BT_CreateIsNotInRange(300.0),
+        BT_CreateAction(BoomerAct_FlankApproach)
+    );
+    int finishVomit = BT_CreateSequence(5,
+        BT_CreateCondition(CND_AnySurvivorPinned),
+        BT_CreateAcquirePinnedTarget(600.0),
+        BT_CreateCondition(CND_HasLOS),
+        BT_CreateIsInRange(300.0),
+        BT_CreateAction(BoomerAct_Vomit)
+    );
+
     // --- v3.2: Terrain-aware vomit strategies ---
     // Narrow corridor: hold chokepoint → vomit to cover entire passage
     int narrowHoldVomit = BT_CreateSequence(6,
@@ -257,16 +279,18 @@ stock int BT_CreateBoomerTree() {
     BT_AddChild(root, postVomitSeq);
     BT_AddChild(root, ambushSeq);          // 1.5. v4.0: narrow → 伏击等待
     BT_AddChild(root, mode1Vomit);         // 1.5. v4.0: mode 1 → 吐被拉者
-    BT_AddChild(root, narrowHoldVomit);    // 2. v3.2: narrow → block + vomit
-    BT_AddChild(root, openStrategyRoll);   // 3a. v3.5: open → roll token
-    BT_AddChild(root, openS0_Vomit);       // 3b. v3.5: open strat0 → flank vomit
-    BT_AddChild(root, openS0_Approach);    // 3c. v3.5: open strat0 → flank approach
-    BT_AddChild(root, openS1_Vomit);       // 4a. v3.5: open strat1 → erratic vomit
-    BT_AddChild(root, openS1_Approach);    // 4b. v3.5: open strat1 → erratic approach
-    BT_AddChild(root, semiHugVomit);       // 5. v3.2: semi → vomit
-    BT_AddChild(root, semiHugApproach);    // 5b. v3.2: semi → hug wall
-    BT_AddChild(root, vomitSeq);           // 6. ← FALLBACK: standard vomit
-    BT_AddChild(root, approachSeq);        // 7. ← FALLBACK: approach
+    BT_AddChild(root, finishApproach);     // 2. v5.0: 补刀者 → 逼近被控者
+    BT_AddChild(root, finishVomit);        // 3. v5.0: 补刀者 → 吐被控者
+    BT_AddChild(root, narrowHoldVomit);    // 4. v3.2: narrow → block + vomit
+    BT_AddChild(root, openStrategyRoll);   // 5a. v3.5: open → roll token
+    BT_AddChild(root, openS0_Vomit);       // 5b. v3.5: open strat0 → flank vomit
+    BT_AddChild(root, openS0_Approach);    // 5c. v3.5: open strat0 → flank approach
+    BT_AddChild(root, openS1_Vomit);       // 6a. v3.5: open strat1 → erratic vomit
+    BT_AddChild(root, openS1_Approach);    // 6b. v3.5: open strat1 → erratic approach
+    BT_AddChild(root, semiHugVomit);       // 7. v3.2: semi → vomit
+    BT_AddChild(root, semiHugApproach);    // 7b. v3.2: semi → hug wall
+    BT_AddChild(root, vomitSeq);           // 8. ← FALLBACK: standard vomit
+    BT_AddChild(root, approachSeq);        // 9. ← FALLBACK: approach
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
 
     return root;

@@ -208,6 +208,23 @@ BT_Status ACT_SignalAttack(int client) {
     return BT_SUCCESS;
 }
 
+// v5.0: 瞄准黑板 "target"（身份目标获取后使用——ACT_AcquireThreatTarget/
+// AcquireClusterTarget 等写入的黑板目标；现有 ACT_SnapAimToTarget 瞄的是
+// 引擎 GetClientAimTarget，与身份选人结果不一致）
+BT_Status ACT_SnapAimToBlackboardTarget(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        return BT_SUCCESS;
+    }
+    return BT_FAILURE;
+}
+
 // Block ATTACK2 (right-click / rock throw). Call this when Tank shouldn't throw.
 BT_Status ACT_BlockAttack2(int client) {
     BT_RemoveButton(client, IN_ATTACK2);
@@ -1028,6 +1045,101 @@ stock int BT_CreateIsNotInRange(float minDist) {
     int id = BT_Create(BTN_INVERTER);
     BT_AddChild(id, BT_CreateIsInRange(minDist));
     return id;
+}
+
+// ============================================================================
+// v5.0: 身份定位系统公共节点（感知条件 + 身份目标获取）
+// 基础设施在 hardcoop_util.sp（酸液锚点/谁控谁映射/阵型分析/孤立度/火力威胁）。
+// 身份分支 = 用这些节点替换"最近者驱动"的目标选择 + 加入身份专属动作。
+// ============================================================================
+
+// 条件：附近有酸液池（UserParam1 = 最大距离，0 = 不限）
+BT_Status CND_HasNearbyAcid(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    float maxRange = g_fBTNodeUserParam1[nodeId];
+    float pos[3], acid[3];
+    GetClientAbsOrigin(client, pos);
+    return (SI_GetNearestAcid(pos, acid, maxRange) >= 0.0) ? BT_SUCCESS : BT_FAILURE;
+}
+
+stock int BT_CreateHasNearbyAcid(float maxRange) {
+    int id = BT_Create(BTN_CONDITION);
+    g_hBTFunc[id] = CND_HasNearbyAcid;
+    g_fBTNodeUserParam1[id] = maxRange;
+    return id;
+}
+
+// 条件：幸存者存在密集区（UserParam1 = 最少总人数, UserParam2 = 簇半径）
+BT_Status CND_SurvivorsClustered(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    float radius = g_fBTNodeUserParam2[nodeId];
+    int minCount = RoundToNearest(g_fBTNodeUserParam1[nodeId]);
+    float center[3];
+    return (SI_GetDenseCluster(radius, minCount, center) > 0) ? BT_SUCCESS : BT_FAILURE;
+}
+
+stock int BT_CreateSurvivorsClustered(int minCount, float radius) {
+    int id = BT_Create(BTN_CONDITION);
+    g_hBTFunc[id] = CND_SurvivorsClustered;
+    g_fBTNodeUserParam1[id] = float(minCount);
+    g_fBTNodeUserParam2[id] = radius;
+    return id;
+}
+
+// 动作：把最近的被控者设为黑板 target（Boomer 补刀/Hunter 补压）
+// UserParam1 = 最大距离（0 = 不限）
+BT_Status ACT_AcquirePinnedTarget(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    float maxDist = g_fBTNodeUserParam1[nodeId];
+    if (maxDist <= 0.0) maxDist = 99999.0;
+    float pos[3];
+    GetClientAbsOrigin(client, pos);
+    int pinned = SI_GetNearestPinnedSurvivor(pos, maxDist);
+    if (pinned > 0) {
+        BB_SetInt(client, "target", pinned);
+        return BT_SUCCESS;
+    }
+    return BT_FAILURE;
+}
+
+stock int BT_CreateAcquirePinnedTarget(float maxDist) {
+    int id = BT_Create(BTN_ACTION);
+    g_hBTFunc[id] = ACT_AcquirePinnedTarget;
+    g_fBTNodeUserParam1[id] = maxDist;
+    return id;
+}
+
+// 动作：把孤立者设为黑板 target（Hunter 打枪线后排/Smoker 传统）
+BT_Status ACT_AcquireLonelyTarget(int client) {
+    int lonely = SI_GetLoneliestSurvivor(350.0);
+    if (lonely > 0) {
+        BB_SetInt(client, "target", lonely);
+        return BT_SUCCESS;
+    }
+    return BT_FAILURE;
+}
+
+// 动作：把高威胁输出核心设为黑板 target（Charger 突破撕火力网/Hunter 打枪手）
+BT_Status ACT_AcquireThreatTarget(int client) {
+    float pos[3];
+    GetClientAbsOrigin(client, pos);
+    int threat = SI_GetHighestThreatSurvivor(pos, 1200.0);
+    if (threat > 0) {
+        BB_SetInt(client, "target", threat);
+        return BT_SUCCESS;
+    }
+    return BT_FAILURE;
+}
+
+// 动作：把密集区中心成员设为黑板 target（Charger 冲密集区撕阵型）
+BT_Status ACT_AcquireClusterTarget(int client) {
+    float center[3];
+    int member = SI_GetDenseCluster(500.0, 3, center);
+    if (member > 0) {
+        BB_SetInt(client, "target", member);
+        return BT_SUCCESS;
+    }
+    return BT_FAILURE;
 }
 
 // ---------------------------------------------------------------------------
