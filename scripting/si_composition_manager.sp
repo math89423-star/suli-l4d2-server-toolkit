@@ -33,7 +33,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.3.7"
+#define PLUGIN_VERSION "2.3.9"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -201,6 +201,10 @@ public void OnPluginStart()
     HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Post);
     HookEvent("round_start",      Event_RoundStart,      EventHookMode_PostNoCopy);
     HookEvent("round_end",        Event_RoundEnd,        EventHookMode_PostNoCopy);
+
+    // v2.3.9 实测结论（2026-08-04）：SourceMod 对 late-load 插件补发 OnMapStart
+    // （重载后 active_mode 0→1 实证）→ 模式轮换定时器链由 OnMapStart 自动重建，
+    // 无需热重载兜底。曾加的 late-load 重建块已撤（多余 + 会把钉值抓成基准）。
 }
 
 // ============================================================================
@@ -609,9 +613,39 @@ void AnnounceWave(float nextInterval)
     }
 
     int spawnSize = (g_cvSsSpawnSize != null) ? g_cvSsSpawnSize.IntValue : 6;
+    int effective = spawnSize;
 
-    PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只! 进攻策略: \x05%s\x01 | 下一波: \x04%.0f\x01秒后",
-        spawnSize, modeName, nextInterval);
+    // v2.3.8 倒地补偿镜像：与 specialspawner v1.5.0 ExecuteSpawnQueue 同一公式
+    // (ss_incap_compensation 强度 × 站立/总人数 比例)。仅用于播报真实波次数量，
+    // 改公式必须两处同步。播报时机 = 波次首只刷新（L4D_OnSpawnSpecial），若
+    // 补偿把整波压没（存活≥补偿上限）则不会有任何刷新 → 自然无播报，无需处理。
+    ConVar cvComp = FindConVar("ss_incap_compensation");
+    if (cvComp != null && cvComp.FloatValue > 0.0) {
+        int total = 0;
+        int standing = 0;
+        for (int i = 1; i <= MaxClients; i++) {
+            if (IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i)) {
+                total++;
+                if (!GetEntProp(i, Prop_Send, "m_isIncapacitated")) {
+                    standing++;
+                }
+            }
+        }
+        if (total > 0 && standing < total) {
+            float ratio = float(standing) / float(total);
+            float scale = 1.0 - cvComp.FloatValue * (1.0 - ratio);
+            effective = RoundToNearest(float(spawnSize) * scale);
+            if (effective < 1) effective = 1;
+        }
+    }
+
+    if (effective < spawnSize) {
+        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只(\x03倒地补偿 %d→%d\x01)! 进攻策略: \x05%s\x01 | 下一波: \x04%.0f\x01秒后",
+            effective, spawnSize, effective, modeName, nextInterval);
+    } else {
+        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只! 进攻策略: \x05%s\x01 | 下一波: \x04%.0f\x01秒后",
+            spawnSize, modeName, nextInterval);
+    }
 }
 
 // ============================================================================

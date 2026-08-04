@@ -43,6 +43,11 @@
 // 仍无 → 本只跳过等下波（绝不放行 <250）。
 // v1.4.1：处决可观测——KillInactiveSI 记 LogMessage；fallback 拆 visible/invisible
 // 计数（invis-fb 是残余处决源，比例偏高时再收紧，比如调低 guard_min 或禁止不可见兜底）。
+// v1.5.0 倒地补偿：刷怪瞬间按 站立/总人数 比例收缩本波数量与有效上限。
+// 例: 10人5倒 → ratio 0.5 → 上限 15→8、波次 10→5，站立 5 人面对 ≤8 特感而非 15。
+// 实时计算（无 cvar 写入）→ 复活后下一波自动恢复，不存在陈旧值。
+// 强度 ss_incap_compensation [0-1]：1 = 全比例，0 = 关闭，0.5 = 半补偿。
+// si_comp 播报镜像同公式（v2.3.8），改公式必须两处同步。
 #define SPAWN_GUARD_MAX_TRIES					10
 
 Handle
@@ -76,7 +81,8 @@ ConVar
 	g_cFirstSpawnTime,
 	g_cSpawnRange,
 	g_cDiscardRange,
-	g_cSafeSpawnRange;
+	g_cSafeSpawnRange,
+	g_cIncapCompensation;
 
 float
 	g_fSpawnTimeMin,
@@ -87,7 +93,8 @@ float
 	g_fRushDistance,
 	g_fFirstSpawnTime,
 	g_fSpawnTimes[MAXPLAYERS + 1],
-	g_fActionTimes[MAXPLAYERS + 1];
+	g_fActionTimes[MAXPLAYERS + 1],
+	g_fIncapCompensation;
 
 static const char
 	g_sZombieClass[SI_MAX_SIZE][] = {
@@ -157,7 +164,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "1.4.1",
+	version = "1.5.0",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -207,6 +214,9 @@ public void OnPluginStart() {
 	g_cSpawnRangeGuardMin =			CreateConVar("ss_spawnrange_guard_min",	"250.0",					"全跳保底:重掷耗尽后放行最近点≥该值的落点(须≤guard, 0=不保底)", _, true, 0.0, true, 1500.0);
 
 	g_cFirstSpawnTime = 			CreateConVar("ss_first_time",			"0.0",						"玩家离开安全区域后第一波特感的刷新时间", _, true, 0.0);
+	// v1.5.0: 倒地补偿强度 [0-1]。1 = 全比例（波次与上限 ×站立/总人数），0 = 关闭，
+	// 0-1 = 线性插值。实时计算，复活后下一波自动恢复。
+	g_cIncapCompensation =			CreateConVar("ss_incap_compensation",	"1.0",						"倒地补偿强度: 刷怪时按站立/总人数比例收缩本波数量与有效上限 [0=关闭|1=全比例]", _, true, 0.0, true, 1.0);
 
 	g_cSpawnRange =					FindConVar("z_spawn_range");
 	g_cDiscardRange =				FindConVar("z_discard_range");
@@ -231,6 +241,7 @@ public void OnPluginStart() {
 	g_cSuicideTime.AddChangeHook(CvarChanged_General);
 	g_cRushDistance.AddChangeHook(CvarChanged_General);
 	g_cFirstSpawnTime.AddChangeHook(CvarChanged_General);
+	g_cIncapCompensation.AddChangeHook(CvarChanged_General);
 
 	g_cTankStatusAction.AddChangeHook(CvarChanged_TankStatus);
 	g_cTankStatusLimits.AddChangeHook(CvarChanged_TankCustom);
@@ -706,6 +717,7 @@ void GetCvars_General() {
 	g_fSuicideTime =	g_cSuicideTime.FloatValue;
 	g_fRushDistance =	g_cRushDistance.FloatValue;
 	g_fFirstSpawnTime =	g_cFirstSpawnTime.FloatValue;
+	g_fIncapCompensation = g_cIncapCompensation.FloatValue;
 }
 
 void CvarChanged_TankStatus(ConVar convar, const char[] oldValue, const char[] newValue) {
@@ -1032,6 +1044,51 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 
 	int allowedSI = g_iSILimit - totalSI;
 	int spawnSize = g_iSpawnSize > allowedSI ? allowedSI : g_iSpawnSize;
+
+	// v1.5.0 倒地补偿：刷怪瞬间按 站立/总人数 比例收缩本波数量与有效上限。
+	// 例: 10人5倒 → ratio 0.5 → 上限 15→8（存活≥8 本波跳过）、波次 10→5，
+	// 站立 5 人面对 ≤8 特感而非 15（近乎 3 倍）。全倒（total 全倒地）→ 比例 0，
+	// 上限压到 1，波次跳过——等队友起身/复活后下一波自动恢复，无 cvar 陈旧问题。
+	// 注意: IsPlayerAlive 对倒地返回 true，所以 total 含倒地者，须用
+	// m_isIncapacitated 区分站立人数。
+	if (g_fIncapCompensation > 0.0) {
+		int total;
+		int standing;
+		for (int s = 1; s <= MaxClients; s++) {
+			if (IsClientInGame(s) && GetClientTeam(s) == 2 && IsPlayerAlive(s)) {
+				total++;
+				if (!GetEntProp(s, Prop_Send, "m_isIncapacitated"))
+					standing++;
+			}
+		}
+
+		if (total > 0 && standing < total) {
+			float ratio = float(standing) / float(total);
+			float scale = 1.0 - g_fIncapCompensation * (1.0 - ratio);
+
+			int effLimit = RoundToNearest(float(g_iSILimit) * scale);
+			if (effLimit < 1)
+				effLimit = 1;
+
+			if (totalSI >= effLimit) {
+				LogMessage("[SS] incap comp: %d/%d 倒地, 上限 %d→%d, 存活 %d → 本波跳过",
+					total - standing, total, g_iSILimit, effLimit, totalSI);
+				return;
+			}
+
+			int oldSize = spawnSize;
+			allowedSI = effLimit - totalSI;
+			spawnSize = RoundToNearest(float(spawnSize) * scale);
+			if (spawnSize < 1)
+				spawnSize = 1;
+			if (spawnSize > allowedSI)
+				spawnSize = allowedSI;
+
+			if (spawnSize != oldSize)
+				LogMessage("[SS] incap comp: %d/%d 倒地, 波次 %d→%d, 上限 %d→%d",
+					total - standing, total, oldSize, spawnSize, g_iSILimit, effLimit);
+		}
+	}
 
 	GetSITypeCount();
 
