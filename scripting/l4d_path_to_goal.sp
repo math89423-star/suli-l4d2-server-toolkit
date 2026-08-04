@@ -100,9 +100,12 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
-	// 统一入口：reload 后 OnMapStart 不触发，改为懒检测（CmdRequestGuide /
-	// FlowPathFrom 都会调用 EnsureInitForCurrentMap），这里直接强制重建
-	EnsureInitForCurrentMap();
+	// 懒初始化统一入口：reload 后 OnMapStart 不触发，且此刻 nav mesh 尚未
+	// 加载完成——L4D_GetAllNavAreas 在 OnMapStart 回调内调用会抛
+	// "should not be used before OnMapStart"（11:25/12:14/12:31 errors 实锤）。
+	// → 只清状态标记，建表推迟到首次画线/!ptg（那时 nav 早已加载完成）
+	g_sNavMap[0] = 0;
+	ResetMapState();
 }
 
 // 清理上一张图的所有状态（表/虚拟边/目标缓存跨图残留会全量失效：
@@ -427,13 +430,21 @@ void BuildVirtualEdges()
 						L4D_GetNavAreaCenter(view_as<Address>(aInt), pa);
 						L4D_GetNavAreaCenter(view_as<Address>(bInt), pb);
 						if (GetVectorDistance(pa, pb, false) > 400.0) continue;
-						if (FloatAbs(pa[2] - pb[2]) > 90.0) continue;
+						// 高度差 ≤60u（L4D2 幸存者真实数值：跳跃高度 66u、坠落伤害
+						// 阈值 66u——60u 内跳得上去且摔落无伤；旧 90u 放行跳楼边，
+						// 45u 会误砍 46-66u 可跳台阶致路径断链）
+						if (FloatAbs(pa[2] - pb[2]) > 60.0) continue;
 
 						float ta[3], tb[3];
 						ta = pa; ta[2] += 30.0;
 						tb = pb; tb[2] += 30.0;
 						TR_TraceRayFilter(ta, tb, MASK_SOLID, RayType_EndPoint, TraceFilterWorldOnly);
 						if (TR_DidHit()) continue;
+						// LOS 只证明"看得见"——无限细射线从墙顶/坡顶上方飞过也干净，
+						// 但玩家翻不过去/爬不上去。加中间地面采样：连线 25/50/75%
+						// 三点向下 trace，地面须存在且贴近线性插值（±40u），
+						// 否则拒绝（跳楼边中间悬空、翻坡边连线从坡顶飞过都过不了）
+						if (!WalkableBetween(pa, pb)) continue;
 
 						RegisterVirtualEdge(aInt, bInt);
 						RegisterVirtualEdge(bInt, aInt);
@@ -465,6 +476,35 @@ void BuildVirtualEdges()
 	g_iEntityBridges = BuildEntityBridges();
 
 	LogMessage("[PTG] virtual edges=%d (los=%d entity=%d) areas=%d time=%.1fms", edges + g_iEntityBridges, edges, g_iEntityBridges, n, (GetEngineTime() - t0) * 1000.0);
+}
+
+// ────────────────────────── 可步行性采样 ──────────────────────────
+// LOS 通过 ≠ 走得过去（细射线从墙顶/坡顶飞过、跳楼边中间悬空）。
+// 连线 25/50/75% 三点 +30u 向下 trace：地面须存在且高度贴近线性插值
+// （±40u，60u+ 才掉血的坠落阈值以下），任一不满足即拒绝该虚拟边。
+
+bool WalkableBetween(const float pa[3], const float pb[3])
+{
+	float probe[3];
+	float end[3];
+	for (int i = 1; i <= 3; i++)
+	{
+		float t = i / 4.0;
+		probe[0] = pa[0] + (pb[0] - pa[0]) * t;
+		probe[1] = pa[1] + (pb[1] - pa[1]) * t;
+		probe[2] = pa[2] + (pb[2] - pa[2]) * t + 30.0;
+		end = probe;
+		end[2] -= 500.0;
+		TR_TraceRayFilter(probe, end, MASK_SOLID, RayType_EndPoint, TraceFilterWorldOnly);
+		if (!TR_DidHit())
+			return false;   // 中间悬空（跳楼边）
+		float hitPos[3];
+		TR_GetEndPosition(hitPos);
+		float expect = pa[2] + (pb[2] - pa[2]) * t;
+		if (FloatAbs(hitPos[2] - expect) > 40.0)
+			return false;   // 地面远低于连线（翻坡/悬崖）
+	}
+	return true;
 }
 
 // ────────────────────────── 实体桥（门/可炸墙） ──────────────────────────
@@ -984,10 +1024,16 @@ ArrayList FlowPathFrom(const float pos[3], float &endFlow, int &endAttrs, Addres
 		}
 
 		// 梯度步（只在有 flow 时）：4 向邻接中 flow 严格递增
+		//（跨层邻居 Z 差 >120u 跳过——nav 悬崖边误连时防梯度跳楼；
+		//  楼梯/坡道相邻 area 差通常 <80u，120u 不误伤）
 		Address best = Address_Null;
 		float bestFlow = curFlow;
+		float curZ = 0.0;
 		if (curFlow >= 0.0)
 		{
+			float czc[3];
+			L4D_GetNavAreaCenter(cur, czc);
+			curZ = czc[2];
 			for (int dir = 0; dir < 4; dir++)
 			{
 				adj.Clear();
@@ -998,6 +1044,10 @@ ArrayList FlowPathFrom(const float pos[3], float &endFlow, int &endAttrs, Addres
 					float f = L4D2Direct_GetTerrorNavAreaFlow(a);
 					if (f >= 0.0 && f > bestFlow)
 					{
+						float zc[3];
+						L4D_GetNavAreaCenter(a, zc);
+						if (FloatAbs(zc[2] - curZ) > 120.0)
+							continue;
 						bestFlow = f;
 						best = a;
 					}
@@ -1134,6 +1184,10 @@ Address BfsBridge(Address start, float startFlow, Address goalArea, float startZ
 		{
 			int nIdx = nb.Get(j);
 			if (visited.Get(nIdx))
+				continue;
+			// 跨层邻居（Z 差 >150u）跳过——4 向悬崖边误连时防 BFS 跳楼
+			//（楼梯相邻差 <80u，150u 上限安全；虚拟边自身已限 45u + 采样）
+			if (FloatAbs(g_hCenterZ.Get(curIdx) - g_hCenterZ.Get(nIdx)) > 150.0)
 				continue;
 			visited.Set(nIdx, 1);
 			parent.Set(nIdx, curIdx);
