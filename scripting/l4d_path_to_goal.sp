@@ -1,5 +1,5 @@
 // ============================================================
-//  [L4D2] Path To Goal — flow 梯度下降重写版 v5.0.0
+//  [L4D2] Path To Goal — flow 梯度下降重写版 v5.0.1
 //
 //  弃用 11k 行自建 A* 管线（PTG v4.8.3），核心换成引擎 flow 场：
 //    引擎 flow = 从地图起点沿 nav 的弧长，递增方向 = 出口方向。
@@ -28,7 +28,7 @@
 #include <sourcemod>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION     "5.0.0 2026-08-04"
+#define PLUGIN_VERSION     "5.0.1 2026-08-12"
 #define CONFIG_FILENAME    "l4d_path_to_goal"
 
 #define TEAM_SURVIVOR      2
@@ -68,6 +68,7 @@ ArrayList g_hCenterX, g_hCenterY, g_hCenterZ;   // index → center 分量
 bool   g_bNavTableReady;     // nav 表已构建
 char   g_sNavMap[PLATFORM_MAX_PATH];  // 表所属地图（reload/换图懒重建）
 float  g_fLastPathDiag;      // path 诊断日志限频
+float  g_fLastDrawLog[MAXPLAYERS + 1];   // draw 日志每客户端限频（v5.0.1：0.3s 一条 → 10s 一条）
 
 ConVar g_hCvarEnable;
 ConVar g_hCvarDuration;
@@ -112,6 +113,26 @@ public void OnMapStart()
 // c5m3 用 silenthill 的表 → AreaToIndex 全 miss → BFS 退化 len=2）
 void ResetMapState()
 {
+	// v5.0.1 修复：换图必须清 toggle 标志 + 路径缓存。
+	// 旧版残留：OnMapEnd 只杀定时器不清标志 → 换图后上一图开过的人
+	// 首按 !ptg 把残留 on 翻成 off（"导航线 OFF"），要按两次才开；
+	// 且旧图 area 缓存在新图会被拿来画线（脏数据）。on 的玩家断线
+	// 时标志也会残留（定时器空转由 Timer_ToggleRedraw 的 !anyOn 兜底）。
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		g_bGuideToggled[i] = false;
+		if (g_hPathCache[i] != null)
+		{
+			delete g_hPathCache[i];
+			g_hPathCache[i] = null;
+		}
+		g_fPathCacheTime[i] = 0.0;
+		g_fPathCachePos[i][0] = 0.0; g_fPathCachePos[i][1] = 0.0; g_fPathCachePos[i][2] = 0.0;
+		g_fPathCacheFlow[i] = 0.0;
+		g_iPathCacheAttrs[i] = 0;
+		g_AreaPathCacheEnd[i] = Address_Null;
+	}
+
 	g_bNavReady = false;
 	g_fFlowCoverage = 0.0;
 	g_iEntityBridges = 0;
@@ -757,8 +778,11 @@ void Guide_UpdateRedrawTimer()
 
 Action Timer_ToggleRedraw(Handle timer)
 {
-	// 递归 one-shot — 先排下一次再干活
-	g_hToggleTimer = CreateTimer(REDRAW_INTERVAL, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
+	// 本回调的定时器已到期，句柄先清空（v5.0.1 修复）：
+	// 旧版"回调开头无条件排下一次 + !anyOn 时置 null"→ 已排的下一次
+	// 句柄被丢成幽灵定时器，空转永不停；开启着 PTG 的玩家断线后触发，
+	// 反复出现会叠加多个定时器 → 画线速率翻倍、空服 CPU 浪费。
+	g_hToggleTimer = null;
 
 	bool anyOn = false;
 	for (int i = 1; i <= MaxClients; i++)
@@ -814,10 +838,11 @@ Action Timer_ToggleRedraw(Handle timer)
 	}
 
 	if (!anyOn)
-	{
-		g_hToggleTimer = null;
 		return Plugin_Stop;
-	}
+
+	// 递归 one-shot — 干活干完再排下一次：TIMER_REPEAT 空服不触发
+	//（SourceMod bug，v4.5 教训），且只在还有人开着时重建
+	g_hToggleTimer = CreateTimer(REDRAW_INTERVAL, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Continue;
 }
 
@@ -830,7 +855,13 @@ void DrawPathList(int client, const float startPos[3], ArrayList path, float end
 	if (path == null || path.Length < 1)
 		return;
 	// 注意：path 由调用方管理，本函数不 delete（缓存路径复用）
-	LogMessage("[PTG] draw client=%d laser=%d len=%d flow=%.0f attrs=%d pos=(%.0f %.0f %.0f)", client, g_iLaser, path.Length, endFlow, endAttrs, startPos[0], startPos[1], startPos[2]);
+	// draw 日志 0.3s 一次全量打 → 两人同时开每秒 6 条刷日志（v5.0.1 降频：
+	// 每客户端 10s 一条，仍保留 pos/len 用于诊断）
+	if (GetEngineTime() - g_fLastDrawLog[client] > 10.0)
+	{
+		g_fLastDrawLog[client] = GetEngineTime();
+		LogMessage("[PTG] draw client=%d laser=%d len=%d flow=%.0f attrs=%d pos=(%.0f %.0f %.0f)", client, g_iLaser, path.Length, endFlow, endAttrs, startPos[0], startPos[1], startPos[2]);
+	}
 
 	int colorGood[4] = {255, 200, 75, 255};   // amber trail（全不透明，醒目）
 	int colorBad[4]  = {255, 60, 0, 255};     // blocked 段 / 断链 beacon
