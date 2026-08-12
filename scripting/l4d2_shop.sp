@@ -9,6 +9,51 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.7.5（2026-08-12）：**修复透视特感死亡残留发光框**（用户实测：特感
+ * 死亡后蓝色透视框不消失）——根因：WallhackApplyGlow/WallhackClearGlow
+ * 都跳过 !IsPlayerAlive 的特感，m_iGlowType 3 残留在尸体/鬼魂实体上
+ * 没人清；Event_PlayerDeath 只处理幸存者（队 2），特感（队 3）死亡
+ * 不触发任何清理。修复：① 特感死亡事件立即清 m_iGlowType；② 心跳/
+ * 清光对死亡特感改为清光而非跳过；③ 兜底清 ragdoll 尸体残留发光
+ * （HasEntProp 守卫防误伤无 prop 实体）。
+ *
+ * v1.7.3（2026-08-05）：新增「弹药补充」商品（用户拍板）——ammo_refill
+ * 特殊商品（补给品类，价格 800 默认可调）：不 spawn 实体，直接补满当前
+ * 主武器 + 副武器的弹匣（m_iClip1）与后备弹药（m_iExtraPrimaryAmmo）。
+ * 上限表 = 官方默认 clipsize + 服务器配置覆盖（AK47 40 / M60 254 与
+ * l4d2_m60_ammo sm_m60_clip 一致 / 电锯 90 燃料）；后备弹药官方值
+ * （SMG 650 / 步枪 360 / 狙击 180 / 霰弹 72 / 手枪 100 / GL 30 / M60 150）。
+ * SHOP_SLOTS 23→24，表尾追加不动 WALLHACK_SLOT 11。
+ *
+ * v1.7.4（2026-08-05）：**修复弹药补充后备不生效**（用户实测：弹匣补了，
+ * 后备弹药没变）——根因：L4D2 后备弹药真值在玩家实体 m_iAmmo 数组
+ * （按弹药类型索引），武器上的 m_iExtraPrimaryAmmo 只是镜像，引擎换弹/
+ * 下 tick 用 m_iAmmo 覆盖回真实值。v1.7.3 只改了镜像 → 后备"没效果"。
+ * 修复：读武器 m_iPrimaryAmmoType 作索引，SetEntProp(client, m_iAmmo, ...)
+ * 写真值（survivor_chat_select 同款引擎标准做法），m_iExtraPrimaryAmmo
+ * 仍同步写保持 HUD 立即刷新。
+ *
+ * v1.7.2（2026-08-05）：**修复火炮 III 在无限尸潮图崩溃**（13:53 段错误，
+ * dearesther m2 onslaught：每 1-3s 刷 15-20 只 MegaMob）——touch-miss 罐子
+ * 的 fallback 强拆 L4D_DetonateProjectile（引擎 CBaseGrenade::Detonate）在
+ * 超大僵尸压力下引擎内部段错误。改为**手动碎裂**（复刻 ExplodeVomit 结构）：
+ * Kill 罐子 + info_particle_system 碎裂粒子（ART3_BREAK_PARTICLE，待客户端
+ * 确认定稿）+ info_goal_infected_chase 吸引 8s（控场本体，社区插件同款）。
+ * 附带 sm_art3_pfx 粒子名实测脚手架（验证后删除）。
+ *
+ * v1.7.1（2026-08-05）：修复商品表幽灵槽——SHOP_SLOTS 24→23（v1.7.0 删复活币
+ * 后表内只剩 23 行，末槽零初始化 = 武器类菜单出现 0 分空商品）；同步修正
+ * WALLHACK_SLOT 12→11（复活币行删除使透视特感滑到 11，12 变成近战盲盒，
+ * "透视生效中"标签错挂盲盒，连带修正）。
+ *
+ * v1.7.0（2026-08-04）：复活币废除（配套 si_hud v1.12.0，user 拍板规避
+ * "屯币被换图意外清空"风险）——删除"复活币 8500"商品与 SH_GetReviveCoins/
+ * SH_AddReviveCoins/SH_GetCoinMax/SH_ReviveClient 调用（natives 已在 si_hud
+ * 移除）；全商店倒地/死亡禁购（死亡→积分复活 30s 窗口内积分只增不减，
+ * 保证复活瞬间必够 si_hud_revive_cost 6000）；火力支援分支原倒地拦截
+ * 上移统一到 ShopBuy 入口；复活套装（SH_OnClientRespawned）免费命与
+ * 积分复活都发（不变）。
+ *
  * 跨插件绑定（字母序 l4d2_shop < l4d2_si_hud，必须可选绑定）：
  *   OnAllPluginsLoaded / OnLibraryAdded("l4d2_si_hud_api") 时用
  *   GetNativeHandle 获取 5 个 SH_ 句柄，OnLibraryRemoved 清空；
@@ -19,6 +64,7 @@
  * 医疗包 3000、激光 1500、M60 5000、电锯 5000、榴弹 6500、复活币 8500、
  * 透视 4000/5min（生效期间不可重复购买）、近战盲盒 1000、烟花 1200、
  * 火力支援I-绿色雨幕 3500/15s、火力支援II-地狱烈火 6500/25s、火力支援III-饱和轰炸 7500/30s（罐+榴弹混合）。
+ * v1.7.3: + 弹药补充 800（补给品，补满主/副武器弹匣+后备，上限表见 ShopAmmoRefill）。
  *
  * v1.0.1（2026-08-03）：火力支援仅收紧半径（时长 30s/25s 不变）——
  * I -25%：750/525/375→562.5/393.75/281.25；II -10%：半径拆独立组
@@ -200,7 +246,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.6.4"
+#define PLUGIN_VERSION "1.7.5"
 
 // ============================================================================
 // SH_ public API（l4d2_si_hud >= v1.9.0 导出；契约见 include/l4d2_si_hud.inc）
@@ -213,10 +259,7 @@
 
 native int SH_GetWallet(int client);
 native int SH_AddWallet(int client, int amount);
-native int SH_GetReviveCoins(int client);
-native int SH_AddReviveCoins(int client, int amount);
-native int SH_GetCoinMax();
-native int SH_ReviveClient(int client);   // v1.2.4: 躺尸玩家购买复活币立即生效
+// v1.7.0: 复活币 natives（Get/AddReviveCoins/GetCoinMax/ReviveClient）已随 si_hud v1.12.0 移除
 
 ConVar g_cvSIHudEnable;      // si_hud 总开关（FindConVar 读；null 视为开启）
 
@@ -305,12 +348,18 @@ ConVar g_cvRespawnHealth;   // v1.5.1: 复活套装满血值（0=不动）
 #define ART2_CAN_PROPANE_PCT 70       // kind 2 池：70% 油桶 + 30% 烟花
 #define ART_TICK_INT         0.05     // 瞄准心跳间隔（标记更新 + 右键/超时/死亡检测）
 #define ART_CEIL_THIN        100.0    // 薄遮挡厚度阈值（u）
+// v1.7.2: touch-miss 手动碎裂的碎裂粒子（引擎 ExplodeVomit 同款视觉；L4D2 粒子
+// 客户端渲染服务端不验证——2026-08-05 实测候选：weapon_vomitjar_break /
+// vomitjar_break / vomitjar_impact / boomer_explosion / weapon_vomitjar_impact，
+// 待客户端确认后定稿替换）
+#define ART3_BREAK_PARTICLE  "boomer_explosion"
+#define ART3_CHASE_DURATION  8.0      // 吸引实体存活秒数（控场时长）
 
-#define SHOP_SLOTS      24      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）
+#define SHOP_SLOTS      24      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）
 
 #define MELEE_POOL_COUNT   12
 
-#define WALLHACK_SLOT       12      // g_ShopTable 槽位（= 透视特感）
+#define WALLHACK_SLOT       11      // g_ShopTable 槽位（= 透视特感）；v1.7.1: 12→11（v1.7.0 删复活币行使透视滑到 11）
 #define WALLHACK_DURATION   180.0   // v1.8.2: 3 分钟（2026-08-03 用户改回，原 v1.8.1 定稿 300=5 分钟）
 // v1.0.10: 生效期间不可重复购买 → WALLHACK_CAP（900s 续费封顶）已删除
 
@@ -345,7 +394,8 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "M60 轻机枪",  "weapon_rifle_m60",                 5000,  0,  0 },   // v1.7.96: 用户定稿 5000
     { "电锯",        "weapon_chainsaw",                  5000,  0,  0 },   // v1.7.44
     { "榴弹发射器",  "weapon_grenade_launcher",          6500,  0,  0 },   // v1.7.96: 用户定稿 6500（原 8000）
-    { "复活币",      "",                                 8500,  0,  3 },   // v1.8.1: 用户定稿 8500（v1.7.96 定稿 9000）；v1.4.7: 移入其他类
+    // v1.7.0: "复活币 8500" 商品已删除（复活体系改为积分复活，见 si_hud v1.12.0）
+    // v1.7.1: 删除后透视特感滑到槽 11，WALLHACK_SLOT 已同步改 11
     { "透视特感",    "wallhack",                         4000,  0,  3 },   // v1.8.1: 用户定稿 4000/5分钟（原 6000/3分钟；可续费至 15 分钟）
     { "近战盲盒",    "melee_box",                        1000,  0,  0 },   // v1.7.96: 用户定稿 1000（原 3000）
     { "烟花",        "weapon_fireworkcrate",             1200,  0,  1 },   // v1.7.96: 用户定稿 1200（原 2500）
@@ -369,6 +419,9 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     , { "胆汁",        "weapon_vomitjar",                1275,  0,  5 }   // v1.4.9: 投掷品 ×1.5（原 850）
     , { "土质炸弹",    "weapon_pipe_bomb",               1350,  0,  5 }   // v1.4.9: 投掷品 ×1.5（原 900）
     , { "燃烧瓶",      "weapon_molotov",                 3750,  0,  5 }   // v1.4.9: 投掷品 ×1.5（原 2500）
+    // v1.7.3: 弹药补充——特殊商品（不 spawn 实体，直接补满主/副武器弹匣+后备弹药，
+    // 见 ShopAmmoRefill）；表尾追加不动 WALLHACK_SLOT 11；价格 800 默认（用户可调）
+    , { "弹药补充",    "ammo_refill",                     800,  0,  2 }
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -670,6 +723,9 @@ public void OnPluginStart()
     // v1.6.0: 测试发分——直接写钱包（admin；sm_shop_give <名字> <积分>）
     RegAdminCmd("sm_shop_give", Cmd_ShopGive, ADMFLAG_ROOT,
         "[DEBUG] give wallet score: sm_shop_give <name> <amount>");
+    // v1.7.1-tmp: 粒子名实测脚手架（方案A 崩溃修复用；验证后删除）——sm_art3_pfx <effect_name> [x y z]
+    RegAdminCmd("sm_art3_pfx", Cmd_Art3PfxTest, ADMFLAG_ROOT,
+        "[DEBUG] create info_particle_system with given effect_name (vomitjar break fix).");
 
     // ── Events ──────────────────────────────────────────
 
@@ -840,11 +896,19 @@ public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcas
 public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
     int victim = GetClientOfUserId(event.GetInt("userid"));
-    if (victim >= 1 && victim <= MaxClients
-        && IsClientInGame(victim) && GetClientTeam(victim) == 2)
+    if (victim < 1 || victim > MaxClients || !IsClientInGame(victim))
+        return Plugin_Continue;
+    if (GetClientTeam(victim) == 2)
     {
         if (g_bWallhack[victim])
             WallhackEnd(victim);
+    }
+    else if (GetClientTeam(victim) == 3)
+    {
+        // v1.7.5: 特感死亡立即清残留发光——旧版没人清（心跳 ApplyGlow/
+        // ClearGlow 都跳过 !IsPlayerAlive），m_iGlowType 3 挂在尸体/鬼魂
+        // 实体上，蓝色透视框到复活/换局才消失
+        SetEntProp(victim, Prop_Send, "m_iGlowType", 0);
     }
     return Plugin_Continue;
 }
@@ -1109,6 +1173,15 @@ void ShopBuy(int client, int slot)
     LogMessage("[shop-buy] client=%N slot=%d cls='%s' price=%d wallet=%d",
         client, slot, g_ShopTable[slot].classname, g_ShopTable[slot].price, SH_GetWallet(client));
 
+    // v1.7.0 (user 拍板): 倒地/死亡状态禁止购物——死亡→积分复活 30s 窗口内
+    // 积分只增不减，保证复活瞬间必够 si_hud_revive_cost（si_hud v1.12.0 配套；
+    // 原火力支援分支的同类拦截上移统一到入口）。
+    if (!IsPlayerAlive(client) || L4D_IsPlayerIncapacitated(client))
+    {
+        PrintToChat(client, "\x04[商店]\x01 倒地/死亡状态无法使用商店");
+        return;
+    }
+
     int price = g_ShopTable[slot].price;
     if (SH_GetWallet(client) < price)
     {
@@ -1121,16 +1194,6 @@ void ShopBuy(int client, int slot)
     {
         PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 本图已购满（%d/%d）",
             g_ShopTable[slot].name, g_iShopBought[client][slot], g_ShopTable[slot].limit);
-        return;
-    }
-
-    // 复活币持有上限检查（必须在扣款前——v1.7.31b fix：原来在扣款后，
-    // 达上限购买会扣分不给币）
-    if (g_ShopTable[slot].classname[0] == '\0'
-        && SH_GetReviveCoins(client) >= SH_GetCoinMax())
-    {
-        PrintToChat(client, "\x04[商店]\x01 复活币已达持有上限 \x03%d\x01 枚，无法再购买",
-            SH_GetCoinMax());
         return;
     }
 
@@ -1161,20 +1224,6 @@ void ShopBuy(int client, int slot)
     SH_AddWallet(client, -price);
     g_iShopBought[client][slot]++;
 
-    // 复活币（classname 空）：不 spawn 物品，余额 +1 枚（战役内保留）
-    if (g_ShopTable[slot].classname[0] == '\0')
-    {
-        int coins = SH_AddReviveCoins(client, 1);
-        // v1.2.4 (bug): 复活判定只响应 player_death——已躺尸玩家买币后
-        // 不会再有死亡事件，币白买。SH_ReviveClient 对真死亡玩家消耗刚买
-        // 的币立即安排复活（内部播报倒计时）；存活玩家返回 0 正常囤积
-        bool revived = (SH_ReviveClient(client) == 1);
-        PrintToChat(client, "\x04[商店]\x01 已购买 \x05复活币\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），复活币余额 \x03%d\x01 枚%s",
-            price, SH_GetWallet(client), coins,
-            revived ? "——复活币已生效，即将复活" : "");
-        return;
-    }
-
     // v1.7.49: 激光直接上主武器——L4D2 激光 = 武器升级位 m_upgradeBitVec
     // （netprops dump 实锤 offset 6116, networked）。位值：1=燃烧弹 2=高爆弹 4=激光。
     // 排障链（2026-08-02）：SetEntProp m_bHasLaserSight 无此 prop / upgrade_laser_sight
@@ -1196,6 +1245,21 @@ void ShopBuy(int client, int slot)
         LogMessage("[shop-laser] m_upgradeBitVec %d -> %d weapon=%d client=%N",
             upgrade, upgrade | 4, weapon, client);
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05激光瞄准\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），激光已装备到当前主武器",
+            price, SH_GetWallet(client));
+        return;
+    }
+
+    // v1.7.3: 弹药补充——不 spawn 实体，直接补满当前主/副武器弹匣+后备弹药
+    if (StrEqual(g_ShopTable[slot].classname, "ammo_refill"))
+    {
+        if (ShopAmmoRefill(client) == 0)
+        {
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            PrintToChat(client, "\x04[商店]\x01 购买失败（未持有可用武器），积分已退回");
+            return;
+        }
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05弹药补充\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），弹匣与后备弹药已补满",
             price, SH_GetWallet(client));
         return;
     }
@@ -1244,18 +1308,7 @@ void ShopBuy(int client, int slot)
         || StrEqual(g_ShopTable[slot].classname, "artillery4")
         || StrEqual(g_ShopTable[slot].classname, "artillery5"))
     {
-        // v1.7.82: 倒地/死亡状态拦截（用户边界审查）——倒地/死亡无法开火确认，
-        // 买了也立即被心跳退款，直接拒绝更清晰
-        // v1.7.0 FIX: IsPlayerAlive 对倒地玩家返回 true（倒地=存活）→ 只拦死了没拦倒地；
-        // 补 L4D_IsPlayerIncapacitated 才算完整拦截（left4dhooks 已包含，si_hud 同款用法）
-        if (!IsPlayerAlive(client) || L4D_IsPlayerIncapacitated(client))
-        {
-            SH_AddWallet(client, price);
-            g_iShopBought[client][slot]--;
-            PrintToChat(client, "\x04[商店]\x01 倒地/死亡状态无法使用\x05%s\x01，积分已退回",
-                g_ShopTable[slot].name);
-            return;
-        }
+        // v1.7.0: 倒地/死亡拦截已上移统一到 ShopBuy 入口（全商店禁购），此处不再需要
         // v1.7.80: 全局硬冷却——轰炸中/结束后 si_hud_art_cooldown 秒内全体禁止购买（用户拍板）
         float wait = g_fArtNextBuyTime - GetGameTime();
         if (!g_cvArtEnable.BoolValue || wait > 0.0)
@@ -1325,6 +1378,110 @@ void ShopBuy(int client, int slot)
 }
 
 // ============================================================================
+// v1.7.3: 弹药补充（!shop 特殊商品「ammo_refill」）——不 spawn 实体，直接
+// 补满主武器（slot 0）+ 副武器（slot 1）的弹匣（m_iClip1）与后备弹药
+// （m_iExtraPrimaryAmmo）。上限表 = 官方默认 clipsize + 服务器配置覆盖
+// （AK47 40 / M60 254 与 l4d2_m60_ammo sm_m60_clip 一致 / 电锯 90 = 燃料，
+// 燃料即 m_iClip1）+ 官方后备弹药（SMG 650 / 步枪 360 / 狙击 180 / 霰弹 72 /
+// 手枪 100 / GL 30 / M60 150）。未知武器返回 0（跳过，不破坏原状态）。
+// 返回补到的武器数（0 = 无可用武器 → ShopBuy 退款）。
+// ============================================================================
+
+int Ammo_ClipMax(const char[] cls)
+{
+    if (StrEqual(cls, "weapon_pistol"))
+        return 15;
+    if (StrEqual(cls, "weapon_pistol_magnum"))
+        return 8;
+    if (StrEqual(cls, "weapon_smg") || StrEqual(cls, "weapon_smg_silenced")
+        || StrEqual(cls, "weapon_smg_mp5"))
+        return 50;
+    if (StrEqual(cls, "weapon_rifle") || StrEqual(cls, "weapon_rifle_sg552"))
+        return 50;
+    if (StrEqual(cls, "weapon_rifle_ak47"))
+        return 40;                                   // 服务器配置（weapon_init.cfg）
+    if (StrEqual(cls, "weapon_rifle_desert"))
+        return 60;
+    if (StrEqual(cls, "weapon_rifle_m60"))
+        return 254;                                  // 服务器配置（l4d2_m60_ammo sm_m60_clip 254）
+    if (StrEqual(cls, "weapon_hunting_rifle"))
+        return 15;
+    if (StrEqual(cls, "weapon_sniper_military"))
+        return 30;
+    if (StrEqual(cls, "weapon_sniper_scout"))
+        return 15;
+    if (StrEqual(cls, "weapon_sniper_awp"))
+        return 20;
+    if (StrEqual(cls, "weapon_pumpshotgun") || StrEqual(cls, "weapon_shotgun_chrome"))
+        return 8;
+    if (StrEqual(cls, "weapon_autoshotgun") || StrEqual(cls, "weapon_shotgun_spas"))
+        return 10;
+    if (StrEqual(cls, "weapon_grenade_launcher"))
+        return 1;
+    if (StrEqual(cls, "weapon_chainsaw"))
+        return 90;                                   // 燃料 = m_iClip1（服务器配置）
+    return 0;
+}
+
+int Ammo_ReserveMax(const char[] cls)
+{
+    if (StrEqual(cls, "weapon_pistol") || StrEqual(cls, "weapon_pistol_magnum"))
+        return 100;
+    if (StrEqual(cls, "weapon_smg") || StrEqual(cls, "weapon_smg_silenced")
+        || StrEqual(cls, "weapon_smg_mp5"))
+        return 650;
+    if (StrEqual(cls, "weapon_rifle") || StrEqual(cls, "weapon_rifle_sg552")
+        || StrEqual(cls, "weapon_rifle_ak47") || StrEqual(cls, "weapon_rifle_desert"))
+        return 360;
+    if (StrEqual(cls, "weapon_rifle_m60"))
+        return 150;
+    if (StrEqual(cls, "weapon_hunting_rifle") || StrEqual(cls, "weapon_sniper_military")
+        || StrEqual(cls, "weapon_sniper_scout") || StrEqual(cls, "weapon_sniper_awp"))
+        return 180;
+    if (StrEqual(cls, "weapon_pumpshotgun") || StrEqual(cls, "weapon_shotgun_chrome")
+        || StrEqual(cls, "weapon_autoshotgun") || StrEqual(cls, "weapon_shotgun_spas"))
+        return 72;
+    if (StrEqual(cls, "weapon_grenade_launcher"))
+        return 30;
+    return 0;                                        // 电锯无后备弹药
+}
+
+int ShopAmmoRefill(int client)
+{
+    int filled = 0;
+    for (int slot = 0; slot <= 1; slot++)
+    {
+        int weapon = GetPlayerWeaponSlot(client, slot);
+        if (weapon <= 0 || !IsValidEntity(weapon))
+            continue;
+        char cls[32];
+        GetEntityClassname(weapon, cls, sizeof(cls));
+        int clipMax = Ammo_ClipMax(cls);
+        int resMax = Ammo_ReserveMax(cls);
+        int ammoType = -1;
+        if (clipMax > 0)
+            SetEntProp(weapon, Prop_Send, "m_iClip1", clipMax);
+        if (resMax > 0)
+        {
+            // v1.7.4: 后备弹药真值在玩家 m_iAmmo 数组（引擎按 m_iPrimaryAmmoType
+            // 索引）——m_iExtraPrimaryAmmo 只是武器镜像，引擎换弹/下 tick 会用
+            // m_iAmmo 覆盖回真实值，只改镜像 = 后备"没效果"（用户实测实锤）。
+            // 读武器弹药类型索引，写玩家数组真值（survivor_chat_select 同款）；
+            // 镜像仍同步写，HUD 立即刷新。
+            ammoType = GetEntProp(weapon, Prop_Send, "m_iPrimaryAmmoType");
+            if (ammoType != -1)
+                SetEntProp(client, Prop_Send, "m_iAmmo", resMax, _, ammoType);
+            SetEntProp(weapon, Prop_Send, "m_iExtraPrimaryAmmo", resMax);
+        }
+        if (clipMax > 0 || resMax > 0)
+            filled++;
+        LogMessage("[shop-ammo] client=%N slot=%d cls=%s clip=%d reserve=%d ammoType=%d filled=%d",
+            client, slot, cls, clipMax, resMax, ammoType, filled);
+    }
+    return filled;
+}
+
+// ============================================================================
 // 商店菜单（分类 → 商品；VguiMenu 标题必须单行）
 // ============================================================================
 
@@ -1333,8 +1490,8 @@ void OpenShopMenu(int client)
     Menu menu = new Menu(ShopCatMenuHandler);
     // v1.7.32c FIX: title 必须单行 — L4D2 VguiMenu 标题不支持 \n，
     // 多行标题 → 整个菜单不渲染（用户实测 !buy 无反应，!csm 的 Panel 单行正常）
-    menu.SetTitle("商店: 可用积分 %d  复活币 %d 枚",
-        SH_GetWallet(client), SH_GetReviveCoins(client));
+    menu.SetTitle("商店: 可用积分 %d",
+        SH_GetWallet(client));
     menu.AddItem("0", "武器类");
     menu.AddItem("1", "道具类");
     menu.AddItem("2", "补给品");    // v1.4.6: 原"医疗类"改名（含医疗+弹药升级包）
@@ -1353,8 +1510,8 @@ void ShopCategoryMenu(int client, int cat)
     char catNames[6][16] = { "武器类", "道具类", "补给品", "其他", "火力支援", "投掷品" };   // v1.4.6/v1.4.7: 医疗类→补给品、投掷→投掷品
     Menu menu = new Menu(ShopItemMenuHandler);
     char title[96];
-    Format(title, sizeof(title), "%s: 可用积分 %d  复活币 %d 枚",
-        catNames[cat], SH_GetWallet(client), SH_GetReviveCoins(client));
+    Format(title, sizeof(title), "%s: 可用积分 %d",
+        catNames[cat], SH_GetWallet(client));
     menu.SetTitle(title);
 
     char info[4];
@@ -1637,8 +1794,15 @@ void WallhackApplyGlow()
 {
     for (int i = 1; i <= MaxClients; i++)
     {
-        if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != 3)
+        if (!IsClientInGame(i) || GetClientTeam(i) != 3)
             continue;
+        // v1.7.5: 死亡特感清残留发光而非跳过（旧版 !IsPlayerAlive 跳过 →
+        // 死亡后 m_iGlowType 3 残留在尸体/鬼魂上，透视框不消失）
+        if (!IsPlayerAlive(i))
+        {
+            SetEntProp(i, Prop_Send, "m_iGlowType", 0);
+            continue;
+        }
         SetEntProp(i, Prop_Send, "m_iGlowType", 3);
         SetEntProp(i, Prop_Send, "m_nGlowRange", 999999);
         SetEntProp(i, Prop_Send, "m_nGlowRangeMin", 0);
@@ -1657,14 +1821,16 @@ void WallhackApplyGlow()
         SetEntProp(w, Prop_Send, "m_nGlowRangeMin", 0);
         SetEntProp(w, Prop_Send, "m_glowColorOverride", 0 | (0 << 8) | (255 << 16) | (255 << 24));  // 蓝
     }
+    WallhackClearRagdolls();   // v1.7.5: 尸体 ragdoll 残留发光兜底
 }
 
 void WallhackClearGlow()
 {
     for (int i = 1; i <= MaxClients; i++)
     {
-        if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != 3)
+        if (!IsClientInGame(i) || GetClientTeam(i) != 3)
             continue;
+        // v1.7.5: 死亡特感同样要清（旧版 !IsPlayerAlive 跳过 → 残留）
         SetEntProp(i, Prop_Send, "m_iGlowType", 0);
     }
     for (int i = 0; i < g_hWitchList.Length; i++)
@@ -1672,6 +1838,20 @@ void WallhackClearGlow()
         int w = g_hWitchList.Get(i);
         if (IsValidEntity(w) && IsWitchEntity(w))
             SetEntProp(w, Prop_Send, "m_iGlowType", 0);
+    }
+    WallhackClearRagdolls();   // v1.7.5: 尸体 ragdoll 残留发光兜底
+}
+
+// v1.7.5: 兜底清 ragdoll 尸体残留发光——特感死亡的尸体是 ragdoll 实体，
+// 若引擎在死亡时把 m_iGlowType 复制到 ragdoll，玩家实体上的清理管不到
+// 它。HasEntProp 守卫：无此 prop 的 ragdoll 直接跳过（零错误零噪音）。
+void WallhackClearRagdolls()
+{
+    int ent = -1;
+    while ((ent = FindEntityByClassname(ent, "physics_prop_ragdoll")) != -1)
+    {
+        if (HasEntProp(ent, Prop_Send, "m_iGlowType") && GetEntProp(ent, Prop_Send, "m_iGlowType") != 0)
+            SetEntProp(ent, Prop_Send, "m_iGlowType", 0);
     }
 }
 
@@ -2775,11 +2955,48 @@ public Action Timer_Art3GroundTouch(Handle timer, DataPack dp)
     int ent = EntRefToEntIndex(ref);
     if (ent <= 0 || !IsValidEntity(ent))
         return Plugin_Continue;              // 已自然触碰碎裂 → 引擎全流程 ✓
-    LogMessage("[artillery3] touch-miss ent=%d force-detonate (fallback 兜底半碎裂)", ent);
-    g_bArt3Detonating = true;                // v1.2.5 手动窗口：拦截幸存者被淋
-    L4D_DetonateProjectile(ent);             // v1.2.1: 现成 native 强裂（原 SDKCall 已删）
-    g_bArt3Detonating = false;
-    if (IsValidEntity(ent))                  // Detonate 未销毁实体 → 兜底 Kill
+
+    float origin[3];
+    GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", origin);
+
+    // v1.7.2 FIX（2026-08-05 13:53 崩溃）：dearesther m2 onslaught 无限尸潮
+    // （每 1-3s 刷 15-20 只 MegaMob）下 L4D_DetonateProjectile 引擎内部段错误
+    // （CBaseGrenade::Detonate 喷胆汁阶段崩：pre hook 已执行、bile applied 未
+    // 执行）——不再调引擎 detonate，改手动碎裂（复刻 ExplodeVomit 结构：
+    // 粒子 + info_goal_infected_chase 吸引）。
+    LogMessage("[artillery3] touch-miss ent=%d manual-break (v1.7.2 手动碎裂防引擎 detonate 崩溃)", ent);
+
+    // 1) 碎裂粒子（视觉，客户端渲染；名字见 ART3_BREAK_PARTICLE）
+    int pfx = CreateEntityByName("info_particle_system");
+    if (pfx != -1)
+    {
+        DispatchKeyValueVector(pfx, "origin", origin);
+        DispatchKeyValue(pfx, "effect_name", ART3_BREAK_PARTICLE);
+        DispatchSpawn(pfx);
+        ActivateEntity(pfx);
+        AcceptEntityInput(pfx, "Start");
+        CreateTimer(3.0, Timer_Art3KillPfx, EntIndexToEntRef(pfx), TIMER_FLAG_NO_MAPCHANGE);
+    }
+
+    // 2) 吸引（控场本体：僵尸冲向碎裂点——引擎 ExplodeVomit 同款实体，
+    //    社区插件 SI Command Chase Common 同款用法，不依赖被淋状态）
+    int chase = CreateEntityByName("info_goal_infected_chase");
+    if (chase != -1)
+    {
+        TeleportEntity(chase, origin, NULL_VECTOR, NULL_VECTOR);
+        DispatchSpawn(chase);
+        CreateTimer(ART3_CHASE_DURATION, Timer_Art3KillChase,
+            EntIndexToEntRef(chase), TIMER_FLAG_NO_MAPCHANGE);
+    }
+
+    AcceptEntityInput(ent, "Kill");          // 罐子本体销毁（跳过引擎 detonate）
+    return Plugin_Continue;
+}
+
+public Action Timer_Art3KillChase(Handle timer, int ref)
+{
+    int ent = EntRefToEntIndex(ref);
+    if (ent > 0 && IsValidEntity(ent))
         AcceptEntityInput(ent, "Kill");
     return Plugin_Continue;
 }
@@ -2838,6 +3055,56 @@ public Action L4D2_OnHitByVomitJar(int victim, int &attacker)
 }
 
 // v1.1.0: 空服实测脚手架——准星处单瓶（验证坠落→碎裂→上胆汁全链路）
+// v1.7.1-tmp: 粒子名实测（方案A 崩溃修复用；验证后删除）——rcon/控制台友好，
+// 无坐标用玩家位置，控制台默认 (0,0,0)。引擎对无效 effect_name 的报错会进日志。
+public Action Cmd_Art3PfxTest(int client, int args)
+{
+    if (args < 1)
+    {
+        ReplyToCommand(client, "Usage: sm_art3_pfx <effect_name> [x y z]");
+        return Plugin_Handled;
+    }
+    char name[128];
+    GetCmdArg(1, name, sizeof(name));
+    float pos[3] = { 0.0, 0.0, 0.0 };
+    if (args >= 4)
+    {
+        char buf[16];
+        GetCmdArg(2, buf, sizeof(buf)); pos[0] = StringToFloat(buf);
+        GetCmdArg(3, buf, sizeof(buf)); pos[1] = StringToFloat(buf);
+        GetCmdArg(4, buf, sizeof(buf)); pos[2] = StringToFloat(buf);
+    }
+    else if (client > 0)
+    {
+        GetClientAbsOrigin(client, pos);
+        pos[2] += 40.0;
+    }
+    int pfx = CreateEntityByName("info_particle_system");
+    if (pfx == -1)
+    {
+        ReplyToCommand(client, "info_particle_system create failed");
+        return Plugin_Handled;
+    }
+    DispatchKeyValueVector(pfx, "origin", pos);
+    DispatchKeyValue(pfx, "effect_name", name);
+    DispatchSpawn(pfx);
+    ActivateEntity(pfx);
+    AcceptEntityInput(pfx, "Start");
+    LogMessage("[art3-pfx] created effect_name='%s' at (%.0f %.0f %.0f) ent=%d",
+        name, pos[0], pos[1], pos[2], pfx);
+    CreateTimer(6.0, Timer_Art3KillPfx, EntIndexToEntRef(pfx), TIMER_FLAG_NO_MAPCHANGE);
+    ReplyToCommand(client, "[art3-pfx] spawned '%s' — check log for engine errors", name);
+    return Plugin_Handled;
+}
+
+public Action Timer_Art3KillPfx(Handle timer, int ref)
+{
+    int ent = EntRefToEntIndex(ref);
+    if (ent > 0 && IsValidEntity(ent))
+        AcceptEntityInput(ent, "Kill");
+    return Plugin_Continue;
+}
+
 public Action Cmd_Art3Test(int client, int args)
 {
     float target[3];
