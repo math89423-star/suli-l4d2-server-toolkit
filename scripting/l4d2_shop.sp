@@ -15,7 +15,10 @@
  * 没人清；Event_PlayerDeath 只处理幸存者（队 2），特感（队 3）死亡
  * 不触发任何清理。修复：① 特感死亡事件立即清 m_iGlowType；② 心跳/
  * 清光对死亡特感改为清光而非跳过；③ 兜底清 ragdoll 尸体残留发光
- * （HasEntProp 守卫防误伤无 prop 实体）。
+ * （HasEntProp 守卫防误伤无 prop 实体）。Witch 同款问题一并修复：
+ * player_death 的 entityid 字段即 Witch 实体索引（si_hud 同款检测），
+ * 死亡立即清光并从 g_hWitchList 剔除；心跳/清光对 m_iHealth<=0 的
+ * Witch 清光 + 剔除，防止 ApplyGlow 再给死 Witch 上光。
  *
  * v1.7.3（2026-08-05）：新增「弹药补充」商品（用户拍板）——ammo_refill
  * 特殊商品（补给品类，价格 800 默认可调）：不 spawn 实体，直接补满当前
@@ -895,6 +898,20 @@ public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcas
 // 幸存者死亡 → 透视效果丢失（用户规则）
 public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
+    // v1.7.5: Witch 死亡（player_death 的 entityid = witch 实体，si_hud 同款
+    // 检测）→ 立即清光 + 从表剔除——旧版无存活判定：Witch 实体死亡后若
+    // 残留，心跳 ApplyGlow 每 0.5s 把尸体重新上光，透视框永不消失
+    int entityid = event.GetInt("entityid");
+    if (entityid > 0 && IsWitchEntity(entityid))
+    {
+        if (g_hWitchList != null && g_hWitchList.FindValue(entityid) != -1)
+        {
+            SetEntProp(entityid, Prop_Send, "m_iGlowType", 0);
+            g_hWitchList.Erase(g_hWitchList.FindValue(entityid));
+        }
+        return Plugin_Continue;
+    }
+
     int victim = GetClientOfUserId(event.GetInt("userid"));
     if (victim < 1 || victim > MaxClients || !IsClientInGame(victim))
         return Plugin_Continue;
@@ -1816,6 +1833,14 @@ void WallhackApplyGlow()
             g_hWitchList.Erase(i--);
             continue;
         }
+        // v1.7.5: 死亡 Witch 清光并从表剔除（旧版无存活判定 → 心跳每 0.5s
+        // 把死亡残留实体重新上光，尸体框永不消失）
+        if (GetEntProp(w, Prop_Data, "m_iHealth") <= 0)
+        {
+            SetEntProp(w, Prop_Send, "m_iGlowType", 0);
+            g_hWitchList.Erase(i--);
+            continue;
+        }
         SetEntProp(w, Prop_Send, "m_iGlowType", 3);
         SetEntProp(w, Prop_Send, "m_nGlowRange", 999999);
         SetEntProp(w, Prop_Send, "m_nGlowRangeMin", 0);
@@ -1836,8 +1861,15 @@ void WallhackClearGlow()
     for (int i = 0; i < g_hWitchList.Length; i++)
     {
         int w = g_hWitchList.Get(i);
-        if (IsValidEntity(w) && IsWitchEntity(w))
-            SetEntProp(w, Prop_Send, "m_iGlowType", 0);
+        if (!IsValidEntity(w) || !IsWitchEntity(w))
+        {
+            g_hWitchList.Erase(i--);
+            continue;
+        }
+        SetEntProp(w, Prop_Send, "m_iGlowType", 0);
+        // v1.7.5: 死亡 Witch 一并从表剔除（防残留实体再被 ApplyGlow 上光）
+        if (GetEntProp(w, Prop_Data, "m_iHealth") <= 0)
+            g_hWitchList.Erase(i--);
     }
     WallhackClearRagdolls();   // v1.7.5: 尸体 ragdoll 残留发光兜底
 }
