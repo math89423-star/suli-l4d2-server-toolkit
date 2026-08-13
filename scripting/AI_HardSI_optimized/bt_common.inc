@@ -122,6 +122,14 @@ stock int BT_CreateIsTargetInRange(float maxDist) {
     return id;
 }
 
+// v5.8: 压力感知版本 — 攻击距离随压力缩放（高压力时更远开火）
+stock int BT_CreateIsTargetInRange_Scaled(float maxDist) {
+    int id = BT_Create(BTN_CONDITION);
+    g_hBTFunc[id] = CND_IsTargetInRange_Scaled;
+    g_fBTNodeUserParam1[id] = maxDist;
+    return id;
+}
+
 stock int BT_CreateIsNotTargetInRange(float maxDist) {
     return BT_CreateInverter(BT_CreateIsTargetInRange(maxDist));
 }
@@ -234,6 +242,24 @@ BT_Status CND_IsTargetInRange(int client) {
     GetClientAbsOrigin(client, sPos);
     GetClientAbsOrigin(target, tPos);
     return (GetVectorDistance(sPos, tPos) <= maxDist) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// v5.8: 压力感知版本 — 高压力时更远触发攻击（maxDist ÷ aggression）
+// T1(0.7): 850u → 1214u (更保守，靠近才攻击)
+// T3(1.0): 850u → 850u (基准)
+// T5(1.3): 850u → 654u (更激进，远距离就开火)
+BT_Status CND_IsTargetInRange_Scaled(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    float baseDist = g_fBTNodeUserParam1[nodeId];
+    float aggr = BB_GetFloat(client, "_pressure_aggr", 1.0);
+    float scaledDist = baseDist / aggr;  // 高压力时距离阈值降低 = 更远就能触发
+
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return BT_FAILURE;
+    float sPos[3], tPos[3];
+    GetClientAbsOrigin(client, sPos);
+    GetClientAbsOrigin(target, tPos);
+    return (GetVectorDistance(sPos, tPos) <= scaledDist) ? BT_SUCCESS : BT_FAILURE;
 }
 
 // Check if we're within the coordination attack window
