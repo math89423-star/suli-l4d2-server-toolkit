@@ -309,6 +309,13 @@ public void OnPressureAggressionChanged(ConVar convar, const char[] oldValue, co
     if (FloatAbs(oldAggr - g_fPressureAggression) > 0.01) {
         LogMessage("[AI_HardSI] Pressure aggression updated: %.2f → %.2f",
             oldAggr, g_fPressureAggression);
+
+        // v5.8.1: 批量更新所有 SI 黑板（避免每 tick 重复写入）
+        for (int i = 1; i <= MaxClients; i++) {
+            if (IsBotInfected(i) && IsPlayerAlive(i) && BT_IsBound(i)) {
+                BB_SetFloat(i, "_pressure_aggr", g_fPressureAggression);
+            }
+        }
     }
 }
 
@@ -394,6 +401,8 @@ public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast)
 
     if (rootId >= 0) {
         BT_Bind(client, rootId);
+        // v5.8: 注入压力攻击性到黑板（spawn 时注入一次，cvar 变化时批量更新）
+        BB_SetFloat(client, "_pressure_aggr", g_fPressureAggression);
     }
 
     // Per-SI spawn initialization (reset per-SI state)
@@ -465,9 +474,6 @@ public Action:OnPlayerRunCmd(int client, int &buttons, int &impulse,
 
     // Set tank aggression mode on blackboard (cached handle, no FindConVar per tick)
     BB_SetBool(client, "tank_aggro", g_hCvarTankAggroBhop != null && GetConVarBool(g_hCvarTankAggroBhop));
-
-    // v5.8: Inject pressure aggression into blackboard for runtime threshold scaling
-    BB_SetFloat(client, "_pressure_aggr", g_fPressureAggression);
 
     // Execute Behavior Tree
     // The BT modifies buttons/angles via BT_AddButton/BT_RemoveButton/BT_SetAimAngles.

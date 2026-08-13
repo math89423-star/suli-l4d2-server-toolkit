@@ -245,6 +245,7 @@ BT_Status CND_IsTargetInRange(int client) {
 }
 
 // v5.8: 压力感知版本 — 高压力时更远触发攻击（maxDist ÷ aggression）
+// v5.8.1: per-SI 敏感度 — 不同 SI 对压力的响应程度不同
 // T1(0.7): 850u → 1214u (更保守，靠近才攻击)
 // T3(1.0): 850u → 850u (基准)
 // T5(1.3): 850u → 654u (更激进，远距离就开火)
@@ -252,7 +253,24 @@ BT_Status CND_IsTargetInRange_Scaled(int client) {
     int nodeId = g_iBTCurrentTickNode;
     float baseDist = g_fBTNodeUserParam1[nodeId];
     float aggr = BB_GetFloat(client, "_pressure_aggr", 1.0);
-    float scaledDist = baseDist / aggr;  // 高压力时距离阈值降低 = 更远就能触发
+
+    // v5.8.1: per-SI 敏感度调整
+    // Smoker/Spitter: 远程特感，对压力更敏感 (1.2x)
+    // Boomer: 近距离爆破，保守一些 (0.8x)
+    // 其他: 标准响应 (1.0x)
+    float sensitivity = 1.0;
+    switch (L4D2_Infected:GetInfectedClass(client)) {
+        case L4D2Infected_Smoker:  sensitivity = 1.2;
+        case L4D2Infected_Spitter: sensitivity = 1.2;
+        case L4D2Infected_Boomer:  sensitivity = 0.8;
+    }
+
+    // 应用敏感度：aggr 越大，sensitivity 影响越明显
+    // T1(0.7) Smoker(1.2): aggr_eff = 0.7 + (1.2-1.0)*(1.0-0.7) = 0.76
+    // T5(1.3) Smoker(1.2): aggr_eff = 1.3 + (1.2-1.0)*(1.3-1.0) = 1.36
+    float aggr_effective = aggr + (sensitivity - 1.0) * FloatAbs(aggr - 1.0);
+
+    float scaledDist = baseDist / aggr_effective;  // 高压力时距离阈值降低 = 更远就能触发
 
     int target = BB_GetInt(client, "target", -1);
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return BT_FAILURE;
