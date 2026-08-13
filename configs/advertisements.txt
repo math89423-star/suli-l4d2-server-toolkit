@@ -7,11 +7,11 @@
 {
 	"1"
 	{
-		"chat"  "{olive}[粟藜24人困难|6特]{default}直连IP: {lightgreen}connect 81.71.101.135:27015"
+		"chat"  "{olive}[粟藜24人困难|8特]{default}直连IP: {lightgreen}connect 81.71.101.135:27015"
 	}
 	"2"
 	{
-		"chat"  "{olive}[粟藜24人困难|6特]{default}QQ群: {lightgreen}873133645  {default}Steam组: {lightgreen}suli-l4d2-server"
+		"chat"  "{olive}[粟藜24人困难|8特]{default}QQ群: {lightgreen}873133645  {default}Steam组: {lightgreen}suli-l4d2-server"
 	}
 	"3"
 	{

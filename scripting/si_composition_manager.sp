@@ -6,7 +6,7 @@
 // the engine spawns the bot.
 //
 // Design:
-//   - 6 regular modes rotate every 40-60s (synced with ss_time_min/max)
+//   - 6 regular modes rotate every 35-50s (v5.1: range source = own cvars)
 //   - Each mode OMITS 2-3 SI types entirely (0% ratio) for strong identity
 //   - Only Mode 6 (Balanced) includes all 6 classes
 //   - 1 Tank override mode: auto-activates when Tank spawns
@@ -33,7 +33,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.3.9"
+#define PLUGIN_VERSION "2.4.0"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -105,14 +105,19 @@ Handle g_hModeTimer = INVALID_HANDLE;
 // Wave announcement state
 float  g_fLastWaveAnnounce = 0.0;                // GameTime of last wave chat message
 
-// v2.3.4: captured ONCE at OnMapStart — NEVER re-read from the ConVar.
-// PinSpawnTiming writes to these cvars, so re-reading creates a feedback loop.
-float  g_fCfgTimeMin = 45.0;
-float  g_fCfgTimeMax = 60.0;
-
 // Timing pin: we own ss_time_min and ss_time_max handles to pin both
 // to the same value each wave. ss_time_mode 1 then produces exactly that value
 // (random(X, X) = X), giving us exact countdown control.
+// v5.1: 区间来源 = 自身 cvar（si_comp_mode_interval_min/max）——原 CaptureSourceRange
+// 从 ss_time_min/max 捕获，但 ss_time_* 会被本插件钉成单值：reload 时
+// OnConfigsExecuted 不触发 → 捕获失效 → 区间漂到硬编码默认 45/60
+// （2026-08-04 实测 reload 后钉 56.6/58.2，波次 35-50 完全不生效）。
+// 自身 cvar 永不被动 → reload 即生效，且与模式轮换共用同一区间
+// （cvar 描述本意就是 "synced to ss_time_*"）。
+// v2.0.0 语义: 钉值 = 冷静期结束后的下一波间隔。specialspawner 波间三态
+// （压力/收尾/冷静）下, 冷静期(12-18s)吃掉波间隔前段, 冷静期后按
+// 钉值 − 平均冷静时长 排下一波 → 总波周期仍 ≈ 钉值 40-55。倒计时播报由
+// specialspawner 进入冷静期时统一给出, 本插件不再播"下一波 X 秒后"。
 ConVar g_cvSsTimeMin;
 ConVar g_cvSsTimeMax;
 
@@ -158,10 +163,10 @@ public void OnPluginStart()
     // --- Our cvars ---
     g_cvEnable          = CreateConVar("si_comp_enable",              "1",
         "Enable spawn composition manager (0=off, 1=on)", _, true, 0.0, true, 1.0);
-    g_cvModeIntervalMin = CreateConVar("si_comp_mode_interval_min",   "40.0",
-        "Minimum seconds between mode changes (synced to ss_time_min)", _, true, 20.0, true, 600.0);
-    g_cvModeIntervalMax = CreateConVar("si_comp_mode_interval_max",   "60.0",
-        "Maximum seconds between mode changes (synced to ss_time_max)", _, true, 20.0, true, 600.0);
+    g_cvModeIntervalMin = CreateConVar("si_comp_mode_interval_min",   "35.0",
+        "v5.1: 波次间隔 + 模式轮换区间下限（钉到 ss_time_min/max）", _, true, 10.0, true, 600.0);
+    g_cvModeIntervalMax = CreateConVar("si_comp_mode_interval_max",   "50.0",
+        "v5.1: 波次间隔 + 模式轮换区间上限（钉到 ss_time_min/max）", _, true, 10.0, true, 600.0);
     g_cvAnnounce        = CreateConVar("si_comp_announce",            "0",
         "Announce mode changes in chat (0=off, 1=on)", _, true, 0.0, true, 1.0);
     g_cvWaveAnnounce    = CreateConVar("si_comp_wave_announce",      "1",
@@ -227,19 +232,13 @@ int GetConVarIntSafe(const char[] name, int defaultVal)
 }
 
 // ============================================================================
-// Spawn timing (ss_time_mode 1 + pinning trick)
+// Spawn timing (pin trick)
 //
-// specialspawner mode 1 picks random(ss_time_min, ss_time_max) each wave.
+// specialspawner (ss_time_mode 0) picks ss_time_max for the next wave.
 // We pin BOTH to the SAME value → random(X, X) = X → exact countdown.
+// v5.1: 区间来源改为自身 cvar（si_comp_mode_interval_min/max，默认 35/50）——
+// reload/热应用即生效，无捕获环节（见上方 Timing pin 注释）。
 // ============================================================================
-void CaptureSourceRange()
-{
-    // v2.3.4: read configured range ONCE. NEVER re-read from the ConVar
-    // inside PinSpawnTiming — we wrote to it last call so it contains our
-    // own pinned value, not the configured range.
-    if (g_cvSsTimeMin != null) g_fCfgTimeMin = g_cvSsTimeMin.FloatValue;
-    if (g_cvSsTimeMax != null) g_fCfgTimeMax = g_cvSsTimeMax.FloatValue;
-}
 
 // Generate next interval and pin both cvars to it.
 // v2.3.7: 返回值 = 钉值前的旧值（实际生效间隔），供播报使用。
@@ -247,11 +246,16 @@ void CaptureSourceRange()
 // 刷出事件里才钉新值 —— 播报新值会差一轮（实测偏差 0-15s）。播旧值后：
 // 播报 X 秒 → 实际 X 秒后刷下一波，完全对齐。回合重开（ResetTracking）
 // 打断波次导致的 15s 提前第一波不在本函数处理范围。
+// v2.0.0: 返回值不再用于播报（specialspawner 三态下播报在冷静期进入时给出），
+// 仍保留返回值供 Debug/未来使用。
 float PinSpawnTiming()
 {
-    // v2.3.4: use CAPTURED values, not live ConVar (feedback loop fix)
-    float interval = GetRandomFloat(g_fCfgTimeMin, g_fCfgTimeMax);
-    float prev = (g_cvSsTimeMin != null) ? g_cvSsTimeMin.FloatValue : g_fCfgTimeMin;
+    // v5.1: 自身 cvar 为唯一区间来源（永不被动、reload 即生效）
+    float min = (g_cvModeIntervalMin != null) ? g_cvModeIntervalMin.FloatValue : 35.0;
+    float max = (g_cvModeIntervalMax != null) ? g_cvModeIntervalMax.FloatValue : 50.0;
+    if (min > max) min = max;
+    float interval = GetRandomFloat(min, max);
+    float prev = (g_cvSsTimeMin != null) ? g_cvSsTimeMin.FloatValue : min;
     if (g_cvSsTimeMin != null) g_cvSsTimeMin.SetFloat(interval);
     if (g_cvSsTimeMax != null) g_cvSsTimeMax.SetFloat(interval);
 
@@ -309,10 +313,9 @@ void AdjustSpawnSize()
 // ============================================================================
 public void OnMapStart()
 {
-    // NOTE: NOT calling CaptureSourceRange() here — OnMapStart fires BEFORE
-    // specialspawner.cfg is re-executed on map change, so the live ConVars
-    // still hold the Pinned values from the previous map (feedback loop!).
-    // Instead, OnConfigsExecuted fires AFTER cfgs and does the capture.
+    // v5.1: 无需捕获 —— 波次区间来自自身 cvar（si_comp_mode_interval_*），
+    // 换图后由 si_composition_manager.cfg 重新 exec（AutoExecConfig），
+    // 无需等待 OnConfigsExecuted 的捕获时机。
 
     // Pick random starting mode
     g_iCurrentMode = GetRandomInt(0, SCM_MODE_COUNT - 1);
@@ -326,8 +329,7 @@ public void OnMapStart()
 }
 
 // OnConfigsExecuted fires AFTER specialspawner.cfg + sourcemod.cfg on every map load.
-// This is the ONLY safe place to capture ss_time_min / ss_time_max —
-// OnPluginStart is too early (defaults), OnMapStart is too early (pinned values).
+// v5.1: 只重捕获波次大小基线（ss_spawn_size 的 cfg 值；波次区间已改用自身 cvar）。
 public void OnConfigsExecuted()
 {
     // Re-capture configured spawn size baseline (cfg just executed, value is fresh)
@@ -335,7 +337,6 @@ public void OnConfigsExecuted()
         g_fCfgBaseSpawnSize = float(g_cvSsSpawnSize.IntValue);
     }
 
-    CaptureSourceRange();
     PinSpawnTiming();
     AdjustSpawnSize();
 }
@@ -562,14 +563,17 @@ public Action L4D_OnSpawnSpecial(int &zombieClass, const float vecPos[3], const 
         return Plugin_Continue;
     }
 
+    // v2.0.1: 波次检测/播报提前到 class 覆盖之前——PickClass 返回 -1（各类
+    // 计数触顶）时旧代码走 fallback 分支静默吞掉播报，玩家只见波来不见
+    // [SI波次] 播报（2026-08-05 实测"第二波来袭不播报"）。波次检测只看
+    // 冷却时间，与 class 选择无关，提前调用无副作用。
+    DetectAndAnnounceWave();
+
     int chosen = PickClass();
     if (chosen >= ZC_SMOKER && chosen <= ZC_CHARGER) {
         zombieClass = chosen;
         g_iAliveByClass[chosen]++;                       // pre-count for intra-wave deficit calc
         g_fLastSpawnedTime[chosen] = GetGameTime();
-
-        // --- Wave detection + announcement ---
-        DetectAndAnnounceWave();
 
         return Plugin_Changed;
     }
@@ -588,20 +592,21 @@ public Action L4D_OnSpawnSpecial(int &zombieClass, const float vecPos[3], const 
 void DetectAndAnnounceWave()
 {
     float now = GetGameTime();
-    float cooldown = g_fCfgTimeMin * 0.5;  // half of captured source range min
+    float minInterval = (g_cvModeIntervalMin != null) ? g_cvModeIntervalMin.FloatValue : 35.0;
+    float cooldown = minInterval * 0.5;  // half of interval range min (v5.1: 自身 cvar)
     if (cooldown < 15.0) cooldown = 15.0;
 
     if (now - g_fLastWaveAnnounce > cooldown) {
         g_fLastWaveAnnounce = now;
 
         // Pin min=max to a new random interval → specialspawner picks exactly this
-        float nextInterval = PinSpawnTiming();
+        PinSpawnTiming();
 
-        AnnounceWave(nextInterval);
+        AnnounceWave();
     }
 }
 
-void AnnounceWave(float nextInterval)
+void AnnounceWave()
 {
     if (!g_cvWaveAnnounce.BoolValue) return;
 
@@ -639,12 +644,15 @@ void AnnounceWave(float nextInterval)
         }
     }
 
+    // v2.0.0: 去掉"下一波 X 秒后"——新波间三态下间隔在冷静期结束才消费（且被
+    // 冷静时长抵扣），旧"播旧钉值"对齐技巧失效；倒计时播报由 specialspawner
+    // 进入冷静期时统一给出（[特感] 波次清剿完毕，X 秒后下一波）。
     if (effective < spawnSize) {
-        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只(\x03倒地补偿 %d→%d\x01)! 进攻策略: \x05%s\x01 | 下一波: \x04%.0f\x01秒后",
-            effective, spawnSize, effective, modeName, nextInterval);
+        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只(\x03倒地补偿 %d→%d\x01)! 进攻策略: \x05%s\x01",
+            effective, spawnSize, effective, modeName);
     } else {
-        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只! 进攻策略: \x05%s\x01 | 下一波: \x04%.0f\x01秒后",
-            spawnSize, modeName, nextInterval);
+        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只! 进攻策略: \x05%s\x01",
+            spawnSize, modeName);
     }
 }
 

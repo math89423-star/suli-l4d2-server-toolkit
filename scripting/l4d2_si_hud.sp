@@ -11,6 +11,69 @@
  *   - PrintHintText    (lower-center):        BF1-style kill card "[weapon] ☠ SI name" (v1.6.4)
  *   (v1.9.6: PrintToChatAll kill feed removed — user: too chaotic in multiplayer)
  *
+ * Changelog v1.12.1:
+ *   - 入队即死兜底复活（user 实测 bug）：l4dmultislots 中途加入死尸入队——新玩家
+ *     第 5+ 位加入时若场上无存活 bot 可接管（l4d_multislots_alive_bot_time 30），
+ *     玩家以死亡状态入队，不触发 player_death → 复活体系不知情，一直死着等电击器。
+ *     新增 Timer_JoinDeadCheck：加入后延迟检测（3s 起步，每 2s 共 12 次）——入队即死
+ *     （本局死亡次数=0）且场上还有存活队友（团灭中不干预，round restart 会重置）→
+ *     L4D_RespawnPlayer + 传送 + 复活套装，不扣免费命。正常死亡流程不干预。
+ *
+ * Changelog v1.12.0:
+ *   - 复活体系重构（user 拍板，规避"复活币被换图意外清空"的风险敞口）:
+ *     移除复活币机制（变量/cvar/持久化 coins 字段/SH_ 币 natives/商店
+ *     复活币商品全部废除）。免费复活每图 base 次（=2 条命，每图/团灭重开
+ *     刷新，规则不变）；免费耗尽后，积分 >= si_hud_revive_cost（默认
+ *     6000）→ si_hud_respawn_delay（20→30s）后自动复活，复活成功才扣
+ *     积分（30s 内队友电击/救起不扣）。配套 l4d2_shop 躺尸/倒地禁购 →
+ *     死亡→复活窗口积分只增不减，复活瞬间必够 6000。积分不足 → 躺尸等
+ *     电击器/过关。团灭回滚自然退回已扣积分（回滚到本图开局钱包）。
+ *   - 死亡/进服/每图播报去复活币，改为提示 6000 积分复活机制。
+ *
+ * Changelog v1.11.1:
+ *   - GetMapPrefix 新增规则 3：中置数字关号自动识别——"atr02_outskirts"→"atr"、
+ *     "de01_sewers"→"de"、"l4d_sh01_oldsh"→"l4d_sh"（数字前紧邻字母 + 数字段
+ *     后是 "_<单词>" 或结尾 = 关号）。atr 类"前缀+数字+下划线"格式的多关战役
+ *     无需进清单自动归组（user 实测 atr02→atr04 换图被误判新战役清分）。
+ *     清单仅兜底段名各异的例外（nanningcity）。已用全量已知图模拟验证无误判
+ *     （dc2m1_riverside / c14m5 / l4d_yama_1 / deathttoiletmaze10_5 均不受影响）。
+ *
+ * Changelog v1.11.0:
+ *   - 三方图也分大图和小图（user 拍板）: 新增战役键 GetCampaignKey() 统一清零
+ *     判定与存档校验——官图命名 → "c1" 前缀；三方图大地图（新配置
+ *     configs/si_hud_big_maps.txt 清单，默认 dc2/dw/de/hls = 轮换链战役）→
+ *     清单键；三方图有地图号标记（m<数字>/尾 _<数字>）→ 前缀即战役键；
+ *     三方图无标记（单图/小图）→ 整图名即战役键，换图必清。
+ *     清零条件 = 战役键变化 或 图名含 m1（战役起点；同键循环重开
+ *     dc2m6→dc2m1、c2m5→c2m1）。v1.10.1 三方轮换跨图保留废弃——
+ *     豁免会把离线玩家跨图旧钱放行回来（正是 user 改判清零的漏洞）。
+ *   - ScoreLoad_Player 校验同步走战役键（移除 IsThirdPartyRotation 豁免），
+ *     兼容旧存档：旧 GetMapPrefix 值仅当等于当前图前缀时放行（同图重连
+ *     不丢钱），跨图一律拒绝。
+ *
+ * Changelog v1.10.1:
+ *   - 三方图轮换跨图保留（user 拍板）: 三方图轮换表每张图命名前缀各异
+ *     （nanningcity_bridge_m6 / zc1_m1 / l4d_yama_1 / desastre_1a / hls_15 ...），
+ *     换图必变前缀 → 被误判"新战役"清光攒的分和复活币。判定
+ *     configs/current_mode.txt = "custom"（switch-to-custom.sh 写入）→
+ *     跳过 OnMapStart 新战役清零 + 豁免 ScoreLoad_Player 存档战役校验
+ *     （重连恢复不再被前缀不符拒绝）。兜底：文件缺失 → 地图命名判定
+ *     （非官图命名 c<数字>m<数字> = 三方图）；标记 official 但当前图非
+ *     官图命名（手动 sm_map 未跑脚本，标记滞后）→ 仍按三方图轮换。
+ *     切回官图（official 标记 + c1m1/c2m1 等 m1 首图）仍清零，规则不变。
+ *
+ * Changelog v1.10.0:
+ *   - FIX 崩溃/错误退出重连丢钱丢复活币 (user 实测恶劣 bug): 同图重连 20s
+ *     严格窗口（v1.8.2 防带旧钱）把"游戏错误退出后重新进"（必然 >20s）判成
+ *     新加入 → 可用积分清 0 + 复活币回 start，买的币和攒的分全丢。废除断线
+ *     记录时间窗：进服一律 ScoreLoad_Player——同战役存档恢复（存档战役校验
+ *     本身已拦跨战役旧钱），无存档/跨战役 = 新玩家默认 0 + start 币
+ *     （v1.7.31 规则不变）。
+ *   - FIX 团灭重开带旧钱空窗: 回滚（RestoreScoreState）后立即 ScoreSave_All
+ *     同步存档——原 20s 窗口防的是"团灭前离场 → 重开后来回恢复回滚前的钱"，
+ *     现回滚当刻存档已同步，窗口废除后该漏洞不复发。顺带修复服务器重启
+ *     （断线记录随内存丢失）后同战役重进也丢钱的问题。
+ *
  * Changelog v1.9.6:
  *   - REMOVE Y 键聊天框特感击杀播报（user 实测多人信息极其混乱）: 删掉三处
  *     PrintToChatAll（SI 击杀 KILL/HEADSHOT、Witch 击杀、特感自杀/死于意外），
@@ -739,7 +802,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.9.6"
+#define PLUGIN_VERSION "1.13.0"
 
 // ============================================================================
 // ConVar handles
@@ -753,6 +816,7 @@ ConVar g_cvKillHintEnable;
 ConVar g_cvKillCardEnable;
 ConVar g_cvKillCardTime;
 ConVar g_cvMapEndReward;    // v1.9.3: 过关奖励积分/人（替代过关回满血）
+ConVar g_cvWalletMax;       // v1.13.0: 可用积分上限（跨图保留，只设上限不清空）
 ConVar g_cvBFWindow;
 ConVar g_cvBFPointsBasePct;        // v1.7.52: 基础分 = 特感实际血量 × %
 ConVar g_cvBFHeadshotMult;         // v1.7.52: 爆头击杀倍率
@@ -797,8 +861,7 @@ ConVar g_cvScoreboardInterval;
 ConVar g_cvRespawnEnable;      // v1.7.28
 ConVar g_cvRespawnBase;        // v1.7.28
 ConVar g_cvRespawnDelay;       // v1.7.28
-ConVar g_cvRespawnCoinMax;     // v1.7.29: 复活币持有上限
-ConVar g_cvRespawnCoinStart;   // v1.7.31: 新玩家初始复活币
+ConVar g_cvReviveCost;         // v1.12.0: 免费命耗尽后积分复活价格（默认 6000）
 ConVar g_cvSoundSI;
 ConVar g_cvSoundHeadshot;
 ConVar g_cvSoundTank;
@@ -832,14 +895,14 @@ int       g_iRescueStreak[MAXPLAYERS + 1];            // v1.7.51: 连杀窗口�
 float     g_fLastStreakKillTime[MAXPLAYERS + 1];      // BF banner: last streak-kill time
 int       g_iCommonStreak[MAXPLAYERS + 1];            // v1.7.4: common streak count (separate icons from SI skulls, shared window)
 int       g_iTotalScore[MAXPLAYERS + 1];              // v1.7.6: 本关积分 (scoreboard; 每关从 0 算, OnMapEnd 清零)
-int       g_iWallet[MAXPLAYERS + 1];                  // v1.7.27: 可用积分 (商店钱包; 战役内跨图保留, 新战役清零)
+int       g_iWallet[MAXPLAYERS + 1];                  // v1.7.27: 可用积分 (商店钱包; v1.13.0 起跨图永久保留, 上限 si_hud_wallet_max)
 // v1.7.28: 复活次数系统（用户：每图初始 1 次=2 条命，复活 20s；复活币 12000 无限购；
 // 次数用完不自动复活 → 电击器回归价值）
 int       g_iRevivesLeft[MAXPLAYERS + 1];             // 本图剩余自动复活次数（OnMapStart 重置 base）
-int       g_iReviveCoins[MAXPLAYERS + 1];             // 复活币余额（战役内保留，新战役清零，断线清零）
+bool      g_bPaidRespawn[MAXPLAYERS + 1];             // v1.12.0: 本次复活是否积分付费（复活成功才扣）
 Handle    g_hRespawnTimer[MAXPLAYERS + 1];            // 复活计时器
 Handle    g_hFwdRespawned;                            // v1.9.2: 复活完成全局 forward（shop 发复活套装）
-char      g_sPrevCampaign[64];                        // 上一张图的战役前缀（前缀变化 = 新战役 → 清钱包/复活币）
+char      g_sPrevCampaign[64];                        // 上一张图的战役键（键变化 = 跨战役/换图 → 清钱包/复活币；v1.11.0 三方小图键=整图名）
 // v1.7.30: 每图开始积分存档（团灭重开回滚到开局状态）
 // v1.7.35: 可用积分（钱包）一并存档回滚（用户实测团灭后 wallet 未重置）
 bool      g_bFreshMapStart;                           // OnMapStart 置 true，round_start 消费
@@ -851,6 +914,7 @@ int       g_iSaveBlacked[MAXPLAYERS + 1];
 int       g_iSaveWallet[MAXPLAYERS + 1];
 int       g_iSIKills[MAXPLAYERS + 1];                 // v1.7.7: session SI/Witch/Tank kills
 int       g_iDeaths[MAXPLAYERS + 1];                  // v1.7.7: survivor deaths
+int       g_iJoinCheckLeft[MAXPLAYERS + 1];           // v1.12.1: 入队即死兜底复活重试剩余次数（0=无检测）
 int       g_iFFDamage[MAXPLAYERS + 1];                // v1.7.7: friendly-fire damage dealt
 int       g_iBlacked[MAXPLAYERS + 1];                 // v1.7.7: killed by a teammate (被黑)
 bool      g_bMapEndBroadcasted;                        // v1.7.9: map-end scoreboard already broadcast
@@ -879,14 +943,14 @@ char      g_sSavePath[PLATFORM_MAX_PATH];
 
 // v1.7.40: 前向声明（OnPluginStart/持久化区在 GetMapPrefix 定义之前使用）
 void GetMapPrefix(const char[] map, char[] out, int maxlen);
+// v1.11.0: 战役键（OnMapStart 清零判定 / ScoreLoad_Player 存档校验使用，
+// 定义在 GetMapPrefix 后；取代 v1.10.1 的 IsThirdPartyRotation 三方轮换豁免）
+void GetCampaignKey(const char[] map, char[] out, int maxlen);
 
-// v1.7.43: 换图重连识别——L4D2 changelevel 时客户端断线自动重连，
-// 会被 OnClientPostAdminCheck 当成"新加入"清空钱包。断线时记录
-// (SteamID, 时间, 所在图)，重连时同 ID 匹配 = 换图重连 → 恢复存档。
-// v1.8.2: 换图重连窗口放宽到 180s（大三方图加载慢，20s 必丢）；同图重连保持 20s。
-char      g_sDiscAuth[MAXPLAYERS + 1][32];
-float     g_fDiscTime[MAXPLAYERS + 1];
-char      g_sDiscMap[MAXPLAYERS + 1][64];             // v1.8.2: 断线时的地图（换图判定用）
+// v1.10.0: 断线记录/时间窗已废除（v1.7.43/v1.8.2 遗留）——同图重连 20s
+// 严格窗口把"游戏错误退出后重新进"（必然 >20s）判成新加入 → 买的复活币和
+// 攒的积分全丢（user 实测恶劣 bug）。现在进服一律 ScoreLoad_Player：
+// 同战役存档恢复，跨战役/无存档 = 新玩家默认（存档战役校验见 ScoreLoad_Player）。
 
 
 // ============================================================================
@@ -916,69 +980,25 @@ public int Native_SH_GetWallet(Handle plugin, int numParams)
     return g_iWallet[client];
 }
 
+// v1.13.0 (user): 可用积分统一入账入口——所有加分点 + SH_ 外部消费都走这里，
+// 钳制 [0, si_hud_wallet_max]（默认 30000）。排行榜历史积分 g_iTotalScore
+// 不走这里（无限增长，不受上限影响）。
+int AddWallet(int client, int amount)
+{
+    if (client < 1 || client > MaxClients)
+        return 0;
+    int max = g_cvWalletMax.IntValue;
+    int newVal = g_iWallet[client] + amount;
+    if (newVal < 0) newVal = 0;      // 结果钳制 >= 0
+    if (max > 0 && newVal > max) newVal = max;
+    g_iWallet[client] = newVal;
+    return newVal;
+}
+
 public int Native_SH_AddWallet(Handle plugin, int numParams)
 {
     int client = GetNativeCell(1);
-    int amount = GetNativeCell(2);
-    if (client >= 1 && client <= MaxClients)
-    {
-        int newVal = g_iWallet[client] + amount;
-        if (newVal < 0) newVal = 0;   // 结果钳制 >= 0
-        g_iWallet[client] = newVal;
-    }
-    return (client >= 1 && client <= MaxClients) ? g_iWallet[client] : 0;
-}
-
-public int Native_SH_GetReviveCoins(Handle plugin, int numParams)
-{
-    int client = GetNativeCell(1);
-    if (client < 1 || client > MaxClients)
-        return 0;
-    return g_iReviveCoins[client];
-}
-
-public int Native_SH_AddReviveCoins(Handle plugin, int numParams)
-{
-    int client = GetNativeCell(1);
-    int amount = GetNativeCell(2);
-    if (client >= 1 && client <= MaxClients)
-    {
-        int newVal = g_iReviveCoins[client] + amount;
-        if (newVal < 0) newVal = 0;   // 结果钳制 >= 0
-        g_iReviveCoins[client] = newVal;
-    }
-    return (client >= 1 && client <= MaxClients) ? g_iReviveCoins[client] : 0;
-}
-
-public int Native_SH_GetCoinMax(Handle plugin, int numParams)
-{
-    return g_cvRespawnCoinMax.IntValue;
-}
-
-// v1.9.1 (bug): 商店购买复活币时，玩家可能已躺尸——复活判定只响应
-// player_death，躺尸后买币不会再有 death 事件 → 币白买。本 native 供
-// 消费方（l4d2_shop）在加币后调用：玩家处于真死亡状态时消耗 1 枚复活币
-// 并安排自动复活；其他情况（活着/倒下/已有复活计划/无币）返回 0 不动。
-public int Native_SH_ReviveClient(Handle plugin, int numParams)
-{
-    int client = GetNativeCell(1);
-    if (client < 1 || client > MaxClients)
-        return 0;
-    if (!IsClientInGame(client) || IsFakeClient(client))
-        return 0;
-    if (GetClientTeam(client) != 2)
-        return 0;
-    // 倒下（incapacitated）不算死亡——引擎自会处理，强行复活会穿模/双复活
-    if (IsPlayerAlive(client) || L4D_IsPlayerIncapacitated(client))
-        return 0;
-    if (g_hRespawnTimer[client] != null)
-        return 0;              // 已有复活计划（次数复活倒计时中）——不重复
-    if (g_iReviveCoins[client] <= 0)
-        return 0;
-
-    g_iReviveCoins[client]--;
-    ScheduleRespawn(client, false);   // 打印"复活币复活"倒计时提示
-    return 1;
+    return AddWallet(client, GetNativeCell(2));
 }
 
 // ============================================================================
@@ -1020,6 +1040,11 @@ public void OnPluginStart()
     //（替代 l4d2_survivor_transition 的过关回满血，该插件已禁用；0=关闭）
     g_cvMapEndReward = CreateConVar("si_hud_mapend_reward", "2000",
         "Map-end reward: score granted to every survivor on map_transition (0 = off).", FCVAR_NOTIFY, true, 0.0, true, 99999.0);
+
+    // v1.13.0 (user): 可用积分上限 — 跨图永久保留不再清零，仅钳制到该值（0=无上限）
+    g_cvWalletMax = CreateConVar("si_hud_wallet_max", "30000",
+        "Spendable-score cap. Wallet is NEVER cleared on map change (v1.13.0); only clamped to this max (0 = no cap).",
+        FCVAR_NOTIFY, true, 0.0, true, 999999.0);
 
     CreateConVar("si_hud_banner_time", "1.0",
         "DEPRECATED (v1.7.1): banner and kill card share one message timed by si_hud_killcard_time. Kept so cfg files don't error.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
@@ -1145,12 +1170,10 @@ public void OnPluginStart()
         "Enable the limited auto-respawn system (replaces l4d2_auto_respawn).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     g_cvRespawnBase = CreateConVar("si_hud_respawn_base", "1",
         "Auto-respawn count per player per map (2 lives total with the initial one).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
-    g_cvRespawnDelay = CreateConVar("si_hud_respawn_delay", "20.0",
-        "Seconds before auto respawn (20 = defib/revive window for teammates; was 35 in l4d2_auto_respawn).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
-    g_cvRespawnCoinMax = CreateConVar("si_hud_respawn_coin_max", "5",
-        "Max revive coins a player may hold (checked on buy / join / map start).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
-    g_cvRespawnCoinStart = CreateConVar("si_hud_respawn_coin_start", "2",
-        "Revive coins a NEW player joins with (full default state: 0 wallet + these coins).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
+    g_cvRespawnDelay = CreateConVar("si_hud_respawn_delay", "30.0",
+        "Seconds before auto respawn (v1.12.0 user: 30s revive window for defib/teammates, free and paid alike).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+    g_cvReviveCost = CreateConVar("si_hud_revive_cost", "6000",
+        "Points deducted when auto-respawning after free revives are exhausted (v1.12.0; only charged on successful revive).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
 
     // ── Kill sounds (all empty = off by default) ────────
 
@@ -1215,10 +1238,7 @@ public void OnPluginStart()
     RegPluginLibrary("l4d2_si_hud_api");
     CreateNative("SH_GetWallet",      Native_SH_GetWallet);
     CreateNative("SH_AddWallet",      Native_SH_AddWallet);
-    CreateNative("SH_GetReviveCoins", Native_SH_GetReviveCoins);
-    CreateNative("SH_AddReviveCoins", Native_SH_AddReviveCoins);
-    CreateNative("SH_GetCoinMax",     Native_SH_GetCoinMax);
-    CreateNative("SH_ReviveClient",   Native_SH_ReviveClient);   // v1.9.1
+    // v1.12.0: 复活币 natives（Get/AddReviveCoins/GetCoinMax/ReviveClient）已移除
     // v1.9.2: 复活完成全局 forward（l4d2_shop v1.5.1 监听发复活套装+满血）
     g_hFwdRespawned = CreateGlobalForward("SH_OnClientRespawned", ET_Ignore, Param_Cell);
 
@@ -1314,7 +1334,6 @@ void ScoreSave_Player(int client)
 
     kv.JumpToKey(auth, true);
     kv.SetNum("wallet", g_iWallet[client]);
-    kv.SetNum("coins", g_iReviveCoins[client]);
     // v1.7.40: 存档所属战役（恢复时校验，防跨战役恢复旧钱）
     kv.SetString("campaign", g_sPrevCampaign);
     kv.Rewind();
@@ -1333,9 +1352,8 @@ void ScoreLoad_Player(int client)
     if (client < 1 || client > MaxClients || IsFakeClient(client))
         return;
 
-    // 默认（无存档/新玩家）：0 可用积分 + start 枚复活币（v1.7.31 用户定）
+    // 默认（无存档/新玩家）：0 可用积分（v1.7.31 用户定；v1.12.0 复活币废除）
     g_iWallet[client] = 0;
-    g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
 
     if (!FileExists(g_sSavePath))
         return;
@@ -1351,30 +1369,16 @@ void ScoreLoad_Player(int client)
         return;
     }
 
-    // v1.7.40: 存档战役校验——存档战役 ≠ 当前战役 → 不恢复（跨战役的钱作废）
-    char savedCampaign[64];
-    char curMap[64];
-    GetCurrentMap(curMap, sizeof(curMap));
-    char curPrefix[64];
-    GetMapPrefix(curMap, curPrefix, sizeof(curPrefix));
-
+    // v1.13.0 (user 拍板): 战役校验废弃——可用积分跨图永久保留，恢复一律
+    // 放行（无存档/新玩家仍默认 0）。存档 campaign 字段保留写入（兼容旧档）。
+    // （v1.7.40 战役校验 / v1.11.0 战役键校验均移除：离线跨图旧钱不再拒绝；
+    //   团灭带旧钱漏洞由"回滚当刻立即 ScoreSave_All 同步存档"封堵，不受影响。）
     if (kv.JumpToKey(auth))
     {
-        kv.GetString("campaign", savedCampaign, sizeof(savedCampaign));
-        if (strlen(savedCampaign) > 0 && !StrEqual(savedCampaign, curPrefix))
-        {
-            // 跨战役存档：保持默认（0 + start 币），不恢复
-            g_iWallet[client] = 0;
-            g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
-        }
-        else
-        {
-            g_iWallet[client] = kv.GetNum("wallet", 0);
-            g_iReviveCoins[client] = kv.GetNum("coins", g_cvRespawnCoinStart.IntValue);
-            int coinMax = g_cvRespawnCoinMax.IntValue;   // 上限 clamp
-            if (g_iReviveCoins[client] > coinMax)
-                g_iReviveCoins[client] = coinMax;
-        }
+        g_iWallet[client] = kv.GetNum("wallet", 0);
+        int max = g_cvWalletMax.IntValue;          // v1.13.0: 旧档可能超上限
+        if (max > 0 && g_iWallet[client] > max)
+            g_iWallet[client] = max;
     }
     delete kv;
 }
@@ -1528,10 +1532,9 @@ void ShowScoreboardTo(int client)
     else
         PrintToChat(client, "\x04[得分榜]\x01 你的战绩：0 分");
 
-    // v1.7.28 (user): 播报计入可用积分 + 复活币（战役内资源，新战役清零）
-    // v1.7.70 (user): 去掉"复活 X 次"，只显示复活币剩余数量
-    PrintToChat(client, "\x04[得分榜]\x01 可用积分 \x03%d\x01  复活币 \x03%d\x01 枚",
-        g_iWallet[client], g_iReviveCoins[client]);
+    // v1.7.28 (user): 播报计入可用积分（战役内资源，新战役清零；v1.12.0 复活币废除）
+    PrintToChat(client, "\x04[得分榜]\x01 可用积分 \x03%d\x01（免费复活耗尽后可用 \x03%d\x01 积分复活）",
+        g_iWallet[client], g_cvReviveCost.IntValue);
     // v1.7.32 (user): 积分总结后提醒玩家商店入口
     PrintToChat(client, "\x04[得分榜]\x01 输入 \x05!shop\x01 或 \x05!buy\x01 打开商店，用可用积分兑换补给/武器");
 }
@@ -1562,44 +1565,30 @@ public void OnMapStart()
     // HP display is now on-hit only (player_hurt → RefreshHPForClient → 0.5s hide).
     // Persistent timer is no longer started — SI HP only shows when you damage them.
 
-    // v1.7.28: 战役判定——地图前缀变化 = 切换新战役 → 清可用积分 + 复活币
-    // （用户：可用积分不随 map 切换清理，只重新开始战役/切换新战役才清理）
+    // v1.13.0 (user 拍板): 可用积分跨图永久保留——不再按战役键/换图清零，
+    // 只受上限 si_hud_wallet_max（默认 30000）钳制。存档 campaign 字段仍
+    // 写入（兼容旧逻辑），但 ScoreLoad_Player 不再校验，恢复一律放行。
+    //（v1.7.28 战役判定 / v1.11.0 战役键清零体系全部废弃：官图、三方图
+    //  大图小图一律换图不清。）
     char map[64];
     GetCurrentMap(map, sizeof(map));
-    char prefix[64];
-    GetMapPrefix(map, prefix, sizeof(prefix));
-    // v1.7.41 (user): 战役首图（地图名含 m1，官图 cXm1 + 三方图 m1 命名）
-    // → 一律清零（新战役起点；补上同前缀重开 c2m5→c2m1 的前缀判定漏洞）
-    bool isFirstMap = (StrContains(map, "m1") != -1);
-    if (isFirstMap || (strlen(g_sPrevCampaign) > 0 && !StrEqual(prefix, g_sPrevCampaign)))
-    {
-        for (int i = 1; i <= MaxClients; i++)
-        {
-            g_iWallet[i] = 0;
-            g_iReviveCoins[i] = 0;
-        }
-        ScoreSave_All();                 // v1.7.34: 清零同步写回文件（进服恢复无歧义）
-        PrintToChatAll("\x04[商店]\x01 新战役开始：可用积分与复活币已结算清零");
-    }
-    strcopy(g_sPrevCampaign, sizeof(g_sPrevCampaign), prefix);
+    char key[64];
+    GetCampaignKey(map, key, sizeof(key));
+    strcopy(g_sPrevCampaign, sizeof(g_sPrevCampaign), key);
 
     // v1.7.28: 每图重置复活次数（初始 base 次 = base+1 条命）
     for (int i = 1; i <= MaxClients; i++)
     {
         g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
         KillRespawnTimer(i);
-        // v1.7.29: 复活币持有上限 clamp（用户：上限 5 枚，进服/新图/消耗时检查）
-        int coinMax = g_cvRespawnCoinMax.IntValue;
-        if (g_iReviveCoins[i] > coinMax)
-            g_iReviveCoins[i] = coinMax;
     }
 
-    // v1.9.4 (user): 每图开始播报复活币 + 本图剩余免费复活次数（真人）
+    // v1.9.4 (user): 每图开始播报本图剩余免费复活次数（真人；v1.12.0 复活币废除）
     for (int i = 1; i <= MaxClients; i++)
     {
         if (IsClientInGame(i) && !IsFakeClient(i))
-            PrintToChat(i, "\x04[复活]\x01 本图剩余免费复活 \x03%d\x01 次，复活币 \x03%d\x01 枚",
-                g_iRevivesLeft[i], g_iReviveCoins[i]);
+            PrintToChat(i, "\x04[复活]\x01 本图剩余免费复活 \x03%d\x01 次（免费耗尽后可用 \x03%d\x01 积分自动复活）",
+                g_iRevivesLeft[i], g_cvReviveCost.IntValue);
     }
 
     // v1.7.30: 每图开始存档（用户："每一个Map开始时，要有一个存档"）——
@@ -1671,6 +1660,31 @@ public void GetMapPrefix(const char[] map, char[] out, int maxlen)
         }
     }
 
+    // 3) v1.11.1: 中置数字关号——"atr02_outskirts"→"atr"、"de01_sewers"→"de"、
+    // "l4d_sh01_oldsh"→"l4d_sh"（数字前紧邻字母 + 数字段后是 "_<单词>" 或结尾
+    // = 关号；user 实测 atr02→atr04 换图被误判新战役清零，轮换链
+    // "dc2m1_riverside" 等已在规则 1 截断不会走到这；"l4d" 的 4 后接 'd'
+    // 字母不满足条件；"deathttoiletmaze10_5" 已被规则 2 截断）。
+    if (cut == len)
+    {
+        for (int i = 1; i < len; i++)
+        {
+            if (map[i] >= '0' && map[i] <= '9' && map[i - 1] >= 'a' && map[i - 1] <= 'z')
+            {
+                int j = i;
+                while (j < len && map[j] >= '0' && map[j] <= '9')
+                    j++;
+                bool ok = (j == len) ||
+                          (map[j] == '_' && j + 1 < len && map[j + 1] >= 'a' && map[j + 1] <= 'z');
+                if (ok)
+                {
+                    cut = i;
+                    break;
+                }
+            }
+        }
+    }
+
     // 去尾部残留分隔符（"nanningcity_bridge_m6" 截出 "nanningcity_bridge_"）
     while (cut > 0 && (map[cut - 1] == '_' || map[cut - 1] == '-'))
         cut--;
@@ -1682,6 +1696,87 @@ public void GetMapPrefix(const char[] map, char[] out, int maxlen)
         cut = maxlen - 1;
     strcopy(out, maxlen, map);
     out[cut] = '\0';
+}
+
+// v1.11.0: 三方图大地图清单匹配——configs/si_hud_big_maps.txt，每行一个
+// 战役前缀（// 或 ; 注释，自上而下第一个命中生效）。匹配 = 图名以
+// 前缀 +（_ / m<数字> / 结尾）开头，防误配：前缀 "de" 不会配到
+// "deathttoiletmaze10_5"（后随 'a'），"dc2" 能配 "dc2m1_riverside"。
+bool GetBigMapConfigPrefix(const char[] map, char[] out, int maxlen)
+{
+    char path[PLATFORM_MAX_PATH];
+    BuildPath(Path_SM, path, sizeof(path), "configs/si_hud_big_maps.txt");
+    File f = OpenFile(path, "r");
+    if (f == null)
+    {
+        out[0] = '\0';
+        return false;
+    }
+
+    char line[64];
+    while (f.ReadLine(line, sizeof(line)))
+    {
+        TrimString(line);
+        int len = strlen(line);
+        if (len == 0 || line[0] == '/' || line[0] == ';' || line[0] == '#')
+            continue;
+        if (strncmp(map, line, len) != 0)
+            continue;
+        char next = map[len];
+        if (next == '\0' || next == '_' || (next == 'm' && map[len + 1] >= '0' && map[len + 1] <= '9'))
+        {
+            strcopy(out, maxlen, line);
+            delete f;
+            return true;
+        }
+    }
+    delete f;
+    out[0] = '\0';
+    return false;
+}
+
+// v1.11.0: 战役键（OnMapStart 清零判定 + ScoreLoad_Player 存档校验统一用它）
+//   官图命名 → GetMapPrefix（"c1m2_streets"→"c1"）——官图战役 = 大地图
+//   三方图大地图清单命中 → 清单键（"de_donnelley_m1"/"de_paul_m4"→"de"）
+//   三方图有地图号标记 → 前缀（"zc1_m1"→"zc1"、
+//     "nanningcity_bridge_m6"→"nanningcity_bridge"）
+//   三方图无标记（单图/小图）→ 整图名（"deathttoiletmaze10_5"）——换图必清
+public void GetCampaignKey(const char[] map, char[] out, int maxlen)
+{
+    if (IsOfficialStyleMap(map))
+    {
+        GetMapPrefix(map, out, maxlen);
+        return;
+    }
+
+    char cfg[64];
+    if (GetBigMapConfigPrefix(map, cfg, sizeof(cfg)))
+    {
+        strcopy(out, maxlen, cfg);
+        return;
+    }
+
+    char prefix[64];
+    GetMapPrefix(map, prefix, sizeof(prefix));
+    if (strlen(prefix) < strlen(map))
+        strcopy(out, maxlen, prefix);   // 有地图号标记 → 前缀即战役键
+    else
+        strcopy(out, maxlen, map);      // 无标记 → 整图名（小图，换图必清）
+}
+
+// 官图命名判定：c1m1_hotel / c6m1_riverbank 等（c<数字> + m<数字> 标记）。
+// 注意 custom 轮换表里的 c3m1_jungle 也满足此命名 → 仅当模式文件明确为
+// custom 时才受豁免（文件为准）；文件缺失时按官图处理（保守兜底）。
+bool IsOfficialStyleMap(const char[] map)
+{
+    if (map[0] != 'c' || map[1] < '0' || map[1] > '9')
+        return false;
+    for (int i = 2; map[i] != '\0'; i++)
+    {
+        if (map[i] == 'm' && map[i + 1] >= '0' && map[i + 1] <= '9')
+            return true;
+    }
+    return false;
 }
 
 public void OnMapEnd()
@@ -1757,6 +1852,10 @@ public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcas
     if (!g_bFreshMapStart)
     {
         RestoreScoreState();
+        // v1.10.0: 回滚当刻立即同步存档——原 v1.8.2"同图重连 20s 严格窗口"防的
+        // 正是"团灭前离场 → 重开后来回恢复回滚前的钱"；窗口废除后必须在此同步，
+        // 否则离场玩家重连时从旧存档恢复回滚前的钱包（60s 周期保存前的空窗）。
+        ScoreSave_All();
         PrintToChatAll("\x04[得分榜]\x01 团灭重开：本关积分已回滚到开局状态");
     }
     g_bFreshMapStart = false;
@@ -1776,7 +1875,7 @@ public Action Event_MapTransition(Event event, const char[] name, bool dontBroad
         for (int i = 1; i <= MaxClients; i++)
         {
             if (IsClientInGame(i) && GetClientTeam(i) == 2)
-                g_iWallet[i] += reward;
+                AddWallet(i, reward);          // v1.13.0: 入账统一钳制上限
         }
         PrintToChatAll("\x04[过关]\x01 每人获得 \x05%d\x01 积分奖励！", reward);
     }
@@ -1805,69 +1904,33 @@ public void OnClientPutInServer(int client)
     g_iDeaths[client] = 0;
     g_iFFDamage[client] = 0;
     g_iBlacked[client] = 0;
+
+    // v1.12.1 (user 实测 bug): l4dmultislots 中途加入死尸入队——新玩家第 5+ 位加入时
+    // 若场上无存活 bot 可接管（l4d_multislots_alive_bot_time 30），玩家以死亡状态入队，
+    // 不触发 player_death → 复活体系不知情 → 一直死着等电击器。兜底：延迟检测
+    // "入队即死"（本局死亡次数=0 且非团灭）→ 自动复活（不扣免费命）。
+    g_iJoinCheckLeft[client] = 12;
+    CreateTimer(3.0, Timer_JoinDeadCheck, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public void OnClientPostAdminCheck(int client)
 {
-    // v1.7.43: 换图重连判定——同 SteamID 断线记录匹配 = changelevel 自动重连
-    // → 恢复存档（同战役换图不丢钱）；否则 = 真实新加入 → 全默认 0
-    // v1.8.2: 断线后地图已变 = 换图重连（大三方图加载慢，窗口放宽 180s）；
-    // 同图重连 = 疑似主动退服，保持 20s 严格窗口（防中途进服带旧钱）
-    char auth[32];
-    bool reconnect = false;
-    if (GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth), false))
-    {
-        float now = GetGameTime();
-        char curMap[64];
-        GetCurrentMap(curMap, sizeof(curMap));
-        for (int i = 1; i <= MaxClients; i++)
-        {
-            if (g_fDiscTime[i] > 0.0 && StrEqual(g_sDiscAuth[i], auth))
-            {
-                bool mapChanged = (strlen(g_sDiscMap[i]) > 0 && !StrEqual(g_sDiscMap[i], curMap));
-                float window = mapChanged ? 180.0 : 20.0;
-                if (now - g_fDiscTime[i] < window)
-                {
-                    reconnect = true;
-                    g_fDiscTime[i] = 0.0;   // 消费记录
-                    break;
-                }
-            }
-        }
-    }
+    // v1.10.0 (user 实测恶劣 bug): 一律按存档恢复——同战役（存档战役校验在
+    // ScoreLoad_Player 内）恢复钱包/复活币，跨战役/无存档 = 新玩家默认
+    // 0 + start 币（v1.7.31 规则不变）。废除 v1.7.43/v1.8.2 断线记录时间窗：
+    // 游戏错误退出后重连必然超窗（同图 20s / 换图 180s），被误判新加入清空
+    // 已购复活币和积分；团灭带旧钱漏洞改由"回滚当刻立即同步存档"封堵
+    // （Event_RoundStart → RestoreScoreState + ScoreSave_All）。
+    ScoreLoad_Player(client);
 
-    if (reconnect)
-    {
-        // v1.7.34: 从持久化文件恢复（存档战役校验在 ScoreLoad_Player 内）
-        ScoreLoad_Player(client);
-    }
-    else
-    {
-        // v1.7.42 (user): 新加入玩家 = 全默认状态（0 可用积分 + start 复活币）
-        g_iWallet[client] = 0;
-        g_iReviveCoins[client] = g_cvRespawnCoinStart.IntValue;
-    }
-
-    // v1.9.4 (user): 进服播报当前复活币 + 本图剩余免费复活次数
-    PrintToChat(client, "\x04[复活]\x01 本图剩余免费复活 \x03%d\x01 次，复活币 \x03%d\x01 枚",
-        g_iRevivesLeft[client], g_iReviveCoins[client]);
+    // v1.9.4 (user): 进服播报本图剩余免费复活次数（v1.12.0 复活币废除）
+    PrintToChat(client, "\x04[复活]\x01 本图剩余免费复活 \x03%d\x01 次（免费耗尽后可用 \x03%d\x01 积分自动复活）",
+        g_iRevivesLeft[client], g_cvReviveCost.IntValue);
 }
 
 public void OnClientDisconnect(int client)
 {
     ScoreSave_Player(client);            // v1.7.34: 断线保存（必须在清零前）
-    // v1.7.43: 记录断线 SteamID + 时间（换图重连识别用）
-    // v1.8.2: 顺带记录断线时的地图（重连时判断地图是否已变 → 放宽窗口）
-    if (GetClientAuthId(client, AuthId_Steam2, g_sDiscAuth[client], sizeof(g_sDiscAuth[]), false))
-    {
-        g_fDiscTime[client] = GetGameTime();
-        GetCurrentMap(g_sDiscMap[client], sizeof(g_sDiscMap[]));
-    }
-    else
-    {
-        g_fDiscTime[client] = 0.0;
-        g_sDiscMap[client][0] = '\0';
-    }
     g_fLastKillSoundTime[client] = 0.0;
     g_iKillStreak[client] = 0;
     g_iCommonStreak[client] = 0;           // v1.7.4
@@ -1876,7 +1939,8 @@ public void OnClientDisconnect(int client)
     g_iTotalScore[client] = 0;             // v1.7.6 (本关积分断线清零，防槽位泄漏)
     g_iWallet[client] = 0;                 // v1.7.27 (可用积分断线清零)
     g_iRevivesLeft[client] = 0;            // v1.7.28
-    g_iReviveCoins[client] = 0;            // v1.7.28
+    g_bPaidRespawn[client] = false;        // v1.12.0
+    g_iJoinCheckLeft[client] = 0;          // v1.12.1: 停止入队即死检测（userid 失效，timer 下次回调自停）
     KillRespawnTimer(client);              // v1.7.28
     g_iSIKills[client] = 0;                // v1.7.7
     g_iDeaths[client] = 0;
@@ -1972,7 +2036,7 @@ public Action Event_PlayerHurt(Event event, const char[] name, bool dontBroadcas
             if (pts > 0)
             {
                 g_iTotalScore[dmgAttacker] += pts;
-                g_iWallet[dmgAttacker] += pts;      // v1.7.27
+                AddWallet(dmgAttacker, pts);        // v1.7.27 (v1.13.0 走统一入账钳上限)
                 // v1.7.25: display copy, per-killer — only accumulated
                 // when the HP display is on (else nothing consumes it and
                 // it would go stale).
@@ -2093,29 +2157,28 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
             g_iBlacked[victim]++;          // 被队友击杀（被黑）
         }
 
-        // v1.7.28: 复活次数判定——次数用完且无复活币 → 躺尸等电击器/过关
-        // v1.9.5: bot 与玩家走同一套复活逻辑。v1.7.32d 曾跳过 bot（注释声称
-        // "引擎有自己的 bot 重生逻辑"）——但本服引擎不会自动复活幸存者 bot，
-        // 原 l4d2_auto_respawn（无条件复活 bot）已禁用【2026-08-02】，
-        // 该假设不成立 → bot 死亡后无人复活，永远躺尸。现在 bot 免费复活
-        // 次数每图 base=1（同玩家，reload 初始化见 OnPluginStart）；复活币
-        // 恒为 0 → 次数用完即躺尸等电击器/过关。
+        // v1.7.28: 复活次数判定——次数用完 → 积分复活/躺尸等电击器
+        // v1.12.0 (user 拍板): 移除复活币——免费次数耗尽后，积分
+        // >= si_hud_revive_cost（6000）→ 30s 后自动复活（复活成功才扣）；
+        // 积分不足 → 躺尸等电击器/过关。配套 shop 躺尸禁购，死亡→复活
+        // 窗口积分只增不减，复活瞬间必够 6000。
+        // v1.9.5: bot 与玩家走同一套复活逻辑（引擎不会自动复活幸存者 bot，
+        // 原 l4d2_auto_respawn 已禁用【2026-08-02】）。
         if (g_cvRespawnEnable.BoolValue)
         {
             if (g_iRevivesLeft[victim] > 0)
             {
                 g_iRevivesLeft[victim]--;
-                ScheduleRespawn(victim, true);
-            }
-            else if (g_iReviveCoins[victim] > 0)
-            {
-                g_iReviveCoins[victim]--;
                 ScheduleRespawn(victim, false);
+            }
+            else if (g_iWallet[victim] >= g_cvReviveCost.IntValue)
+            {
+                ScheduleRespawn(victim, true);
             }
             else
             {
-                PrintToChat(victim, "\x04[复活]\x01 你已死亡（剩余免费复活 \x03%d\x01 次，复活币 \x03%d\x01 枚）——等待电击器或队友",
-                    0, g_iReviveCoins[victim]);
+                PrintToChat(victim, "\x04[复活]\x01 你已死亡——免费复活已用完，积分不足 \x03%d\x01 无法自动复活，等待电击器或队友",
+                    g_cvReviveCost.IntValue);
             }
         }
     }
@@ -2172,7 +2235,7 @@ public Action Event_InfectedHurt(Event event, const char[] name, bool dontBroadc
     if (pts > 0)
     {
         g_iTotalScore[attacker] += pts;
-        g_iWallet[attacker] += pts;             // v1.7.27
+        AddWallet(attacker, pts);               // v1.7.27 (v1.13.0 走统一入账钳上限)
         // v1.7.22: BF-style hit feedback — EVERY hit shows its damage-score
         // even without a kill (user: "只要造成伤害了，就有得分反馈"; BF1/BFV
         // pop the damage score near the crosshair on every hit). Commons
@@ -2238,7 +2301,7 @@ public Action WitchTakeDamage(int victim, int &attacker, int &inflictor,
         if (pts > 0)
         {
             g_iTotalScore[attacker] += pts;
-            g_iWallet[attacker] += pts;             // v1.7.27
+            AddWallet(attacker, pts);               // v1.7.27 (v1.13.0 走统一入账钳上限)
             // v1.7.25: display copy for ShowWitchHP / witch kill card
             // (victim = witch ENTITY idx)
             // v1.7.31b fix: 实体索引 < 2048 才写（SourcePawn 越界 = 运行时错误）
@@ -2764,7 +2827,7 @@ void StackStreakKill(int client, int points, bool isCommon)
     // for — the number visibly grows with every kill in the window.
     g_iStreakScore[client] += points;
     g_iTotalScore[client] += points;      // v1.7.6: scoreboard accumulation (历史积分)
-    g_iWallet[client] += points;          // v1.7.27: 当前积分（钱包）
+    AddWallet(client, points);            // v1.7.27: 当前积分（钱包, v1.13.0 统一钳上限）
 
     // v1.6.6: schedule the streak settle — when the window closes the
     // killer hears the BF1 award sound for their score tier.
@@ -2805,7 +2868,7 @@ public Action Event_ReviveSuccess(Event event, const char[] name, bool dontBroad
     g_iRescueStreak[reviver]++;
     g_iStreakScore[reviver] += pts;        // 推动音效档位判定（纯击杀+救援混合分）
     g_iTotalScore[reviver] += pts;         // 历史积分（排行榜）
-    g_iWallet[reviver] += pts;             // 当前积分（商店钱包）
+    AddWallet(reviver, pts);               // 当前积分（商店钱包, v1.13.0 统一钳上限）
     g_fLastStreakKillTime[reviver] = now;  // 救援刷新连杀窗口
     ScheduleStreakSettle(reviver);
 
@@ -2953,7 +3016,7 @@ Action Timer_StreakSettle(Handle timer, int userId)
     if (bonus <= 0)
         return Plugin_Stop;
     g_iTotalScore[client] += bonus;   // 历史积分（排行榜）
-    g_iWallet[client] += bonus;       // 当前积分（商店钱包）
+    AddWallet(client, bonus);         // 当前积分（商店钱包, v1.13.0 统一钳上限）
     LogMessage("[streak] %N bonus +%d credited (hw=%d)", client, bonus, hw);
 
     // v1.7.62 (user): 音效档位 = 人头阶梯段位 L1..L6——与奖励同一把尺子，
@@ -3265,24 +3328,32 @@ void KillHPHideTimer(int client)
 }
 
 // v1.7.28: 复活系统（移植 l4d2_auto_respawn，限次数 + 复活币）
-// 每图初始 g_cvRespawnBase 次（=base+1 条命）；次数用完消耗复活币；
-// 都没有 → 躺尸（电击器回归价值）。复活延迟 g_cvRespawnDelay（20s）。
+// v1.12.0 (user): 复活币废除——免费次数（每图 base 次 = 2 条命）耗尽后，
+// 积分 >= si_hud_revive_cost → 复活延迟后自动复活，复活成功才扣积分；
+// 积分不足 → 躺尸（电击器回归价值）。复活延迟 g_cvRespawnDelay（30s）。
 // ============================================================================
 
-void ScheduleRespawn(int client, bool hasCount)
+void ScheduleRespawn(int client, bool isPaid)
 {
     KillRespawnTimer(client);
     int userid = GetClientUserId(client);
     float delay = g_cvRespawnDelay.FloatValue;
+    g_bPaidRespawn[client] = isPaid;
     // v1.7.31b fix: NO_MAPCHANGE — 换图时引擎清普通 timer 会留下悬挂句柄
     // 和 DataPack 泄漏；标记后跨图继续，回调里 IsClientInGame/IsPlayerAlive 兜底
     g_hRespawnTimer[client] = CreateTimer(delay, Timer_Respawn, userid, TIMER_FLAG_NO_MAPCHANGE);
 
-    // v1.9.4 (user): 统一文案——播报复活币 + 剩余免费复活次数（含消耗后剩余值）
-    int coins = g_iReviveCoins[client];
-    int revivesLeft = hasCount ? g_iRevivesLeft[client] : 0;
-    PrintToChat(client, "\x04[复活]\x01 你已死亡（剩余免费复活 \x03%d\x01 次，复活币 \x03%d\x01 枚），将在 \x03%.0f 秒\x01 后自动复活",
-        revivesLeft, coins, delay);
+    // v1.12.0 (user): 文案区分免费/付费复活（免费剩余次数 or 积分价格）
+    if (isPaid)
+    {
+        PrintToChat(client, "\x04[复活]\x01 免费复活已用完——\x03%.0f 秒\x01 后将消耗 \x03%d\x01 积分自动复活（当前积分 \x03%d\x01，30 秒内被救起不扣分）",
+            delay, g_cvReviveCost.IntValue, g_iWallet[client]);
+    }
+    else
+    {
+        PrintToChat(client, "\x04[复活]\x01 你已死亡（剩余免费复活 \x03%d\x01 次），将在 \x03%.0f 秒\x01 后自动复活",
+            g_iRevivesLeft[client], delay);
+    }
 
     int thresholds[] = {10, 5, 3, 2, 1};
     for (int i = 0; i < sizeof(thresholds); i++)
@@ -3322,6 +3393,18 @@ Action Timer_Respawn(Handle timer, int userid)
         g_hRespawnTimer[client] = null;
     if (client < 1 || !IsClientInGame(client) || GetClientTeam(client) != 2 || IsPlayerAlive(client))
         return Plugin_Continue;
+
+    // v1.12.0: 付费复活——复活成功才扣积分。30s 内被队友救起/电击 →
+    // 上面 IsPlayerAlive 提前返回，不扣；躺尸禁购保证死亡→复活窗口积分
+    // 只增不减，此处必 >= 6000，扣后不为负。
+    if (g_bPaidRespawn[client])
+    {
+        g_bPaidRespawn[client] = false;
+        int cost = g_cvReviveCost.IntValue;
+        g_iWallet[client] -= cost;
+        PrintToChat(client, "\x04[商店]\x01 积分复活扣除 \x03%d\x01 积分（剩余 \x03%d\x01）",
+            cost, g_iWallet[client]);
+    }
 
     L4D_RespawnPlayer(client);
 
@@ -3383,5 +3466,53 @@ void KillRespawnTimer(int client)
         KillTimer(g_hRespawnTimer[client]);
         g_hRespawnTimer[client] = null;
     }
+}
+
+// v1.12.1 (user 实测 bug): 入队即死兜底复活。l4dmultislots 在"新玩家中途加入且场上无
+// 存活 bot 可接管"时让玩家以死亡状态入队（l4d_multislots_alive_bot_time 30 + dead_bot_method 1），
+// 该过程不触发 player_death → si_hud 复活体系不知情 → 玩家一直死着等电击器/下一局。
+// 每 2s 检查一次（3s 起步延迟，共 12 次 ≈ 27s 窗口）：
+//  - 存活/正常死亡（g_iDeaths>0，si_hud 已安排免费命/积分复活/躺尸）→ 不干预
+//  - 团灭中（无存活队友）→ 不干预，round restart 会重置
+//  - 入队即死 → L4D_RespawnPlayer + 传送 + 复活套装（复用 Timer_RespawnTeleport），不扣免费命
+Action Timer_JoinDeadCheck(Handle timer, int userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client < 1 || !IsClientInGame(client) || g_iJoinCheckLeft[client] <= 0)
+    {
+        g_iJoinCheckLeft[client] = 0;
+        return Plugin_Stop;
+    }
+    g_iJoinCheckLeft[client]--;
+
+    if (IsPlayerAlive(client))
+        return Plugin_Stop;              // 已正常入队存活
+
+    if (GetClientTeam(client) != 2)
+        return Plugin_Continue;          // 还在 spectator/加入流程中,继续等
+
+    if (g_iDeaths[client] > 0)
+        return Plugin_Stop;              // 正常死亡流程,si_hud 已接管
+
+    // 团灭中（无存活队友）→ 不复活,round restart 会重置
+    bool hasAliveMate = false;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (i != client && IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i))
+        {
+            hasAliveMate = true;
+            break;
+        }
+    }
+    if (!hasAliveMate)
+        return Plugin_Stop;
+
+    // 入队即死 → 兜底复活（不扣免费命）
+    L4D_RespawnPlayer(client);
+    if (GetFeatureStatus(FeatureType_Native, "L4D2_KillSurvivorDeathModel") == FeatureStatus_Available)
+        L4D2_KillSurvivorDeathModel(client);   // 清残留尸体
+    PrintToChat(client, "\x04[复活]\x01 检测到你中途加入时处于死亡状态,已自动复活!");
+    CreateTimer(0.5, Timer_RespawnTeleport, userid);   // 传送队友身边 + 复活套装
+    return Plugin_Stop;
 }
 

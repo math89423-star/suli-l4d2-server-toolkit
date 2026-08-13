@@ -65,12 +65,27 @@
 // v1.7.0 波次最大规模（ss_spawn_size 上限 32，留余量给段分配数组）
 #define MAX_WAVE								48
 
+// v2.0.0 波间三态状态机（压力/收尾/冷静）
+// IDLE 是唯一允许存在"待命波次 timer"的相位；其余相位各持有且仅持有一个生命周期 timer。
+// 不变量: 非 IDLE 相位恰持一个生命周期 timer; IDLE 持有待命波 timer 或等待。
+enum WavePhase {
+	PHASE_IDLE = 0,			// 闲置: 开场等待 / 换图 / 冷静期结束后等下一波 timer
+	PHASE_PRESSURE,			// 压力期: 本波批次释放 + retry 补波（可刷怪）
+	PHASE_CLEARING,			// 收尾期: 2s 轮询清场（不刷怪, 等总特感 ≤ 阈值或 120s 硬上限）
+	PHASE_REST				// 冷静期: 12-18s 倒计时休息（零特感压力缓冲节点）
+}
+
+// v2.0.2: 相位名映射（防御日志用）
+static const char sPhaseNames[][] = { "IDLE", "PRESSURE", "CLEARING", "REST" };
+
 Handle
 	g_hSpawnTimer,
 	g_hRetryTimer,
 	g_hUpdateTimer,
 	g_hSuicideTimer,
-	g_hBatchTimer;				// v1.7.0 分批释放续刷 timer
+	g_hBatchTimer,				// v1.7.0 分批释放续刷 timer
+	g_hClearTimer,				// v2.0.0 收尾期 2s 轮询 timer
+	g_hRestTimer;				// v2.0.0 冷静期倒计时 timer
 
 ArrayList
 	g_hBatchQueue;				// v1.7.0 本波类型队列（跨批持有，批间存活）
@@ -108,8 +123,12 @@ ConVar
 	g_cDirBack,
 	g_cDirSplitSpread,
 	g_cDirSplitGap,
-	g_cWaveSplit,
-	g_cWaveSplitInterval;
+	g_cBatchSize,				// v2.0.0 批次引擎
+	g_cBatchMax,
+	g_cBatchWindow,
+	g_cRestMin,					// v2.0.0 波间三态
+	g_cRestMax,
+	g_cRestForce;
 
 float
 	g_fSpawnTimeMin,
@@ -127,7 +146,8 @@ float
 	g_fDirBack,
 	g_fDirSplitSpread,
 	g_fDirSplitGap,
-	g_fWaveSplitInterval,
+	g_fBatchInterval,			// v2.0.0 本波批间隔（= 窗口/批数, 钳 [5,10]，跨 timer 存活）
+	g_fPhaseEnterTime,			// v2.0.0 压力期开始时刻（收尾期 120s 硬上限锚点）
 	g_bRandomDirection;
 
 static const char
@@ -186,7 +206,6 @@ int
 	g_iBaseLimit,
 	g_iBaseSize,
 	g_iCurrentClass = -1,
-	g_iWaveSplit,
 	// v1.7.0 三段定向：每只特感的段类型（0=前/1=中/2=后）
 	g_iSegs[MAX_WAVE],
 	// v1.7.0 分批状态（跨 timer 存活）
@@ -198,7 +217,9 @@ int
 	g_iBatchGuardVis,
 	g_iBatchGuardInvis,
 	g_iBatchSegA,				// 中段参照子集起点（前段结束处）
-	g_iBatchSegB;				// 后段参照子集起点（最后自然段起点）
+	g_iBatchSegB,				// 后段参照子集起点（最后自然段起点）
+	// v2.0.0 收尾期清剿阈值: 场上存活 ≤ 该值进入冷静期（= max(2, 本波刷新量×40%)）
+	g_iClearThreshold;
 
 bool
 	g_bLateLoad,
@@ -211,6 +232,10 @@ bool
 	g_bBatchRetry,				// 本波是否 retry 波（整波零成功时 1s 后重试）
 	g_bBatchFind;				// 本波是否 rusher（跑图）
 
+// v2.0.0 波间三态: 当前相位（初始 = IDLE）
+WavePhase
+	g_Phase;
+
 // v1.7.0 参照者/flow 数组（全局持有——分批跨 timer 续刷需要存活）
 int
 	g_iBatchSurvivors[MAXPLAYERS + 1],
@@ -222,7 +247,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "1.7.0",
+	version = "2.0.2",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -286,9 +311,17 @@ public void OnPluginStart() {
 	g_cDirBack =					CreateConVar("ss_dir_back",				"30",						"三段定向: 后段(身后断后)权重 [%]", _, true, 0.0, true, 100.0);
 	g_cDirSplitSpread =				CreateConVar("ss_dir_split_spread",		"400.0",					"三段定向: 队伍前后 flow 总差(单位)低于该值视为紧凑队伍, 不分段保持原逻辑(防贴脸)", _, true, 0.0);
 	g_cDirSplitGap =				CreateConVar("ss_dir_split_gap",			"400.0",					"三段定向: 相邻生还者 flow 差超过该值视为队伍断裂, 段边界在此断开(蛇形/断裂队伍适配)", _, true, 0.0);
-	// v1.7.0 波次分批释放：总数量不变，分 N 批间隔刷出，缓解窄地形一波全堆正面的瞬间压力
-	g_cWaveSplit =					CreateConVar("ss_wave_split",			"2",						"波次分批释放批数 [1=不分批]", _, true, 1.0, true, 4.0);
-	g_cWaveSplitInterval =			CreateConVar("ss_wave_split_interval",	"2.5",						"波次分批释放间隔(秒)", _, true, 0.5, true, 10.0);
+	// v2.0.0 批次引擎（替换 ss_wave_split/_interval）: 战术小队 4 只/批,
+	// 批数 = ceil(波次/批大小) 钳 [1, 批数上限]，批间隔 = 窗口/批数 钳 [5,10]
+	// ——任意人数都在窗口内出完, 批内三段再平衡多点位输出
+	g_cBatchSize =					CreateConVar("ss_batch_size",			"4",						"波内每批特感数量(战术小队规模)", _, true, 1.0, true, 32.0);
+	g_cBatchMax =					CreateConVar("ss_batch_max",			"5",						"波内最大批数", _, true, 1.0, true, 8.0);
+	g_cBatchWindow =				CreateConVar("ss_batch_window",			"35.0",						"波内批次总释放窗口(秒), 批间隔=窗口/批数 钳制[5,10]", _, true, 5.0, true, 60.0);
+	// v2.0.0 波间三态（压力/收尾/冷静）: 收尾期场上存活 ≤ 波次×40% 或
+	// ss_rest_force 硬上限 → 冷静期零特感压力（缓冲节点）→ 下一波
+	g_cRestMin =					CreateConVar("ss_rest_min",				"12.0",						"冷静期最小时长(秒, 零特感缓冲窗口)", _, true, 1.0, true, 60.0);
+	g_cRestMax =					CreateConVar("ss_rest_max",				"18.0",						"冷静期最大时长(秒)", _, true, 1.0, true, 60.0);
+	g_cRestForce =					CreateConVar("ss_rest_force",			"120.0",					"收尾期强制冷静硬上限(秒, 自波次开始计, 防留特/僵局)", _, true, 10.0, true, 600.0);
 
 	g_cSpawnRange =					FindConVar("z_spawn_range");
 	g_cDiscardRange =				FindConVar("z_discard_range");
@@ -346,12 +379,8 @@ public void OnPluginStart() {
 
 public void OnPluginEnd() {
 	TweakSettings(true);
-	// v1.7.0: 清理跨批状态（TIMER_FLAG_NO_MAPCHANGE 会随换图取消，此处兜底）
-	delete g_hBatchTimer;
-	if (g_hBatchQueue) {
-		delete g_hBatchQueue;
-		g_hBatchQueue = null;
-	}
+	// v2.0.0: 三态生命周期清理（含跨批状态；TIMER_FLAG_NO_MAPCHANGE 会随换图取消，此处兜底）
+	ResetLifecycle();
 	g_bInSpawnTime = false;
 }
 
@@ -487,7 +516,8 @@ void KillInactiveSI(int client) {
 		GetEntProp(client, Prop_Send, "m_zombieClass"), DistanceToNearestSurvivor(o));
 	ForcePlayerSuicide(client);
 
-	if (!g_hRetryTimer)
+	// v2.0.0 波间三态: 处决补波仅压力期/收尾期（冷静期/闲置期不补——冷静期契约零特感）
+	if (!g_hRetryTimer && g_Phase != PHASE_REST && g_Phase != PHASE_IDLE)
 		CreateTimer(1.0, tmrRetrySpawn, true);
 }
 
@@ -636,7 +666,10 @@ Action cmdSetTimer(int client, int args) {
 	return Plugin_Handled;
 }
 
-Action cmdResetSpawn(int client, int args) {	
+Action cmdResetSpawn(int client, int args) {
+	// v2.0.0: 重置三态生命周期（防批次中途命令覆盖队列状态）
+	ResetLifecycle();
+
 	for (int i = 1; i <= MaxClients; i++) {
 		if (IsClientInGame(i) && IsFakeClient(i) && GetClientTeam(i) == 3 && IsPlayerAlive(i) && GetEntProp(i, Prop_Send, "m_zombieClass") != 8)
 			ForcePlayerSuicide(i);
@@ -648,6 +681,9 @@ Action cmdResetSpawn(int client, int args) {
 }
 
 Action cmdForceTimer(int client, int args) {
+	// v2.0.0: 重置三态生命周期（防批次中途命令覆盖队列状态）
+	ResetLifecycle();
+
 	if (args < 1) {
 		StartSpawnTimer();
 		ReplyToCommand(client, "[SS] Spawn timer started manually.");
@@ -804,8 +840,6 @@ void GetCvars_General() {
 	g_fDirBack = g_cDirBack.FloatValue;
 	g_fDirSplitSpread = g_cDirSplitSpread.FloatValue;
 	g_fDirSplitGap = g_cDirSplitGap.FloatValue;
-	g_iWaveSplit = g_cWaveSplit.IntValue;
-	g_fWaveSplitInterval = g_cWaveSplitInterval.FloatValue;
 }
 
 void CvarChanged_TankStatus(ConVar convar, const char[] oldValue, const char[] newValue) {
@@ -875,8 +909,12 @@ public void OnClientDisconnect(int client) {
 public void OnMapStart() {
 	if (L4D_HasAnySurvivorLeftSafeArea()) {
 		g_bLeftSafeArea = true;
-		if (!g_hSpawnTimer)
-			StartCustomSpawnTimer(g_fFirstSpawnTime);
+		// v2.0.0 热重载兜底: 状态机与全部 timer 随卸载清零 → 从收尾期恢复
+		// （现有特感清剿 → 冷静 → 下一波, 冷静期契约在 reload 后仍成立）
+		if (!g_hSpawnTimer && !g_hClearTimer && !g_hRestTimer && !g_hBatchTimer) {
+			g_fPhaseEnterTime = GetEngineTime();
+			EnterClearing();
+		}
 		if (!g_hSuicideTimer)
 			g_hSuicideTimer = CreateTimer(2.5, tmrForceSuicide, _, TIMER_REPEAT);
 	}
@@ -888,12 +926,8 @@ public void OnMapEnd() {
 
 	EndSpawnTimer();
 	delete g_hSuicideTimer;
-	// v1.7.0: 清理跨批状态（TIMER_FLAG_NO_MAPCHANGE 会随换图取消，此处兜底）
-	delete g_hBatchTimer;
-	if (g_hBatchQueue) {
-		delete g_hBatchQueue;
-		g_hBatchQueue = null;
-	}
+	// v2.0.0: 三态生命周期清理（含跨批状态；TIMER_FLAG_NO_MAPCHANGE 随换图取消，此处兜底）
+	ResetLifecycle();
 	g_bInSpawnTime = false;
 	TankStatusActoin(false);
 
@@ -909,6 +943,8 @@ void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast) {
 
 void Event_RoundStart(Event event, const char[] name, bool dontBroadcast) {
 	EndSpawnTimer();
+	// v2.0.0: 回合重开中途相位兜底复位
+	ResetLifecycle();
 }
 
 void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast) {
@@ -1117,20 +1153,35 @@ void EndSpawnTimer() {
 	delete g_hRetryTimer;
 }
 
-Action tmrSpawnSpecial(Handle timer) { 
+Action tmrSpawnSpecial(Handle timer) {
 	g_hSpawnTimer = null;
 	delete g_hRetryTimer;
 
-	int totalSI = GetTotalSI();
-	ExecuteSpawnQueue(totalSI, true);
+	// v2.0.1 冷静期契约防御: REST 期间绝不允许排波。历史 bug（tmrClearCheck
+	// REPEAT timer 回调自删双重释放）导致 SM 句柄表污染，出现 REST 期间幽灵
+	// 波 timer 提前触发（波 B 在冷静期第 12s 刷出、无播报，玩家实测"第二波
+	// 来袭不播报"）。防御: 忽略 + 记录，冷静期窗口由 tmrRestEnd 正常接管。
+	if (g_Phase == PHASE_REST) {
+		LogMessage("[SS] 防御: REST 期间忽略幽灵波 timer");
+		return Plugin_Continue;
+	}
 
-	g_hSpawnTimer = CreateTimer(g_iSpawnTimeMode > 0 ? g_fSpawnTimes[totalSI] : Math_GetRandomFloat(g_fSpawnTimeMin, g_fSpawnTimeMax), tmrSpawnSpecial);
+	// v2.0.0 波间三态: 压力期开始（收尾期 120s 强制冷静硬上限锚点）
+	g_fPhaseEnterTime = GetEngineTime();
+	g_Phase = PHASE_PRESSURE;
+
+	int totalSI = GetTotalSI();
+	bool started = ExecuteSpawnQueue(totalSI, true);
+
+	// v2.0.0: 零波（上限满/全倒/无站立生还者）直接进收尾期轮询, 链条不断
+	if (!started)
+		EnterClearing();
 	return Plugin_Continue;
 }
 
-void ExecuteSpawnQueue(int totalSI, bool retry) {
+bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	if (totalSI >= g_iSILimit)
-		return;
+		return false;
 
 	#if BENCHMARK
 	g_profiler = new Profiler();
@@ -1168,7 +1219,7 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 			if (totalSI >= effLimit) {
 				LogMessage("[SS] incap comp: %d/%d 倒地, 上限 %d→%d, 存活 %d → 本波跳过",
 					total - standing, total, g_iSILimit, effLimit, totalSI);
-				return;
+				return false;
 			}
 
 			int oldSize = spawnSize;
@@ -1202,7 +1253,7 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	spawnSize = aQueue.Length;
 	if (!spawnSize) {
 		delete aQueue;
-		return;
+		return false;
 	}
 
 	float flow;
@@ -1219,7 +1270,7 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	if (!count) {
 		delete aList;
 		delete aQueue;
-		return;
+		return false;
 	}
 
 	aList.Sort(Sort_Descending, Sort_Float);
@@ -1262,6 +1313,31 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	int segA = 0;
 	int segB = 0;
 	bool useSegs = false;
+
+	// v2.0.0 批次引擎: 批数 = ceil(波次/ss_batch_size) 钳 [1, ss_batch_max]
+	// （战术小队 4 只/批）; 批间隔 = ss_batch_window/批数 钳 [5,10]（整波释放
+	// 窗口 ≈ 35s, 任意人数都在窗口内出完）。
+	int batches = RoundToCeil(float(spawnSize) / float(g_cBatchSize.IntValue));
+	if (batches < 1)
+		batches = 1;
+	if (batches > g_cBatchMax.IntValue)
+		batches = g_cBatchMax.IntValue;
+	if (batches > spawnSize)
+		batches = spawnSize;
+	g_iBatchBatchSize = spawnSize / batches + ((spawnSize % batches) ? 1 : 0);
+
+	float bi = g_cBatchWindow.FloatValue / float(batches);
+	if (bi < 5.0)
+		bi = 5.0;
+	else if (bi > 10.0)
+		bi = 10.0;
+	g_fBatchInterval = bi;
+
+	// v2.0.0 收尾期清剿阈值: 场上存活 ≤ max(2, floor(本波刷新量×0.4)) 进冷静期
+	// （4人8特 → ≤3 = "不足4只"; 检测存活防留特, 处决机制 25s 自然清场）
+	g_iClearThreshold = spawnSize * 4 / 10;
+	if (g_iClearThreshold < 2)
+		g_iClearThreshold = 2;
 	if (!g_bFinaleStarted && aLen >= 3 && (flow - lastFlow) >= g_fDirSplitSpread) {
 		useSegs = true;
 		// 自然段划分：segA = 第一处断裂（前段参照子集 [0,segA)），
@@ -1292,34 +1368,42 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 		if (segB > aLen)
 			segB = aLen;
 
-		// 按权重精确分配各段特感数 + Fisher-Yates 洗牌（比例精确、波内顺序随机）
+		// v2.0.0 批内段重平衡: 整波先分配再洗牌 → 分批释放时前批单段扎堆。
+		// 每批独立 40/30/30 + 批内洗牌 → 每批都前中后均衡（4 只批 = 头2/中1/尾1,
+		// 多点位输出）。段边界（segA/segB 参照子集）语义不变, 权重仍 40/30/30。
 		float totalW = g_fDirFront + g_fDirMid + g_fDirBack;
 		if (totalW <= 0.0)
 			totalW = 100.0;
-		int frontN = RoundToNearest(float(spawnSize) * g_fDirFront / totalW);
-		if (frontN > spawnSize)
-			frontN = spawnSize;
-		if (frontN < 0)
-			frontN = 0;
-		int backN = RoundToNearest(float(spawnSize) * g_fDirBack / totalW);
-		if (backN > spawnSize - frontN)
-			backN = spawnSize - frontN;
-		if (backN < 0)
-			backN = 0;
-		int midN = spawnSize - frontN - backN;
-		for (i = 0; i < spawnSize; i++)
-			g_iSegs[i] = (i < frontN) ? 0 : (i < frontN + midN) ? 1 : 2;
-		for (i = spawnSize - 1; i > 0; i--) {
-			int j = GetRandomInt(0, i);
-			int tmp = g_iSegs[i];
-			g_iSegs[i] = g_iSegs[j];
-			g_iSegs[j] = tmp;
+		for (int b = 0; b < batches; b++) {
+			int start = b * g_iBatchBatchSize;
+			int end = start + g_iBatchBatchSize;
+			if (end > spawnSize)
+				end = spawnSize;
+			int batchN = end - start;
+			int frontN = RoundToNearest(float(batchN) * g_fDirFront / totalW);
+			if (frontN > batchN)
+				frontN = batchN;
+			if (frontN < 0)
+				frontN = 0;
+			int backN = RoundToNearest(float(batchN) * g_fDirBack / totalW);
+			if (backN > batchN - frontN)
+				backN = batchN - frontN;
+			if (backN < 0)
+				backN = 0;
+			int midN = batchN - frontN - backN;
+			for (i = start; i < end; i++)
+				g_iSegs[i] = (i - start < frontN) ? 0 : (i - start < frontN + midN) ? 1 : 2;
+			for (i = end - 1; i > start; i--) {
+				int j = GetRandomInt(start, i);
+				int tmp = g_iSegs[i];
+				g_iSegs[i] = g_iSegs[j];
+				g_iSegs[j] = tmp;
+			}
 		}
 	}
 
-	// v1.7.0 波次分批释放：总数量不变，分 N 批间隔刷出（缓解窄地形一波全堆
-	// 正面）。批次状态全局持有，续刷走 tmrBatchContinue，收尾统一 FinishWave
-	// （guard 统计跨批累计 + retry 判定 + 队列释放）。
+	// v1.7.0 波次分批释放: 批次状态全局持有，续刷走 tmrBatchContinue，收尾统一
+	// FinishWave（guard 统计跨批累计 + retry 判定 + 队列释放）。
 	g_iBatchSuccess = 0;
 	g_iBatchGuardBlocked = 0;
 	g_iBatchGuardVis = 0;
@@ -1331,12 +1415,6 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	g_bBatchSegs = useSegs;
 	g_bBatchRetry = retry;
 	g_bBatchFind = find;
-	int batches = g_iWaveSplit;
-	if (batches > spawnSize)
-		batches = spawnSize;
-	if (batches < 1)
-		batches = 1;
-	g_iBatchBatchSize = spawnSize / batches + ((spawnSize % batches) ? 1 : 0);
 
 	g_hBatchQueue = aQueue;
 	SpawnSliced(0, (g_iBatchBatchSize < spawnSize) ? g_iBatchBatchSize : spawnSize);
@@ -1349,7 +1427,9 @@ void ExecuteSpawnQueue(int totalSI, bool retry) {
 	if (g_iBatchNext >= g_iBatchTotal)
 		FinishWave();
 	else
-		g_hBatchTimer = CreateTimer(g_fWaveSplitInterval, tmrBatchContinue, _, TIMER_FLAG_NO_MAPCHANGE);
+		g_hBatchTimer = CreateTimer(g_fBatchInterval, tmrBatchContinue, _, TIMER_FLAG_NO_MAPCHANGE);
+
+	return true;
 }
 
 // v1.7.0: 刷取队列 [from, to) 区间。每只特感按段类型决定方向与参照者子集，
@@ -1462,8 +1542,22 @@ void SpawnSliced(int from, int to) {
 }
 
 // v1.7.0: 分批续刷。下一片刷完若仍有剩余继续定时，否则收尾。
+// v2.0.2: 相位守卫——续刷仅限压力期。历史: v2.0.0 tmrClearCheck 双重释放污染
+// 句柄表后幽灵 timer 在冷静期提前触发（波 B 冷静期第 12s 刷出、无播报）。已给
+// tmrSpawnSpecial 加 REST 守卫（v2.0.1），批次续刷是最后的无守卫刷怪入口：
+// 正常流程收尾期只在全部批次出完后进入（不可能持有批次 timer），非 PRESSURE
+// 触发 = 异常，忽略 + 记录。队列已释放的幽灵批次同样忽略（防空句柄访问）。
 Action tmrBatchContinue(Handle timer) {
 	g_hBatchTimer = null;
+
+	if (g_Phase != PHASE_PRESSURE) {
+		LogMessage("[SS] 防御: %s 期间忽略幽灵批次 timer", sPhaseNames[g_Phase]);
+		return Plugin_Continue;
+	}
+	if (g_hBatchQueue == null) {
+		LogMessage("[SS] 防御: 幽灵批次 timer 队列已释放");
+		return Plugin_Continue;
+	}
 
 	int end = g_iBatchNext + g_iBatchBatchSize;
 	if (end > g_iBatchTotal)
@@ -1473,7 +1567,7 @@ Action tmrBatchContinue(Handle timer) {
 	if (g_iBatchNext >= g_iBatchTotal)
 		FinishWave();
 	else
-		g_hBatchTimer = CreateTimer(g_fWaveSplitInterval, tmrBatchContinue, _, TIMER_FLAG_NO_MAPCHANGE);
+		g_hBatchTimer = CreateTimer(g_fBatchInterval, tmrBatchContinue, _, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Continue;
 }
 
@@ -1504,6 +1598,111 @@ void FinishWave() {
 	}
 	#endif
 
+	// v2.0.0 波间三态: 收尾转换——retry 波仍在压力期（其 FinishWave 才收尾）
+	if (!g_hRetryTimer)
+		EnterClearing();
+
+	if (g_hBatchQueue) {
+		delete g_hBatchQueue;
+		g_hBatchQueue = null;
+	}
+}
+
+// ============ v2.0.0 波间三态（压力/收尾/冷静） ============
+
+// 进入收尾期: 2s 轮询清场。清场（总特感 ≤ 清剿阈值）→ 冷静期; 自压力期开始超
+// ss_rest_force 秒强制冷静（防留特/僵局拖死节奏——留特者被 25s 处决自然清场,
+// 保持可见威胁的极端留特由硬上限兜底）。终章同样走三态（终章压力由引擎潮水/
+// Tank 事件兜底, 本插件只是额外功能层）。
+void EnterClearing() {
+	g_Phase = PHASE_CLEARING;
+	if (g_iClearThreshold < 2)
+		g_iClearThreshold = 2;		// reload 兜底: 全局清零后保底 2
+	KillClearTimer();				// v2.0.1: 防御 delete（句柄可能已被 SM 释放, 裸 delete 抛错中断状态机）
+	g_hClearTimer = CreateTimer(2.0, tmrClearCheck, _, TIMER_REPEAT);
+	LogMessage("[SS] phase: PRESSURE -> CLEARING (阈值 %d)", g_iClearThreshold);
+}
+
+// v2.0.1: 防御性清除收尾轮询 timer——句柄可能已被 SM 在 Plugin_Stop 收尾时释放
+// （历史: 回调自删 REPEAT timer 双重释放 + 相位转移路径不置 null → 悬空句柄 →
+// 裸 delete 抛 "Handle is invalid" → EnterClearing 中断, 状态机卡死, 波次失控）。
+void KillClearTimer() {
+	if (g_hClearTimer != null) {
+		if (IsValidHandle(g_hClearTimer))
+			delete g_hClearTimer;
+		g_hClearTimer = null;
+	}
+}
+
+Action tmrClearCheck(Handle timer) {
+	// 防御: 相位被处决补波等转移后不再轮询（只置空不 delete——v2.0.1:
+	// Plugin_Stop 会让 SM 自动释放本 timer, 回调内手动 delete 自己的
+	// REPEAT 句柄 = 双重释放, 实测污染 SM 句柄表触发后续连锁错误）
+	if (g_Phase != PHASE_CLEARING) {
+		g_hClearTimer = null;
+		return Plugin_Stop;
+	}
+
+	if (GetTotalSI() <= g_iClearThreshold || GetEngineTime() - g_fPhaseEnterTime >= g_cRestForce.FloatValue) {
+		g_hClearTimer = null;
+		EnterRest();
+		return Plugin_Stop;
+	}
+	return Plugin_Continue;
+}
+
+// 进入冷静期: 12-18s 零特感压力倒计时（缓冲节点）, 播报总倒计时（冷静期 +
+// 下一波间隔, 确定性可算 → 数字精确）。PrintToChatAll——不用 PrintHintText
+// （L4D2 CJK hint 首条渲染乱码 bug）。
+void EnterRest() {
+	float rest = Math_GetRandomFloat(g_cRestMin.FloatValue, g_cRestMax.FloatValue);
+	if (rest < 1.0)
+		rest = 1.0;
+	g_Phase = PHASE_REST;
+	if (g_hRestTimer != null && IsValidHandle(g_hRestTimer))
+		delete g_hRestTimer;
+	g_hRestTimer = CreateTimer(rest, tmrRestEnd);
+	LogMessage("[SS] phase: CLEARING -> REST (%.1fs)", rest);
+
+	int total = RoundToNearest(rest + GetPostRestInterval());
+	PrintToChatAll("\x04[特感]\x01 波次清剿完毕，\x05%d\x01 秒后下一波", total);
+}
+
+// 冷静期后的下一波间隔 = 波间隔钉值 − 平均冷静时长（冷静期吃掉波间隔前段,
+// 总波周期仍 ≈ 钉值 40-55, 不会"休息完再等满 40-55"）。si_comp 每波把
+// ss_time_min/max 钉为随机(40,55), g_fSpawnTimeMax 即当前钉值。
+float GetPostRestInterval() {
+	float avgRest = (g_cRestMin.FloatValue + g_cRestMax.FloatValue) * 0.5;
+	float interval = g_fSpawnTimeMax - avgRest;
+	if (interval < 10.0)
+		interval = 10.0;
+	if (interval > 45.0)
+		interval = 45.0;
+	return interval;
+}
+
+// 冷静期结束: 排下一波 timer（相位回 IDLE, 持有待命波 timer）
+void StartPostRestTimer() {
+	EndSpawnTimer();
+	g_hSpawnTimer = CreateTimer(GetPostRestInterval(), tmrSpawnSpecial);
+	LogMessage("[SS] phase: REST -> IDLE (下一波 %.1fs)", GetPostRestInterval());
+}
+
+Action tmrRestEnd(Handle timer) {
+	g_hRestTimer = null;
+	g_Phase = PHASE_IDLE;
+	StartPostRestTimer();
+	return Plugin_Continue;
+}
+
+// 中止并重置波次生命周期（admin 命令 / 换图 / 卸载复用; 不碰自杀 timer）
+void ResetLifecycle() {
+	g_Phase = PHASE_IDLE;
+	KillClearTimer();
+	if (g_hRestTimer != null && IsValidHandle(g_hRestTimer))
+		delete g_hRestTimer;
+	g_hRestTimer = null;
+	delete g_hBatchTimer;
 	if (g_hBatchQueue) {
 		delete g_hBatchQueue;
 		g_hBatchQueue = null;
@@ -1549,7 +1748,19 @@ bool TRFilter_SkipPlayers(int entity, int contentsMask, any data) {
 
 Action tmrRetrySpawn(Handle timer, bool retry) {
 	g_hRetryTimer = null;
-	ExecuteSpawnQueue(GetTotalSI(), retry);
+	// v2.0.0 波间三态: 仅压力期/收尾期补波（冷静期/闲置期不补——冷静期后由
+	// rest 结束的 timer 负责下一波）
+	if (g_Phase != PHASE_PRESSURE && g_Phase != PHASE_CLEARING)
+		return Plugin_Continue;
+
+	// v2.0.0 retry 波属压力期: 重置 120s 硬上限锚点; 从收尾期转移须撤轮询 timer
+	if (g_Phase == PHASE_CLEARING) {
+		KillClearTimer();		// v2.0.1: 防御 delete（悬空句柄裸 delete 抛错）
+	}
+	g_fPhaseEnterTime = GetEngineTime();
+	g_Phase = PHASE_PRESSURE;
+	if (!ExecuteSpawnQueue(GetTotalSI(), retry))
+		EnterClearing();
 	return Plugin_Continue;
 }
 

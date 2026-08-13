@@ -1,0 +1,14 @@
+// si_hud v1.11.0: 三方图大地图（战役）清单 —— 每行一个战役前缀
+// 匹配规则：三方图图名以 前缀 + (_ / m<数字> / 结尾) 开头即命中该战役，
+// 战役内跨图保留积分/复活币，换战役清零（含 m1 首图重开判定）。
+// 不在清单且无地图号标记（m<数字>/尾 _<数字>）的图 = 小图/单图，每次换图清零。
+// 官图命名（cXmY）自动按战役处理（c1m1→c1m5 保留），无需列入。
+// 自上而下第一个命中生效；改完本文件无需重载插件，下张图生效。
+//
+// 当前三方图轮换链（data/sm_l4d_mapchanger_custom.txt）的战役：
+dc2      // Dead City 2（dc2m1_riverside → dc2m6_station）
+dw       // Dark Wood（dw_woods → dw_final）
+de       // Dear Esther（de_donnelley_m1 → de_paul_m4）
+hls      // 天梯（hls_05 → hls_14，1+2 连续；若 1/2 要分开清零需改图名区分）
+nanningcity // 南宁（nanningcity_departure_m1 → ... → nanningcity_bridge_m6：
+          //   各关段名不同，m<数字> 自动判定会拆成 6 个战役，必须清单归并）

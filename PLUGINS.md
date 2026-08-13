@@ -53,8 +53,8 @@
 
 | 插件 | 说明 |
 |------|------|
-| `l4d2_si_hud.smx` | 特感血量 HUD + 战地击杀横幅 + 计分/钱包/复活系统（v1.9.6；商店已解耦至 l4d2_shop，导出 SH_ API；复活清尸依赖 Defib_Fix v2.0.2） |
-| `l4d2_shop.smx` | 积分商店 !shop/!buy（v1.0.0；自 si_hud v1.8.2 解耦：商品表/菜单/透视特感/火炮支援 I/II + si_hud_shop_enable/si_hud_art_* cvar） |
+| `l4d2_si_hud.smx` | 特感血量 HUD + 战地击杀横幅 + 计分/钱包/复活系统（v1.10.1；商店已解耦至 l4d2_shop，导出 SH_ API；复活清尸依赖 Defib_Fix v2.0.2；v1.10.0 废除断线时间窗——同战役重连恢复钱包/复活币；v1.10.1 三方图轮换跨图保留——current_mode.txt=custom 豁免新战役清零） |
+| `l4d2_shop.smx` | 积分商店 !shop/!buy（v1.7.2；自 si_hud v1.8.2 解耦：商品表/菜单/透视特感/火炮支援 I/II/III + si_hud_shop_enable/si_hud_art_* cvar；2026-08-05 修复 0 分幽灵槽（SHOP_SLOTS 24→23）+ WALLHACK_SLOT 11；v1.7.2 火炮III touch-miss 改手动碎裂防无限尸潮图引擎崩溃（dearesther m2 onslaught 13:53 段错误） |
 | `l4d2_bf_killfeedback.smx` | 战地击杀音效（6 种 MP3，v4.2.0；v4.2.1 待发 sound.cache） |
 | `advertisements.smx` | 定时轮播服务器公告（120s 间隔） |
 | `auto_motd.smx` | 自动显示 MOTD 欢迎信息 |
