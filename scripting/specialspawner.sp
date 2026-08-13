@@ -243,11 +243,14 @@ int
 float
 	g_fBatchFlows[MAXPLAYERS + 1];
 
+// v2.1.0 压力系统集成: 通知 pressure_tracker 波次开始/结束
+bool g_bPressureTrackerExists = false;
+
 public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "2.0.2",
+	version = "2.1.0",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -767,6 +770,18 @@ public void OnConfigsExecuted() {
 	GetCvars_TankStatus();
 	GetCvars_TankCustom();
 	TweakSettings(false);
+
+	// v2.1.0 检测 pressure_tracker 插件
+	CheckPressureTracker();
+}
+
+// v2.1.0 检测 pressure_tracker 是否存在
+void CheckPressureTracker() {
+	ConVar cv = FindConVar("sm_pressure_tier");
+	g_bPressureTrackerExists = (cv != null);
+	if (g_bPressureTrackerExists) {
+		LogMessage("[SS] Pressure tracker detected, integration enabled");
+	}
 }
 
 void CvarChanged_Limits(ConVar convar, const char[] oldValue, const char[] newValue) {
@@ -1182,6 +1197,11 @@ Action tmrSpawnSpecial(Handle timer) {
 bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	if (totalSI >= g_iSILimit)
 		return false;
+
+	// v2.1.0 通知 pressure_tracker 波次开始（仅首次执行，非 retry）
+	if (!retry && g_bPressureTrackerExists) {
+		NotifyPressureWaveStart();
+	}
 
 	#if BENCHMARK
 	g_profiler = new Profiler();
@@ -1664,6 +1684,11 @@ void EnterRest() {
 	g_hRestTimer = CreateTimer(rest, tmrRestEnd);
 	LogMessage("[SS] phase: CLEARING -> REST (%.1fs)", rest);
 
+	// v2.1.0 通知 pressure_tracker 波次结束
+	if (g_bPressureTrackerExists) {
+		NotifyPressureWaveCleared();
+	}
+
 	int total = RoundToNearest(rest + GetPostRestInterval());
 	PrintToChatAll("\x04[特感]\x01 波次清剿完毕，\x05%d\x01 秒后下一波", total);
 }
@@ -1848,4 +1873,36 @@ int GenerateIndex() {
 // https://github.com/bcserv/smlib/blob/transitional_syntax/scripting/include/smlib/math.inc
 float Math_GetRandomFloat(float min, float max) {
 	return (GetURandomFloat() * (max  - min)) + min;
+}
+
+// ============================================================================
+// v2.1.0 Pressure Tracker Integration
+// ============================================================================
+
+// 通知 pressure_tracker 波次开始
+void NotifyPressureWaveStart() {
+	Handle plugin = FindPluginByFile("pressure_tracker.smx");
+	if (plugin == null)
+		return;
+
+	Function func = GetFunctionByName(plugin, "OnWaveStarted");
+	if (func == INVALID_FUNCTION)
+		return;
+
+	Call_StartFunction(plugin, func);
+	Call_Finish();
+}
+
+// 通知 pressure_tracker 波次结束
+void NotifyPressureWaveCleared() {
+	Handle plugin = FindPluginByFile("pressure_tracker.smx");
+	if (plugin == null)
+		return;
+
+	Function func = GetFunctionByName(plugin, "OnWaveCleared");
+	if (func == INVALID_FUNCTION)
+		return;
+
+	Call_StartFunction(plugin, func);
+	Call_Finish();
 }
