@@ -1,5 +1,5 @@
 // ============================================================================
-// bt_jockey.inc — Jockey Behavior Tree (v3.2)
+// bt_jockey.inc — Jockey Behavior Tree (v5.7)
 // ============================================================================
 // Key behaviors preserved from v2.4:
 //   - Alternating jump/leap cycle
@@ -186,7 +186,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_IsAttackWindow),
         BT_CreateAction(ACT_AcquirePinTarget),
         BT_CreateIsTargetInRange(500.0),
-        BT_CreateCooldown(1.0, BT_CreateAction(JockeyAct_AlternatingHop))
+        BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.0)
     );
 
     // --- v3.2 FIX: Terrain-aware leap strategies ---
@@ -217,7 +217,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(400.0),                       // close enough
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))  // v3.7: 2.0→1.2
+        BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
 
     // Narrow: approach (far) → hug wall
@@ -235,7 +235,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(350.0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))  // v3.7: 2.0→1.2
+        BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
 
     // ==========================================
@@ -260,7 +260,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(400.0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))
+        BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
     // Strat 1: Erratic leap — zigzag approach → leap from varied angle
     // v5.6: +Acquire + HasTargetLOS + target 口径（同 ledge/narrow）
@@ -276,7 +276,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(350.0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))
+        BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
 
     // --- Standard hop attack ---
@@ -289,11 +289,13 @@ stock int BT_CreateJockeyTree() {
     );
 
     int hopAcquireTarget = BT_CreateAction(JockeyAct_AlternatingHop);
-    int hopWithCooldown = BT_CreateCooldown(1.2, hopAcquireTarget);  // v3.6: 2.0→1.2
+    // v5.7: 移除 Cooldown(1.2) —— 和 Hunter v5.8/v5.9 同理：冷却期内 hopPreCond
+    // 仍满足（地面+LOS+距离）→ hopSeq FAIL，但 selector 反复选中 → 站桩。
+    // 引擎自带跳跃冷却，插件侧不需要再锁。
 
     int hopSeq = BT_CreateSequence(2,
         hopPreCond,
-        hopWithCooldown
+        hopAcquireTarget
     );
 
     // Approach: always strafe while closing in

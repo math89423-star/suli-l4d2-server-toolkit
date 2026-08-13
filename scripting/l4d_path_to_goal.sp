@@ -1,11 +1,15 @@
 // ============================================================
-//  [L4D2] Path To Goal — flow 梯度下降重写版 v5.0.1
+//  [L4D2] Path To Goal — flow 梯度下降重写版 v5.0.2
 //
 //  弃用 11k 行自建 A* 管线（PTG v4.8.3），核心换成引擎 flow 场：
 //    引擎 flow = 从地图起点沿 nav 的弧长，递增方向 = 出口方向。
 //    从玩家所在 nav area 沿 4 向平面邻接（人类可走连接）做
 //    flow 严格递增的梯度上升，直到到达 RESCUE_VEHICLE /
 //    flow 接近地图最大值，或走到局部极大（死路/机关 → beacon 降级）。
+//
+//  v5.0.2 (2026-08-13):
+//    - FIX: 多人同时开启导航线时，后开启者会覆盖前者的线（TE buffer 竞争）
+//      修复：为每个客户端创建独立定时器，错开画线时机，避免 TE_SetupBeamPoints 竞争
 //
 //  已验证（c1m1_hotel，实验插件 l4d2_flow_path_test）：
 //    69.4% area 可达、0 断链、LOS 1.7%、单次路径 0.9ms、无后台管线
@@ -42,7 +46,7 @@
 
 int    g_iLaser;
 bool   g_bGuideToggled[MAXPLAYERS + 1];
-Handle g_hToggleTimer = null;
+Handle g_hToggleTimer[MAXPLAYERS + 1];  // v5.0.2: 每客户端独立定时器（修复 TE buffer 竞争）
 bool   g_bNavReady;          // 当前地图有 nav mesh（OnMapStart 查一次）
 ArrayList g_hPathCache[MAXPLAYERS + 1];   // 路径缓存（移动 <128u 复用，零重算）
 float  g_fPathCacheTime[MAXPLAYERS + 1];  // 上次重算时间（大图 BFS 成本高，≥0.5s 节流）
@@ -118,9 +122,15 @@ void ResetMapState()
 	// 首按 !ptg 把残留 on 翻成 off（"导航线 OFF"），要按两次才开；
 	// 且旧图 area 缓存在新图会被拿来画线（脏数据）。on 的玩家断线
 	// 时标志也会残留（定时器空转由 Timer_ToggleRedraw 的 !anyOn 兜底）。
+	// v5.0.2: 每客户端独立定时器 → 也要清理
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		g_bGuideToggled[i] = false;
+		if (g_hToggleTimer[i] != null)
+		{
+			KillTimer(g_hToggleTimer[i]);
+			g_hToggleTimer[i] = null;
+		}
 		if (g_hPathCache[i] != null)
 		{
 			delete g_hPathCache[i];
@@ -699,19 +709,27 @@ void FindGoalEntity()
 
 public void OnPluginEnd()
 {
-	if (g_hToggleTimer != null)
+	// v5.0.2: 清理所有客户端定时器
+	for (int i = 1; i <= MaxClients; i++)
 	{
-		KillTimer(g_hToggleTimer);
-		g_hToggleTimer = null;
+		if (g_hToggleTimer[i] != null)
+		{
+			KillTimer(g_hToggleTimer[i]);
+			g_hToggleTimer[i] = null;
+		}
 	}
 }
 
 public void OnMapEnd()
 {
-	if (g_hToggleTimer != null)
+	// v5.0.2: 清理所有客户端定时器
+	for (int i = 1; i <= MaxClients; i++)
 	{
-		KillTimer(g_hToggleTimer);
-		g_hToggleTimer = null;
+		if (g_hToggleTimer[i] != null)
+		{
+			KillTimer(g_hToggleTimer[i]);
+			g_hToggleTimer[i] = null;
+		}
 	}
 }
 
@@ -758,91 +776,93 @@ Action CmdRequestGuide(int client, int args)
 
 void Guide_UpdateRedrawTimer()
 {
-	bool anyOn = false;
+	// v5.0.2: 为每个客户端创建独立定时器，避免 TE buffer 竞争。
+	// 根因：TE_SetupBeamPoints 使用全局 buffer，多个玩家在同一帧内画线会互相覆盖。
+	// 修复：每个玩家的定时器独立触发，错开画线时机。
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (g_bGuideToggled[i]) { anyOn = true; break; }
-	}
-
-	if (anyOn && g_hToggleTimer == null)
-	{
-		// 递归 one-shot：TIMER_REPEAT 空服不触发（SourceMod bug，v4.5 教训）
-		g_hToggleTimer = CreateTimer(REDRAW_INTERVAL, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
-	}
-	else if (!anyOn && g_hToggleTimer != null)
-	{
-		KillTimer(g_hToggleTimer);
-		g_hToggleTimer = null;
+		if (g_bGuideToggled[i] && g_hToggleTimer[i] == null)
+		{
+			// 开启导航线且没有定时器 → 创建
+			g_hToggleTimer[i] = CreateTimer(REDRAW_INTERVAL, Timer_ToggleRedraw, GetClientUserId(i), TIMER_FLAG_NO_MAPCHANGE);
+		}
+		else if (!g_bGuideToggled[i] && g_hToggleTimer[i] != null)
+		{
+			// 关闭导航线且有定时器 → 杀掉
+			KillTimer(g_hToggleTimer[i]);
+			g_hToggleTimer[i] = null;
+		}
 	}
 }
 
-Action Timer_ToggleRedraw(Handle timer)
+Action Timer_ToggleRedraw(Handle timer, int userid)
 {
+	// v5.0.2: 每客户端独立定时器，只画一个玩家的线（避免 TE buffer 竞争）
+	int client = GetClientOfUserId(userid);
+	if (client <= 0 || !IsClientInGame(client) || IsFakeClient(client) || !g_bGuideToggled[client])
+	{
+		// 玩家已离线/关闭导航 → 清理定时器句柄
+		if (client > 0 && client <= MaxClients)
+			g_hToggleTimer[client] = null;
+		return Plugin_Stop;
+	}
+
 	// 本回调的定时器已到期，句柄先清空（v5.0.1 修复）：
 	// 旧版"回调开头无条件排下一次 + !anyOn 时置 null"→ 已排的下一次
 	// 句柄被丢成幽灵定时器，空转永不停；开启着 PTG 的玩家断线后触发，
 	// 反复出现会叠加多个定时器 → 画线速率翻倍、空服 CPU 浪费。
-	g_hToggleTimer = null;
+	g_hToggleTimer[client] = null;
 
-	bool anyOn = false;
-	for (int i = 1; i <= MaxClients; i++)
+	float origin[3];
+	GetClientAbsOrigin(client, origin);
+
+	// 移动 <128u 且缓存有效 → 用缓存路径画线（零路径计算）
+	// 重算节流 ≥0.5s：全图 BFS 成本随图线性增长，快跑也不逐帧算
+	//（大三方图 2 万 areas 单次 BFS 可达百 ms 级，0.3s 逐帧会卡）
+	// 缓存有效性双保险：句柄非 null + 时间戳>0（悬垂句柄 ≠ null 但时间戳永不为负，
+	// 防"某处 delete 未置 null"同类回归——DrawPathList 曾误删缓存引发 788 连环崩）
+	if (g_fPathCacheTime[client] > 0.0 && g_hPathCache[client] != null
+		&& (GetVectorDistance(origin, g_fPathCachePos[client], false) < 128.0
+			|| GetEngineTime() - g_fPathCacheTime[client] < 0.5))
 	{
-		if (!g_bGuideToggled[i] || !IsClientInGame(i) || IsFakeClient(i))
-			continue;
-		anyOn = true;
-
-		float origin[3];
-		GetClientAbsOrigin(i, origin);
-
-		// 移动 <128u 且缓存有效 → 用缓存路径画线（零路径计算）
-		// 重算节流 ≥0.5s：全图 BFS 成本随图线性增长，快跑也不逐帧算
-		//（大三方图 2 万 areas 单次 BFS 可达百 ms 级，0.3s 逐帧会卡）
-		// 缓存有效性双保险：句柄非 null + 时间戳>0（悬垂句柄 ≠ null 但时间戳永不为负，
-		// 防"某处 delete 未置 null"同类回归——DrawPathList 曾误删缓存引发 788 连环崩）
-		if (g_fPathCacheTime[i] > 0.0 && g_hPathCache[i] != null
-			&& (GetVectorDistance(origin, g_fPathCachePos[i], false) < 128.0
-				|| GetEngineTime() - g_fPathCacheTime[i] < 0.5))
+		if (GetEngineTime() - g_fLastPathDiag > 5.0)
 		{
-			if (GetEngineTime() - g_fLastPathDiag > 5.0)
-			{
-				LogMessage("[PTG] diag cache-hit draw");
-				g_fLastPathDiag = GetEngineTime();
-			}
-			DrawPathList(i, origin, g_hPathCache[i],
-				g_fPathCacheFlow[i], g_iPathCacheAttrs[i], g_AreaPathCacheEnd[i]);
-			continue;
+			LogMessage("[PTG] diag cache-hit draw");
+			g_fLastPathDiag = GetEngineTime();
 		}
-
+		DrawPathList(client, origin, g_hPathCache[client],
+			g_fPathCacheFlow[client], g_iPathCacheAttrs[client], g_AreaPathCacheEnd[client]);
+	}
+	else
+	{
 		// 重算路径并缓存
-		g_fPathCacheTime[i] = GetEngineTime();
+		g_fPathCacheTime[client] = GetEngineTime();
 		float endFlow = -1.0;
 		int endAttrs = 0;
 		Address endArea = Address_Null;
 		ArrayList path = FlowPathFrom(origin, endFlow, endAttrs, endArea);
 		if (path != null)
 		{
-			delete g_hPathCache[i];
-			g_hPathCache[i] = path.Clone();
-			g_fPathCachePos[i] = origin;
-			g_fPathCacheFlow[i] = endFlow;
-			g_iPathCacheAttrs[i] = endAttrs;
-			g_AreaPathCacheEnd[i] = endArea;
+			delete g_hPathCache[client];
+			g_hPathCache[client] = path.Clone();
+			g_fPathCachePos[client] = origin;
+			g_fPathCacheFlow[client] = endFlow;
+			g_iPathCacheAttrs[client] = endAttrs;
+			g_AreaPathCacheEnd[client] = endArea;
 		}
 		else if (GetEngineTime() - g_fLastPathDiag > 5.0)
 		{
 			LogMessage("[PTG] diag FlowPathFrom returned NULL");
 			g_fLastPathDiag = GetEngineTime();
 		}
-		DrawPathList(i, origin, path, endFlow, endAttrs, endArea);
+		DrawPathList(client, origin, path, endFlow, endAttrs, endArea);
 		delete path;
 	}
 
-	if (!anyOn)
-		return Plugin_Stop;
-
 	// 递归 one-shot — 干活干完再排下一次：TIMER_REPEAT 空服不触发
 	//（SourceMod bug，v4.5 教训），且只在还有人开着时重建
-	g_hToggleTimer = CreateTimer(REDRAW_INTERVAL, Timer_ToggleRedraw, _, TIMER_FLAG_NO_MAPCHANGE);
+	// v5.0.2: 为这个客户端排下一次
+	g_hToggleTimer[client] = CreateTimer(REDRAW_INTERVAL, Timer_ToggleRedraw, userid, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Continue;
 }
 

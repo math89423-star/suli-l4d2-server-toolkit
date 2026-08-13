@@ -1,5 +1,5 @@
 // ============================================================================
-// bt_hunter.inc — Hunter Behavior Tree (v3.3)
+// bt_hunter.inc — Hunter Behavior Tree (v5.9)
 // ============================================================================
 // Replaces the old AI_Hunter.sp flat logic with a BT-driven decision tree.
 // Key behaviors preserved from v2.4:
@@ -406,10 +406,12 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_QueueLunge),
         BT_CreateAction(ACT_SignalAttack)
     );
-    // v4.0.3: 攻击序列统一包 Cooldown(1.0)（对齐 fastPounceSeq 的
-    // cooldownAttack 既有模式）—— 原版这些分支每 tick 按 IN_ATTACK，
-    // 引擎扑击冷却期间全部变成无效按键/近战挥击。
-    BT_AddChild(narrowPounceSeq, BT_CreateCooldown(1.0, narrowAttackSeq));
+    // v5.9 FIX: 移除 Cooldown 包裹 —— v4.0.3 的 Cooldown(1.0) 制造了和 v5.7
+    // crouchPrepSeq 一样的站桩 bug：冷却期内 narrowPounceSeq 前置条件仍满足
+    // （蹲姿+窄巷+LOS+距离），但 Cooldown FAIL → 整个 Sequence FAIL，selector
+    // 反复选中此分支又反复 FAIL = 站着不动。引擎自带扑击冷却（z_lunge_interval
+    // 默认 0.5s），插件侧不需要再锁。直接把攻击动作合并进 Sequence。
+    BT_AddChild(narrowPounceSeq, narrowAttackSeq);
 
     // ==========================================
     // v3.5: Open terrain — 3-way random pounce strategies
@@ -435,7 +437,8 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(HunterAct_WideGaussOffset),
         BT_CreateAction(ACT_QueueLunge)
     );
-    BT_AddChild(openStrat0_WidePounce, BT_CreateCooldown(1.0, widePounceAttack));
+    // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
+    BT_AddChild(openStrat0_WidePounce, widePounceAttack);
 
     // Strategy 1: Erratic pounce — standard Gauss offset + unpredictable approach
     int openStrat1_ErraticPounce = BT_CreateSequence(8,
@@ -453,7 +456,8 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_GaussianAimOffset),
         BT_CreateAction(ACT_QueueLunge)
     );
-    BT_AddChild(openStrat1_ErraticPounce, BT_CreateCooldown(1.0, erraticPounceAttack));
+    // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
+    BT_AddChild(openStrat1_ErraticPounce, erraticPounceAttack);
 
     // Strategy 2: Standard pounce — falls through to fastPounceSeq below
 
@@ -513,7 +517,8 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_QueueLunge)
     );
-    BT_AddChild(closePounceSeq, BT_CreateCooldown(1.0, closeAttackSeq));
+    // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
+    BT_AddChild(closePounceSeq, closeAttackSeq);
 
     // --- v3.3: Sprint approach — RUN full speed when far from target ---
     // Replaces the old approachFull which forced crouch BEFORE running.
@@ -549,17 +554,18 @@ stock int BT_CreateHunterTree() {
     // 蹲下不动。修复：① HasLOS → Acquire + HasTargetLOS（trace 视线）；
     // ② Crouch 包 Cooldown(2.5) —— 蹲 1 tick 后冷却期 FAIL → 落
     // crouchApproach/sprint 走位分支，零移动封顶 1 tick / 2.5s。
-    int crouchPrepSeq = BT_CreateSequence(5,
+    // v5.8 FIX: 冷却机制导致新站桩 —— 冷却期内 crouchPrepSeq FAIL，但距离
+    // 仍在范围内，条件又满足分支 8，循环 FAIL。修复：移除冷却，改为持续
+    // 按住 DUCK（ACT_Crouch 每 tick 返回 SUCCESS），让引擎完成蹲伏动作。
+    // fastPounceSeq 优先级更高（分支 7 在 8 之前），一旦 IsDucking 成立立即扑击。
+    int crouchPrepSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_OnGround),
         BT_CreateInverter(BT_CreateCondition(CND_IsDucking)),
         BT_CreateIsInRange(fPounceRange),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasTargetLOS)
-    );
-    int crouchPrepAction = BT_CreateCooldown(2.5, BT_CreateSequence(1,
+        BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateAction(ACT_Crouch)
-    ));
-    BT_AddChild(crouchPrepSeq, crouchPrepAction);
+    );
 
     // --- v3.3: Fixed crouch approach (in range + ducking + no LOS) ---
     // Uses HunterAct_CrouchApproach which moves FORWARD while strafing.
@@ -594,7 +600,8 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_QueueLunge)
     );
-    BT_AddChild(coordPounceSeq, BT_CreateCooldown(1.0, coordPounceAttack));
+    // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
+    BT_AddChild(coordPounceSeq, coordPounceAttack);
 
     // ==========================================
     // v5.0 枪线扰乱者（任何模式生效）：优先扑"正在输出的人"——
@@ -615,7 +622,8 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_QueueLunge),
         BT_CreateAction(ACT_SignalAttack)
     );
-    BT_AddChild(disruptionSeq, BT_CreateCooldown(1.0, disruptionAttack));
+    // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
+    BT_AddChild(disruptionSeq, disruptionAttack);
 
     int wander = BT_CreateAction(ACT_Wander);
 
