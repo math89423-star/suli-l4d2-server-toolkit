@@ -161,7 +161,7 @@ stock int BT_CreateBoomerTree() {
         BT_CreateCondition(CND_IsAttackWindow),
         BT_CreateAction(ACT_AcquirePinTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(300.0),
+        BT_CreateIsTargetInRange_Scaled(300.0),  // v5.8: pressure-scaled vomit range
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -187,7 +187,7 @@ stock int BT_CreateBoomerTree() {
         BT_CreateCondition(CND_AnySurvivorPinned),
         BT_CreateAcquirePinnedTarget(600.0),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(300.0),
+        BT_CreateIsTargetInRange_Scaled(300.0),  // v5.8: pressure-scaled vomit range
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -199,7 +199,7 @@ stock int BT_CreateBoomerTree() {
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(300.0),
+        BT_CreateIsTargetInRange_Scaled(300.0),  // v5.8: pressure-scaled vomit range
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -225,7 +225,7 @@ stock int BT_CreateBoomerTree() {
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(300.0),
+        BT_CreateIsTargetInRange_Scaled(300.0),  // v5.8: pressure-scaled vomit range
         BT_CreateAction(BoomerAct_Vomit)
     );
     // Strat 1: Erratic vomit — zigzag approach → vomit from varied angle
@@ -240,7 +240,7 @@ stock int BT_CreateBoomerTree() {
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(300.0),
+        BT_CreateIsTargetInRange_Scaled(300.0),  // v5.8: pressure-scaled vomit range
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -259,7 +259,7 @@ stock int BT_CreateBoomerTree() {
         BT_CreateCondition(CND_IsSemiOpen),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(300.0),
+        BT_CreateIsTargetInRange_Scaled(300.0),  // v5.8: pressure-scaled vomit range
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -286,7 +286,7 @@ stock int BT_CreateBoomerTree() {
     int vomitSeq = BT_CreateSequence(4,
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(300.0),
+        BT_CreateIsTargetInRange_Scaled(300.0),  // v5.8: pressure-scaled vomit range
         BT_CreateAction(BoomerAct_Vomit)
     );
 
