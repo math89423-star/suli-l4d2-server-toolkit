@@ -33,6 +33,15 @@
 #define SMOKER_ISOLATION_THRESHOLD 350.0
 
 BT_Status SmokerAct_AcquireTarget(int client) {
+    // v5.6: 选人时效 —— 4s 内刚选过就不重选（原版每次调用重掷 40% 最近/
+    // 60% 最远 → 每 2s 目标跳变，Smoker 在"追最近/追最远"之间折返，
+    // ai_debug 386→4800u 反复 = "接近-后退"循环主因）
+    float now = GetGameTime();
+    float lastPick = BB_GetFloat(client, "_smoker_target_time", 0.0);
+    int cur = BB_GetInt(client, "target", -1);
+    if (cur > 0 && lastPick > 0.0 && now - lastPick < 4.0) {
+        if (IsSurvivor(cur) && IsPlayerAlive(cur)) return BT_SUCCESS;
+    }
     // --- 找孤立度最高的幸存者 ---
     int bestIsolated = -1;
     float bestIsolation = SMOKER_ISOLATION_THRESHOLD;  // 必须明显落单才算
@@ -58,6 +67,7 @@ BT_Status SmokerAct_AcquireTarget(int client) {
 
     if (bestIsolated > 0) {
         BB_SetInt(client, "target", bestIsolated);
+        BB_SetFloat(client, "_smoker_target_time", now);
         return BT_SUCCESS;
     }
 
@@ -76,6 +86,7 @@ BT_Status SmokerAct_AcquireTarget(int client) {
 
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
         BB_SetInt(client, "target", target);
+        BB_SetFloat(client, "_smoker_target_time", now);
         float sPos[3], tPos[3], dir[3], ang[3];
         GetClientAbsOrigin(client, sPos);
         GetClientAbsOrigin(target, tPos);
@@ -148,6 +159,7 @@ BT_Status SmokerAct_ApproachOutside(int client) {
     GetVectorAngles(dir, ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     BT_AddButton(client, IN_FORWARD);
+    BT_StuckDetour(client);   // v5.2: 顶墙绕行（隔墙站桩主因）
     return BT_RUNNING;
 }
 
@@ -173,7 +185,29 @@ BT_Status SmokerAct_SteerPinToAcid(int client) {
             return BT_RUNNING;
         }
     }
-    return BT_SUCCESS;  // 无酸液/酸在脚下：引擎托管拉
+
+    // v5.3: 无酸时后退拖拽 —— 原版引擎拉中后钉住不动（观感"放完技能原地
+    // 傻站"）。真人 Smoker 拉中会后退拉扯：背对目标走 = 舌头把目标拖向自己
+    // （目标被拖离队伍/拖进特感堆）。后退受限：目标距 Smoker ≥850u 停止
+    // （防拉断舌头），退到 850u 后引擎托管拉，断舌/松开后回正常分支。
+    int victim = GetEntPropEnt(client, Prop_Send, "m_tongueVictim");
+    if (victim > 0 && IsSurvivor(victim) && IsPlayerAlive(victim)) {
+        float vPos[3];
+        GetClientAbsOrigin(victim, vPos);
+        float dist = GetVectorDistance(myPos, vPos);
+        if (dist < 850.0) {
+            float dir[3], ang[3];
+            MakeVectorFromPoints(vPos, myPos, dir);   // 目标→我 = 背对目标方向
+            dir[2] = 0.0;
+            if (GetVectorLength(dir) > 10.0) {
+                GetVectorAngles(dir, ang);
+                BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+                BT_AddButton(client, IN_FORWARD);
+                return BT_RUNNING;
+            }
+        }
+    }
+    return BT_SUCCESS;  // 无酸液/距离危险：引擎托管拉
 }
 
 // ============================================================================
@@ -283,11 +317,15 @@ stock int BT_CreateSmokerTree() {
         BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
         BT_CreateAction(ACT_FlankApproach)
     );
-    int openS0_Pull = BT_CreateSequence(6,
+    // v5.6: 移除序列内 AcquireTarget（选人只归 branch 8，2s 一次 + 4s 时效；
+    // 原版每 tick 重评时重选 → 目标每 tick 跳变）+ HasLOS → HasTargetLOS
+    // （引擎 m_hasVisibleThreats 在 Smoker 路径实测几乎恒 0 → 拉人分支全灭）
+    // + IsInRange → IsTargetInRange（距离量黑板 target 而非最近者）
+    int openS0_Pull = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
-        BT_CreateAction(SmokerAct_AcquireTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(850.0),     // v3.7: tongue max range ~850u
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(850.0),     // v3.7: tongue max range ~850u
+        BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
     // Strat 1: Erratic pull — zigzag approach → pull from varied angle
@@ -298,11 +336,12 @@ stock int BT_CreateSmokerTree() {
         BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
         BT_CreateAction(ACT_ErraticApproach)
     );
-    int openS1_Pull = BT_CreateSequence(6,
+    // v5.6: 同 openS0_Pull
+    int openS1_Pull = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
-        BT_CreateAction(SmokerAct_AcquireTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(850.0),     // v3.7: tongue max range
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(850.0),     // v3.7: tongue max range
+        BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
     // Strat 2: Standard pull — falls through to pullSeq below
@@ -312,31 +351,37 @@ stock int BT_CreateSmokerTree() {
     int ledgeTargetAcquire = BT_CreateAction(SmokerAct_AcquireLedgeTarget);
     // v3.2 FIX: ledgePullSeq now uses SmokerAct_AcquireLedgeTarget (90% farthest)
     // before snapping aim, instead of relying on the engine's default target.
-    int ledgePullSeq = BT_CreateSequence(5,
+    // v5.6: 补 IsTargetInRange(850)（原版缺距离门：ledge 地形命中时 2000u 外
+    // 也按 ATTACK）+ HasTargetLOS + SnapAimToBlackboardTarget
+    int ledgePullSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsLedgeBetweenTarget),
         BT_CreateAction(SmokerAct_AcquireLedgeTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateAction(ACT_SnapAimToTarget),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(850.0),
+        BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
 
     // Narrow: 50/50 target mix → pull through chokepoint
-    int narrowPullSeq = BT_CreateSequence(5,
+    // v5.6: 同 ledgePullSeq
+    int narrowPullSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(SmokerAct_AcquireNarrowTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateAction(ACT_SnapAimToTarget),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(850.0),
+        BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
 
     // Standard: pull (mixed targeting), check LOS, aim, attack
     // v4.0.3: 加 IsInRange(850) —— 原版无距离限制，2000u 外有 LOS 也每 tick 按
     // ATTACK（舌头够不着，纯浪费按键；与 openS0/S1 pull 的距离口径对齐）。
+    // v5.6: HasLOS → HasTargetLOS（Smoker 拉人全灭根因）+ target 口径 + 黑板瞄准
     int acquireTarget = BT_CreateAction(SmokerAct_AcquireTarget);
     int pullSeq = BT_CreateSequence(4,
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(850.0),
-        BT_CreateAction(ACT_SnapAimToTarget),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(850.0),
+        BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
 
@@ -356,16 +401,24 @@ stock int BT_CreateSmokerTree() {
     );
 
     // Approach: 外侧走位 —— 绕到目标远离队伍的一侧再拉（把人拉离队伍）
-    int approachAct = BT_CreateAction(SmokerAct_ApproachOutside);
+    // v5.6: 加距离门控（IsNotInRange(850)）—— 原版注释声称 "only when far"
+    // 但无任何距离条件：850u 内（舌头射程内）拉人分支全 FAIL 时也落此分支
+    // 盲走（386-800u 反复"拱人+侧滑"现场）。射程内走位 = closeRangeStrafe
+    // 的职责，approachAct 只负责射程外绕位。
+    int approachAct = BT_CreateSequence(2,
+        BT_CreateIsNotInRange(850.0),
+        BT_CreateAction(SmokerAct_ApproachOutside)
+    );
 
     // ==========================================
     // v4.0: 生化危机 (mode 3) —— 拉被喷者
     // ==========================================
+    // v5.6: 同 pullSeq 口径（trace LOS + target 距离）
     int mode3Pull = BT_CreateSequence(5,
         BT_CreateIsMode(3),
         BT_CreateAction(SmokerAct_AcquireBoomedTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(850.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(850.0),
         BT_CreateAction(ACT_Attack)
     );
     int mode3Approach = BT_CreateSequence(4,
@@ -387,11 +440,17 @@ stock int BT_CreateSmokerTree() {
     // Close range + HasLOS → pull with cooldown (tongue, not scratch).
     // Last resort → Wander (melee is valid when nothing else works).
     // ==========================================
+    // v5.2: 横移 + 前进（原 ACT_StrafeRandom 只横移不前进 —— ≤350u 无 LOS 时
+    // 原地左右晃，观感"站桩"；StrafeApproach 绕圈接近）
+    // v5.6 FIX: 350 → 850 —— 原版 350-850u 无 LOS 区间无任何分支（拉人分支
+    // 要 LOS、approachAct 要 LOS 外？实测兜底 approachAct 直接拱到 ≤150u 贴脸
+    // 顶身循环）→ 无 LOS 时整段舌头射程内只能盲走。850u 全射程内无 LOS 都
+    // 横移找角度，拉人分支才有机会触发。
     int closeRangeStrafe = BT_CreateSequence(4,
-        BT_CreateIsInRange(350.0),
-        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
+        BT_CreateIsInRange(850.0),
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateAction(ACT_StrafeRandom)
+        BT_CreateAction(ACT_StrafeApproach)
     );
 
     // ==========================================

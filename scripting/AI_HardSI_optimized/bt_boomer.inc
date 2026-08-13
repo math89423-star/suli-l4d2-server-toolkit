@@ -64,7 +64,7 @@ BT_Status BoomerAct_FlankApproach(int client) {
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
 
-    bool watched = IsTargetWatchingAttacker(client, 60);
+    bool watched = IsTargetWatchingAttacker(client);
     if (watched) {
         // Strafe to flank — harder to hit
         float now = GetGameTime();
@@ -91,7 +91,17 @@ BT_Status BoomerAct_FlankApproach(int client) {
 }
 
 // Vomit on target + decide post-vomit behavior (80% approach / 20% retreat)
+// v5.6: 按住 IN_ATTACK 直到真实吐出（player_now_it 事件置 _boomer_vomit_hit）
+// 或 2s 超时。原版单帧按键 + 无条件锁 10s：引擎 boomer_vomit_delay=0.1s
+// 风阻窗口吞掉单帧按键 → 按了个寂寞还锁 10s（"300u 内不吐"主因之一）。
+// 超时未命中 = 引擎拒绝（射程/LOS/冷却），返回 FAILURE 不设锁，交走位分支。
 BT_Status BoomerAct_Vomit(int client) {
+    float now = GetGameTime();
+    float pressStart = BB_GetFloat(client, "_vomit_press_start", 0.0);
+    if (pressStart <= 0.0) {
+        BB_SetFloat(client, "_vomit_press_start", now);
+        BB_SetBool(client, "_boomer_vomit_hit", false);
+    }
     // Aim at target
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
@@ -103,17 +113,19 @@ BT_Status BoomerAct_Vomit(int client) {
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
 
-    BT_AddButton(client, IN_ATTACK);  // vomit
-    // v3.2 FIX: removed SI_SignalBoomerHit() from here — the OnPlayerBoomed
-    // event hook already fires when vomit actually hits a survivor, so calling
-    // it here caused double coordination triggers (on-press + on-hit).
+    BT_AddButton(client, IN_ATTACK);  // vomit (held)
 
-    // Decide post-vomit behavior once
-    bool approach = (GetRandomFloat(0.0, 1.0) < 0.8);
-    BB_SetBool(client, "_boomer_approach", approach);
-    BB_SetFloat(client, "_boomer_vomit_time", GetGameTime());  // v3.2 FIX: timestamp, not permanent flag
-
-    return BT_SUCCESS;
+    if (BB_GetBool(client, "_boomer_vomit_hit", false)) {
+        // 真实吐出 —— 锁由 OnPlayerBoomed 事件设置（事件时刻 + 10s）
+        BB_SetFloat(client, "_vomit_press_start", 0.0);
+        return BT_SUCCESS;
+    }
+    if (now - pressStart > 2.0) {
+        // 引擎拒绝（风阻/冷却/超射程）—— 撤销按压，不设锁
+        BB_SetFloat(client, "_vomit_press_start", 0.0);
+        return BT_FAILURE;
+    }
+    return BT_RUNNING;
 }
 
 // ============================================================================
@@ -143,12 +155,13 @@ stock int BT_CreateBoomerTree() {
     // v4.0: 暗影锁链 (mode 1) —— 吐被拉的人（解救时全家被喷）
     // Smoker 拉中 → 窗口 → Boomer 吐被拉者：救他的人挤成一团全被喷
     // ==========================================
+    // v5.6: HasLOS → HasTargetLOS（引擎标志失真时吐不出）+ 距离改 target 口径
     int mode1Vomit = BT_CreateSequence(5,
         BT_CreateIsMode(1),
         BT_CreateCondition(CND_IsAttackWindow),
         BT_CreateAction(ACT_AcquirePinTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(300.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -160,28 +173,33 @@ stock int BT_CreateBoomerTree() {
     // 这里用实时谁控谁映射（SI_GetNearestPinnedSurvivor），任何模式生效。
     // 目标限定 600u（射程 300，被控者 300-600u 之间接近期不浪费呕吐）。
     // ==========================================
+    // v5.6: 距离条件改 target 口径 —— 原版 IsInRange(300) 量"最近幸存者"：
+    // 被控者 250u（该吐！）但最近者 320u 时 finishApproach 误判"还远"继续
+    // 逼近；反向（最近者贴脸、被控者 400u）时按无效吐键。被控者 300-600u
+    // 之间是接近期，300u 内才吐。
     int finishApproach = BT_CreateSequence(4,
         BT_CreateCondition(CND_AnySurvivorPinned),
         BT_CreateAcquirePinnedTarget(600.0),
-        BT_CreateIsNotInRange(300.0),
+        BT_CreateIsNotTargetInRange(300.0),
         BT_CreateAction(BoomerAct_FlankApproach)
     );
     int finishVomit = BT_CreateSequence(5,
         BT_CreateCondition(CND_AnySurvivorPinned),
         BT_CreateAcquirePinnedTarget(600.0),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(300.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
     // --- v3.2: Terrain-aware vomit strategies ---
     // Narrow corridor: hold chokepoint → vomit to cover entire passage
-    int narrowHoldVomit = BT_CreateSequence(6,
+    // v5.6: 删除 ACT_HoldChokepoint 死代码（返回 SUCCESS 且不按任何键——
+    // "守窄口"从未生效，同 tick 直接继续执行 Vomit）+ HasLOS → HasTargetLOS
+    int narrowHoldVomit = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(300.0),
-        BT_CreateAction(ACT_HoldChokepoint),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -202,11 +220,12 @@ stock int BT_CreateBoomerTree() {
         BT_CreateIsNotInRange(300.0),
         BT_CreateAction(ACT_FlankApproach)
     );
+    // v5.6: HasLOS → HasTargetLOS
     int openS0_Vomit = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(300.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
     // Strat 1: Erratic vomit — zigzag approach → vomit from varied angle
@@ -216,11 +235,12 @@ stock int BT_CreateBoomerTree() {
         BT_CreateIsNotInRange(300.0),
         BT_CreateAction(ACT_ErraticApproach)
     );
+    // v5.6: HasLOS → HasTargetLOS
     int openS1_Vomit = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(300.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -234,11 +254,12 @@ stock int BT_CreateBoomerTree() {
         BT_CreateAction(ACT_HugWall)
     );
     // Semi-open: vomit from cover when in range
+    // v5.6: HasLOS → HasTargetLOS
     int semiHugVomit = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsSemiOpen),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(300.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -261,10 +282,11 @@ stock int BT_CreateBoomerTree() {
     );
 
     // --- Vomit attack: in range + LOS → vomit ---
+    // v5.6: HasLOS → HasTargetLOS
     int vomitSeq = BT_CreateSequence(4,
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(300.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(300.0),
         BT_CreateAction(BoomerAct_Vomit)
     );
 
@@ -306,5 +328,12 @@ public OnPlayerBoomed(Handle:event, const String:name[], bool:dontBroadcast) {
     int attacker = GetClientOfUserId(GetEventInt(event, "attacker"));
     if (attacker > 0 && IsBotInfected(attacker) && GetInfectedClass(attacker) == L4D2Infected_Boomer) {
         SI_SignalBoomerHit();
+        // v5.6: 真实吐出确认 —— 原版在按 IN_ATTACK 的瞬间就设 10s 锁：
+        // 引擎拒绝时（超射程/LOS 假/冷却）白白锁 10s。锁起点移到事件：
+        // 只在真的吐到人后才锁 + 掷 80/20 后置行为。
+        BB_SetBool(attacker, "_boomer_vomit_hit", true);
+        BB_SetFloat(attacker, "_boomer_vomit_time", GetGameTime());
+        bool approach = (GetRandomFloat(0.0, 1.0) < 0.8);
+        BB_SetBool(attacker, "_boomer_approach", approach);
     }
 }

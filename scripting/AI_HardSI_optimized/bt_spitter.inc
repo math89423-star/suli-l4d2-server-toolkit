@@ -17,6 +17,10 @@
 #endif
 #define _bt_spitter_included
 
+// v5.7: 真实发射标记 —— ability_spit 事件置位（AI_HardSI.sp Event_AbilityUse），
+// 吐锁（_spitter_spit_time）在真实发射时刻而非按压时刻设置
+bool g_bSpitterSpitFired[MAXPLAYERS + 1];
+
 
 // ---------------------------------------------------------------------------
 // Post-spit state conditions
@@ -34,6 +38,22 @@ BT_Status SpitterCnd_HasSpit(int client) {
         return BT_FAILURE;
     }
     return BT_SUCCESS;
+}
+
+// v5.6: 喷吐冷却门 —— 原版吐分支全部无冷却判断：冷却期落回 defaultSpit
+// 每 tick 按无效吐键并刷新 _spitter_spit_time → SpitterCnd_HasSpit 的 8s
+// 解锁永远到不了 → "站桩吐"死循环（ai_debug: branch 11 持续 26s 位移 <220u）。
+// 本条件插到所有吐分支，冷却中 → FAIL → 落移动分支（走位/接近/守位）。
+BT_Status SpitterCnd_SpitReady(int client) {
+    float t = BB_GetFloat(client, "_spitter_spit_time", 0.0);
+    if (t > 0.0 && GetGameTime() - t < 8.0) return BT_FAILURE;
+    return BT_SUCCESS;
+}
+
+stock int BT_CreateSpitReady() {
+    int id = BT_Create(BTN_CONDITION);
+    g_hBTFunc[id] = SpitterCnd_SpitReady;
+    return id;
 }
 
 // v5.0: 吐后行为 —— 区域毒压身份：吐完据守封锁位（8s 喷吐冷却内保持压制
@@ -118,34 +138,58 @@ BT_Status SpitterAct_FindBoomedTarget(int client) {
 
 BT_Status SpitterAct_PredictiveSpit(int client) {
     int target = BB_GetInt(client, "target", -1);
-    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
-        float tPos[3], tVel[3];
-        GetClientAbsOrigin(target, tPos);
-        GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
-        float speed = GetVectorLength(tVel);
-        float aimPos[3];
-        if (speed > 50.0) {
-            // 预测位置 = 当前 + 速度 × 0.8s（只预测水平，保持地面高度）
-            aimPos[0] = tPos[0] + tVel[0] * 0.8;
-            aimPos[1] = tPos[1] + tVel[1] * 0.8;
-            aimPos[2] = tPos[2];
-        } else {
-            aimPos = tPos;
-        }
-        float sPos[3], dir[3], ang[3];
-        GetClientAbsOrigin(client, sPos);
-        MakeVectorFromPoints(sPos, aimPos, dir);
-        GetVectorAngles(dir, ang);
-        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    // v5.6: IN_ATTACK 与时间戳移入 target 有效分支（原版 target 死亡瞬间
+    // 仍按一次无效吐并刷新 8s 冷却，白白锁死一个冷却窗口）
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        return BT_SUCCESS;
     }
-    BT_AddButton(client, IN_ATTACK);
 
-    // 决定 post-spit 行为（同普通吐）—— v5.0 三分：40% 据守 / 35% 撤退 / 25% 靠近
-    int r = GetRandomInt(0, 9);
-    BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
-    BB_SetFloat(client, "_spitter_spit_time", GetGameTime());
+    float now = GetGameTime();
+    if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
+        BB_SetBool(client, "_spitter_waiting_spit", true);
+        BB_SetFloat(client, "_spitter_press_start", now);
+        // 决定 post-spit 行为（同普通吐）—— v5.0 三分：40% 据守 / 35% 撤退 / 25% 靠近
+        int r = GetRandomInt(0, 9);
+        BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
+    }
 
-    return BT_SUCCESS;
+    float tPos[3], tVel[3];
+    GetClientAbsOrigin(target, tPos);
+    GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
+    float speed = GetVectorLength(tVel);
+    float aimPos[3];
+    if (speed > 50.0) {
+        // 预测位置 = 当前 + 速度 × 0.8s（只预测水平，保持地面高度）
+        aimPos[0] = tPos[0] + tVel[0] * 0.8;
+        aimPos[1] = tPos[1] + tVel[1] * 0.8;
+        aimPos[2] = tPos[2];
+    } else {
+        aimPos = tPos;
+    }
+    float sPos[3], dir[3], ang[3];
+    GetClientAbsOrigin(client, sPos);
+    MakeVectorFromPoints(sPos, aimPos, dir);
+    GetVectorAngles(dir, ang);
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_AddButton(client, IN_ATTACK);   // v5.7: 按住至真实发射
+
+    // v5.7: 锁在真实发射时刻（ability_spit 事件置 g_bSpitterSpitFired）——
+    // 原版按压时刻即锁 8s：单帧按键被引擎风阻吞掉时"吐了个寂寞还锁 8s"
+    // （Boomer v5.6 同款修复，Spitter 未跟进）
+    if (g_bSpitterSpitFired[client]) {
+        g_bSpitterSpitFired[client] = false;
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        BB_SetFloat(client, "_spitter_spit_time", now);
+        return BT_SUCCESS;
+    }
+    // 1.5s 超时 = 引擎拒绝（冷却/几何）→ 锁 8s 交 postSpit 走位，防无效按吐循环
+    if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        BB_SetFloat(client, "_spitter_spit_time", now);
+        return BT_SUCCESS;
+    }
+    return BT_RUNNING;
 }
 
 // ============================================================================
@@ -156,6 +200,14 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
 BT_Status SpitterAct_SpitTankCover(int client) {
     int tank = FindTankClient(-1);
     if (tank <= 0 || !IsPlayerAlive(tank)) return BT_FAILURE;
+
+    float now = GetGameTime();
+    if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
+        BB_SetBool(client, "_spitter_waiting_spit", true);
+        BB_SetFloat(client, "_spitter_press_start", now);
+        // 掩护吐完稍微后退（保持距离）
+        BB_SetInt(client, "_spitter_post_mode", 1);
+    }
 
     float tPos[3], tAng[3], fwd[3], aimPos[3];
     GetClientAbsOrigin(tank, tPos);
@@ -171,12 +223,21 @@ BT_Status SpitterAct_SpitTankCover(int client) {
     MakeVectorFromPoints(sPos, aimPos, dir);
     GetVectorAngles(dir, ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
-    BT_AddButton(client, IN_ATTACK);
+    BT_AddButton(client, IN_ATTACK);   // v5.7: 按住至真实发射
 
-    // 掩护吐完稍微后退（保持距离）
-    BB_SetInt(client, "_spitter_post_mode", 1);
-    BB_SetFloat(client, "_spitter_spit_time", GetGameTime());
-    return BT_SUCCESS;
+    // v5.7: 锁在真实发射时刻（同 PredictiveSpit/Spit 的 v5.7 修复）
+    if (g_bSpitterSpitFired[client]) {
+        g_bSpitterSpitFired[client] = false;
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        BB_SetFloat(client, "_spitter_spit_time", now);
+        return BT_SUCCESS;
+    }
+    if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        BB_SetFloat(client, "_spitter_spit_time", now);
+        return BT_SUCCESS;
+    }
+    return BT_RUNNING;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,23 +246,43 @@ BT_Status SpitterAct_SpitTankCover(int client) {
 
 BT_Status SpitterAct_Spit(int client) {
     int target = BB_GetInt(client, "target", -1);
-    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
-        float sPos[3], tPos[3], dir[3], ang[3];
-        GetClientAbsOrigin(client, sPos);
-        GetClientAbsOrigin(target, tPos);
-        MakeVectorFromPoints(sPos, tPos, dir);
-        GetVectorAngles(dir, ang);
-        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    // v5.6: 同 PredictiveSpit —— 吐键与时间戳移入 target 有效分支
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        return BT_SUCCESS;
     }
-    BT_AddButton(client, IN_ATTACK);
 
-    // v5.0: 吐后行为三分 —— 40% 据守封锁位 / 35% 撤退保持距离 / 25% 贴脸压迫
-    // （原 80% 贴脸送死：Spitter 血 100，贴脸 = 白送，区域毒压应保持压制距离）
-    int r = GetRandomInt(0, 9);
-    BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
-    BB_SetFloat(client, "_spitter_spit_time", GetGameTime());  // v3.2 FIX: timestamp, not permanent flag
+    float now = GetGameTime();
+    if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
+        BB_SetBool(client, "_spitter_waiting_spit", true);
+        BB_SetFloat(client, "_spitter_press_start", now);
+        // v5.0: 吐后行为三分 —— 40% 据守封锁位 / 35% 撤退保持距离 / 25% 贴脸压迫
+        // （原 80% 贴脸送死：Spitter 血 100，贴脸 = 白送，区域毒压应保持压制距离）
+        int r = GetRandomInt(0, 9);
+        BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
+    }
 
-    return BT_SUCCESS;
+    float sPos[3], tPos[3], dir[3], ang[3];
+    GetClientAbsOrigin(client, sPos);
+    GetClientAbsOrigin(target, tPos);
+    MakeVectorFromPoints(sPos, tPos, dir);
+    GetVectorAngles(dir, ang);
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_AddButton(client, IN_ATTACK);   // v5.7: 按住至真实发射
+
+    // v5.7: 锁在真实发射时刻（同 PredictiveSpit 修复）
+    if (g_bSpitterSpitFired[client]) {
+        g_bSpitterSpitFired[client] = false;
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        BB_SetFloat(client, "_spitter_spit_time", now);
+        return BT_SUCCESS;
+    }
+    if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        BB_SetFloat(client, "_spitter_spit_time", now);
+        return BT_SUCCESS;
+    }
+    return BT_RUNNING;
 }
 
 // ============================================================================
@@ -210,11 +291,13 @@ BT_Status SpitterAct_Spit(int client) {
 
 stock int BT_CreateSpitterTree() {
     // --- v3.2 terrain: narrow ---
-    int narrowBlockSpit = BT_CreateSequence(5,
+    // v5.6: +SpitReady 冷却门 + LOS/距离口径统一
+    int narrowBlockSpit = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateSpitReady(),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(900.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(900.0),
         BT_CreateAction(SpitterAct_Spit)
     );
 
@@ -232,11 +315,13 @@ stock int BT_CreateSpitterTree() {
         BT_CreateIsNotInRange(800.0),
         BT_CreateAction(ACT_FlankApproach)
     );
-    int openS0_Spit = BT_CreateSequence(6,
+    // v5.6: +SpitReady 冷却门 + LOS/距离口径统一
+    int openS0_Spit = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
+        BT_CreateSpitReady(),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(800.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(800.0),
         BT_CreateAction(SpitterAct_Spit)
     );
     // Strat 1: Direct spit — standard behavior (falls through to defaultSpit)
@@ -253,17 +338,41 @@ stock int BT_CreateSpitterTree() {
         BT_CreateAction(ACT_Retreat)
     );
 
-    // v5.0: 据守封锁位 —— 吐完原地面向队伍保持压制距离，等 8s 冷却重新吐
-    int postSpitHold = BT_CreateSequence(3,
+    // v5.0: 据守封锁位 —— 吐完原位保持压制距离，等 8s 冷却重新吐
+    // v5.1: ACT_HoldPosition → ACT_StrafeRandom —— 原版完全静止（观感 = 傻站
+    // 挨打）；StrafeRandom 面向目标横向小步移动，守位语义（不靠近、不后撤）
+    // 保留、静止观感消除。
+    // v5.6 FIX: 据守改 300-600u 距离带 —— v5.4.2 的 StrafeApproach（横移+前进）
+    // 从 600u 进入后一路直线走进生还者脸上（无下界、无后退，观感"吐完送脸"）。
+    // 300-600u：StrafeRandom 横移守位；<300u：Retreat 后撤拉开。
+    int postSpitHold = BT_CreateSequence(5,
         BT_CreatePostSpitMode(2),
+        BT_CreateIsInRange(600.0),
+        BT_CreateInverter(BT_CreateIsInRange(300.0)),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateAction(ACT_HoldPosition)
+        BT_CreateAction(ACT_StrafeRandom)
+    );
+    int postSpitHoldClose = BT_CreateSequence(3,
+        BT_CreatePostSpitMode(2),
+        BT_CreateIsInRange(300.0),
+        BT_CreateAction(ACT_Retreat)
+    );
+    // v5.6: mode2 >600u 补链 —— 原版该段全 FAIL → 落 defaultSpit 每 tick
+    // 按无效吐 + 刷新 8s 时间戳 → SpitterCnd_HasSpit 解锁永不到达 =
+    // "站桩吐"死循环（branch 11 26s 位移 <220u 现场）。远处据守 = 逼近移动。
+    int postSpitHoldFar = BT_CreateSequence(4,
+        BT_CreatePostSpitMode(2),
+        BT_CreateInverter(BT_CreateIsInRange(600.0)),
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
     int postSpitSelector = BT_Create(BTN_SELECTOR);
     BT_AddChild(postSpitSelector, postSpitApproach);
     BT_AddChild(postSpitSelector, postSpitRetreat);
     BT_AddChild(postSpitSelector, postSpitHold);
+    BT_AddChild(postSpitSelector, postSpitHoldClose);
+    BT_AddChild(postSpitSelector, postSpitHoldFar);
 
     int postSpitSeq = BT_CreateSequence(2,
         BT_CreateCondition(SpitterCnd_HasSpit),
@@ -275,42 +384,52 @@ stock int BT_CreateSpitterTree() {
     // Smoker 拉中 → 窗口 → Spitter 吐被拉者脚下：救他的人必须踩酸。
     // 锁链第三环：拉 → 骑/吐 → 拖走。
     // ==========================================
-    int mode1Spit = BT_CreateSequence(5,
+    int mode1Spit = BT_CreateSequence(7,
         BT_CreateIsMode(1),
         BT_CreateCondition(CND_IsAttackWindow),
+        BT_CreateSpitReady(),
         BT_CreateAction(ACT_AcquirePinTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(900.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(900.0),
         BT_CreateAction(SpitterAct_Spit)
     );
 
     // ==========================================
     // v4.0: 巨兽协同 (mode 6) —— 吐 Tank 追击路线（掩护 Tank）
+    // v5.6: 加 SpitReady + 距离门 —— 原版无条件每 tick 按吐（任意距离对
+    // Tank 前方 250u 点），占 root 子节点 2 饿死全部低优先级分支，冷却期
+    // 每 tick 无效按键并刷新时间戳（同 defaultSpit 死循环机制）。
     // ==========================================
-    int mode6Spit = BT_CreateSequence(2,
+    int mode6Spit = BT_CreateSequence(4,
         BT_CreateIsMode(6),
+        BT_CreateSpitReady(),
+        BT_CreateIsInRange(800.0),
         BT_CreateAction(SpitterAct_SpitTankCover)
     );
 
     // --- Spit on pinned survivors (combo damage) ---
     // v3.4 FIX: added CND_HasLOS + IsInRange — without these, Spitter would
     // spit toward pinned survivors through walls from across the map.
-    int spitOnPinned = BT_CreateSequence(5,
+    // v5.6: +SpitReady 冷却门（同 defaultSpit 死循环防护）
+    int spitOnPinned = BT_CreateSequence(6,
         BT_CreateCondition(CND_AnySurvivorPinned),
+        BT_CreateSpitReady(),
         BT_CreateAction(SpitterAct_FindPinnedTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(900.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(900.0),
         BT_CreateAction(SpitterAct_Spit)
     );
 
     // --- Spit on boomed survivors ---
     // v3.4 FIX: added CND_HasLOS + IsInRange (same rationale as spitOnPinned).
     // v4.0: 预判吐 —— 被喷的人会跑，吐其逃跑路线。
-    int spitOnBoomed = BT_CreateSequence(5,
+    // v5.6: +SpitReady 冷却门
+    int spitOnBoomed = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsBoomerActive),
+        BT_CreateSpitReady(),
         BT_CreateAction(SpitterAct_FindBoomedTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(900.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(900.0),
         BT_CreateAction(SpitterAct_PredictiveSpit)
     );
 
@@ -321,11 +440,12 @@ stock int BT_CreateSpitterTree() {
     // 落点自动成为全插件酸液锚点（SI_GetNearestAcid 扫描 spit_acid），
     // Jockey/Smoker/Charger 的拖人进酸/冲酸里人以此为基础。
     // ==========================================
-    int spitCluster = BT_CreateSequence(5,
+    int spitCluster = BT_CreateSequence(6,
         BT_CreateSurvivorsClustered(3, 500.0),
+        BT_CreateSpitReady(),
         BT_CreateAction(ACT_AcquireClusterTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(900.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(900.0),
         BT_CreateAction(SpitterAct_PredictiveSpit)
     );
 
@@ -333,10 +453,35 @@ stock int BT_CreateSpitterTree() {
     // v3.2 FIX: added CND_HasLOS — without it, Spitter would spit toward the
     // closest survivor even when a wall was in the way, wasting the ability.
     // v4.0: 预判吐 —— 吐行进路线逼走位。
-    int defaultSpit = BT_CreateSequence(3,
+    // v5.4 FIX: 补 inRange(900)（对齐 z_spit_range 实测 900）——原版无距离条件：
+    // Spitter 落此 fallback 后在任意距离（ai_debug 实测 1048→1425u 持续增长）
+    // 原地无限按无效吐键 = "远处傻站吐酸"。900u 外不再吐，交接近分支/游荡。
+    // v5.6 FIX: +SpitReady 冷却门 + HasTargetLOS/IsTargetInRange 口径 —— 冷却中
+    // defaultSpit FAIL → 落移动分支（不再按吐刷新时间戳）。
+    int defaultSpit = BT_CreateSequence(5,
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
+        BT_CreateSpitReady(),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(900.0),
         BT_CreateAction(SpitterAct_PredictiveSpit)
+    );
+
+    // v5.4: 900u 外横移接近（defaultSpit 前）——距离外不站吐，逼近至射程内。
+    // 无距离门控会恒 RUNNING 抢占 defaultSpit，用 NOT inRange(900) 限定。
+    // v5.6: HasLOS → HasTargetLOS（引擎标志失真时 900u 外也接近不了）
+    int farApproachSpit = BT_CreateSequence(4,
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateInverter(BT_CreateIsTargetInRange(900.0)),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateAction(ACT_StrafeMoveToTarget)
+    );
+
+    // v5.6: 无视野逼近 —— 引擎标志失真/隔墙时全攻击链 FAIL → wander 乱走
+    // （41% 现场）。无 LOS 也该朝目标逼近找角度（v3.6 同款逻辑，Spitter 缺）。
+    int noLOSApproach = BT_CreateSequence(3,
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
+        BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
     // Root selector — v3.5: open terrain uses strategy tokens.
@@ -351,7 +496,9 @@ stock int BT_CreateSpitterTree() {
     BT_AddChild(root, openStrategyRoll);       // 5a. v3.5: open → roll token
     BT_AddChild(root, openS0_Spit);            // 5b. v3.5: open strat0 → flank spit
     BT_AddChild(root, openS0_Approach);        // 5c. v3.5: open strat0 → flank approach
-    // 5d: open strat1 → falls through to defaultSpit
+    BT_AddChild(root, farApproachSpit);        // 5d. v5.4: 900u 外接近（防站吐）
+    BT_AddChild(root, noLOSApproach);          // 5e. v5.6: 无视野逼近（防乱走）
+    // 5f: open strat1 → falls through to defaultSpit
     BT_AddChild(root, defaultSpit);            // 6. ← FALLBACK: default spit
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
 

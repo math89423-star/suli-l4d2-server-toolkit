@@ -98,6 +98,45 @@
 //         Smoker 控制链 —— 拉中 SI_SignalAttack 开窗 + 拖向酸液
 //         Tank 开团者 —— 密集区目标分支 + 投石/bhop 开团信号
 //       部署名 AI_HardSI_bt.smx（源码 AI_HardSI.sp，编译后改名）。
+// v5.1: 站桩修复 + 诊断（2026-08-04，用户报告"特感有时候原地傻站"）——
+//       [Charger] 根 child9 BlockCharge 兜底 = 站桩 + 推后引擎 m_timestamp
+//         （引擎冲锋永久不就绪 → 站 12s → 挠一下 → 再站 12s）。改为冷却期
+//         走位逼近（AcquireClosestTarget + StrafeMoveToTarget，不按 ATTACK）；
+//         m_timestamp 推后仅保留出生保护分支（2s 有界）。
+//       [Tank] 根 SEQUENCE(目标选择,攻击选择)：melee/rock/bhop 全冷却或门控
+//         不满足 → 攻击选择器全 FAIL → 整树 FAIL 无任何输出。attackSelector
+//         补 ACT_MoveToTarget 兜底（不重新选人，沿用黑板 target）。
+//       [Spitter] 吐后 40% 据守分支 HoldPosition → StrafeRandom（守位语义
+//         保留、横向移动消除静止观感）。
+//       [Tank instakill] player_hurt Pre hook 内 SDKHooks_TakeDamage 递归触发
+//         player_hurt → 栈溢出（当天 5 次）。0.2s 同受害者时间戳防护。
+//       [诊断] ai_debug cvar（默认 0）：每 2s 打印各特感根 selector 当前命中
+//         分支序号 + 地形分类 + 目标距离到 SM 日志，定位傻站分支。
+// v5.2: 站桩/原地跳第二波修复（2026-08-04，用户报告"Smoker/Jockey 站桩 +
+//       Hunter 原地跳跃"）——
+//       [通用] ACT_StrafeApproach（横移+前进，替换 closeRangeStrafe 的
+//         ACT_StrafeRandom —— 原只横移不前进 = 原地左右晃，观感站桩）；
+//         BT_StuckDetour 顶墙绕行（全插件无寻路 = 隔墙/高差顶墙站桩主因：
+//         每 0.75s 位移 <20u 判停滞 → W+横移斜插沿墙滑动 1.5-2.5s，
+//         接入 MoveToTarget/StrafeMoveToTarget/ErraticApproach/Wander/
+//         Retreat/FlankApproach/HugWall/CircleFlank/SprintApproach/
+//         CrouchApproach/ApproachOutside/StrafeApproach）
+//       [Jockey] AlternatingHop 跳模式瞄准黑板 target + IN_FORWARD
+//         （原 yaw 不变 + 无前进 = 350-700u 有 LOS 时 hopSeq 原地跳）
+//       [Hunter] HasHighGround 高台上限 200→85（>85u 必跳失败 = 高台/房檐下
+//         35% 概率每 tick 原地反复跳）；ClimbHighGround 加 2s 跳跃冷却
+//         （跳后走位拉近，2s 后才再评估爬高）
+// v5.3: 放完技能傻站 + Hunter 扑空循环（2026-08-05，v5.2 实战反馈）——
+//       [Smoker] 拉中后无酸时后退拖拽（原 SteerPinToAcid 无酸返回 SUCCESS =
+//         引擎钉住不动 = "放完技能原地傻站"；现背对目标后退拉扯，目标被拖离
+//         队伍；距目标 ≥850u 停止后退防断舌）
+//       [Hunter] 扑击距离对齐引擎：创建 ai_fast_pounce_proximity cvar=500
+//         （对齐模块自设 hunter_pounce_ready_range=500；原 fallback 1000 =
+//         600-1000u 按 ATTACK 引擎扑不出 → 扑空 → missEsc 逃跳 → 再扑 =
+//         "跳一下扑一下"循环）
+//       [通用] BT_StuckDetour 绕行增强：朝向偏转 ±90° 沿墙走（原只加横移
+//         键 = 横移方向也贴墙时死锁，如 Spitter 守位横移贴墙）；StrafeRandom
+//         接入绕行
 //
 // Include order is critical:
 //   1. Core SM/left4dhooks SDK
@@ -140,7 +179,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "5.0.0",
+    version = "5.7.0",
     url = "github.com/breezyplease"
 };
 
@@ -169,6 +208,9 @@ int   g_iBTTankRoot     = -1;
 // Cached ConVar handles (avoid FindConVar per-tick)
 ConVar g_hCvarTankAggroBhop = null;
 
+// v5.1: 诊断输出（ai_debug）
+ConVar g_hCvarDebug = null;
+
 // ============================================================================
 // OnPluginStart
 // ============================================================================
@@ -193,6 +235,14 @@ public OnPluginStart() {
     g_hCvarCoordWindow = CreateConVar("ai_coordination_window", "5.5",
         "Duration (seconds) of the coordination attack window",
         FCVAR_NONE, true, 0.5, true, 10.0);
+
+    // --- v5.1: 诊断输出 ---
+    // 每 2s 打印各特感根 selector 当前命中分支到 SM 日志。分支序号对应
+    // 各 bt_*.inc 树构建器的注释优先级（如 bt_charger.inc: 0=出生保护 2=冲锋簇
+    // 9=冷却走位 10=Wander）。傻站报告可直接对照日志定位卡在哪个分支。
+    g_hCvarDebug = CreateConVar("ai_debug", "0",
+        "Print per-SI root branch index + terrain + target distance to SM log every 2s: 0=OFF, 1=ON",
+        FCVAR_NONE, true, 0.0, true, 1.0);
 
     // --- Per-SI module initialization (cvars + game tuning) ---
     Smoker_OnModuleStart();
@@ -220,6 +270,9 @@ public OnPluginStart() {
 
     // --- Coordination timer ---
     CreateTimer(1.0, Timer_UpdateCoordination, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+
+    // --- v5.1: 诊断定时器（ai_debug=1 时才输出） ---
+    CreateTimer(2.0, Timer_DebugReport, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
 // ============================================================================
@@ -274,6 +327,11 @@ public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast)
         case L4D2Infected_Hunter: {
             g_bHunterJustLunged[client] = false;
             g_fHunterMissEscapeCooldown[client] = 0.0;
+        }
+        case L4D2Infected_Spitter: {
+            // v5.7: 清除发射标记残留（跨命黑板共享，防旧标记被新命消费）
+            g_bSpitterSpitFired[client] = false;
+            BB_SetBool(client, "_spitter_waiting_spit", false);
         }
         case L4D2Infected_Tank: {
             g_fTankLastBhop[client] = 0.0;
@@ -375,6 +433,9 @@ public Action:Event_AbilityUse(Handle:event, String:name[], bool:dontBroadcast) 
     } else if (StrEqual(abilityName, "ability_spit")) {
         // Spitter post-spit behavior handled by BT (approach/retreat).
         // No suicide — Spitter re-engages after spit cooldown.
+        // v5.7: 真实发射标记 —— SpitterAct_* 按住 IN_ATTACK 直到本事件才
+        // 锁 8s（原按压时刻锁 = 引擎风阻吞按键时白锁一个冷却窗口）
+        g_bSpitterSpitFired[client] = true;
         return Plugin_Handled;
     }
     return Plugin_Handled;
@@ -402,5 +463,75 @@ public Action:Event_PlayerJump(Handle:event, String:name[], bool:dontBroadcast) 
 
 public Action:Timer_UpdateCoordination(Handle:timer) {
     SI_UpdateCoordination();
+    return Plugin_Continue;
+}
+
+// ============================================================================
+// v5.1: 诊断报告 —— 每 2s 打印各特感根 selector 当前命中的分支
+// ============================================================================
+// 输出到 SM 日志（addons/sourcemod/logs/L20xxxxxx.log）：
+//   [AI_HardSI] Tank(8) rootBranch 6 terrain OPEN dist 412
+// rootBranch = 根 selector 的子序号（对应各 bt_*.inc 树构建器注释优先级），
+// terrain = 地形分类（UNKNOWN/NARROW/OPEN/LEDGE/SEMI），dist = 距黑板目标
+// 水平距离（-1 = 无有效目标）。
+// 用法：sm_cvar ai_debug 1 → 复现傻站 → 看日志里那个分支号 → 对照对应
+// bt_*.inc 的注释找到分支 → 定位卡住的原因。用完记得关（ai_debug 0）。
+
+stock void Debug_SIClassName(int client, char[] cls, int maxlen) {
+    switch (L4D2_Infected:GetInfectedClass(client)) {
+        case L4D2Infected_Hunter:  strcopy(cls, maxlen, "Hunter");
+        case L4D2Infected_Charger: strcopy(cls, maxlen, "Charger");
+        case L4D2Infected_Jockey:  strcopy(cls, maxlen, "Jockey");
+        case L4D2Infected_Smoker:  strcopy(cls, maxlen, "Smoker");
+        case L4D2Infected_Boomer:  strcopy(cls, maxlen, "Boomer");
+        case L4D2Infected_Spitter: strcopy(cls, maxlen, "Spitter");
+        case L4D2Infected_Tank:    strcopy(cls, maxlen, "Tank");
+        default:                   strcopy(cls, maxlen, "?");
+    }
+}
+
+stock void Debug_TerrainName(int terrain, char[] out, int maxlen) {
+    switch (terrain) {
+        case TERRAIN_UNKNOWN: strcopy(out, maxlen, "UNKNOWN");
+        case TERRAIN_NARROW:  strcopy(out, maxlen, "NARROW");
+        case TERRAIN_OPEN:    strcopy(out, maxlen, "OPEN");
+        case TERRAIN_LEDGE:   strcopy(out, maxlen, "LEDGE");
+        case TERRAIN_SEMI:    strcopy(out, maxlen, "SEMI");
+        default:              strcopy(out, maxlen, "?");
+    }
+}
+
+public Action:Timer_DebugReport(Handle:timer) {
+    if (g_hCvarDebug == null || !GetConVarBool(g_hCvarDebug)) {
+        return Plugin_Continue;
+    }
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsBotInfected(i) || !IsPlayerAlive(i)) continue;
+        if (!BT_IsBound(i)) continue;
+
+        int root = g_iBTRoot[i];
+        // v5.6: 改读 LastWinningChild —— 原版读 RunningChild：SUCCESS 分支
+        // （呕吐/拉人/吐酸等 1-tick 攻击）命中时被清 -1，采样永远看不到
+        // 攻击分支，统计失真（"从不攻击"实为观测盲区）
+        int branch = g_iBTLastWinningChild[i][root];
+        if (branch < 0) branch = -1;
+
+        char cls[16], terr[16];
+        Debug_SIClassName(i, cls, sizeof(cls));
+        Debug_TerrainName(BB_GetInt(i, "_terrain", TERRAIN_UNKNOWN), terr, sizeof(terr));
+
+        // 距黑板目标距离（-1 = 无有效目标）
+        int dist = -1;
+        int target = BB_GetInt(i, "target", -1);
+        if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+            float myPos[3], tPos[3];
+            GetClientAbsOrigin(i, myPos);
+            GetClientAbsOrigin(target, tPos);
+            dist = RoundToNearest(GetVectorDistance(myPos, tPos));
+        }
+
+        LogMessage("[AI_HardSI] %s(%d) rootBranch %d terrain %s dist %d",
+            cls, i, branch, terr, dist);
+    }
     return Plugin_Continue;
 }

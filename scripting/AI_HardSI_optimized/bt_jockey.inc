@@ -117,11 +117,25 @@ BT_Status JockeyAct_AlternatingHop(int client) {
 
     if (doJump && !doubleLeap) {
         // High arc normal jump
+        // v5.2: 跳模式向前跳进 —— 原版只按 IN_JUMP + pitch 上仰，yaw 保持
+        // 当前朝向且不按前进 = 原地跳（350-700u 有 LOS 时 hopSeq 命中，
+        // 观感"原地跳跃"）。现在瞄准黑板 target（如有）+ IN_FORWARD：
+        // 朝目标方向跳进，远距离持续拉近。
         float eyeAng[3];
-        GetClientEyeAngles(client, eyeAng);
+        int target = BB_GetInt(client, "target", -1);
+        if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+            float sPos[3], tPos[3], dir[3];
+            GetClientAbsOrigin(client, sPos);
+            GetClientAbsOrigin(target, tPos);
+            MakeVectorFromPoints(sPos, tPos, dir);
+            GetVectorAngles(dir, eyeAng);
+        } else {
+            GetClientEyeAngles(client, eyeAng);
+        }
         eyeAng[0] = -1.0 * GetRandomFloat(15.0, 30.0);  // pitch up
         BT_SetAimAngles(client, eyeAng[0], eyeAng[1], eyeAng[2]);
         BT_AddButton(client, IN_JUMP);
+        BT_AddButton(client, IN_FORWARD);
         BB_SetBool(client, "jockey_next_is_jump", false);
     } else {
         // Leap attack
@@ -131,6 +145,21 @@ BT_Status JockeyAct_AlternatingHop(int client) {
     }
     return BT_SUCCESS;
 }
+
+// v5.6: 贴脸无 LOS 横移限时条件 —— 6s 内找不到角度 → FAIL 交走位分支
+// （见 closeRangeStrafe 注释；38s 原地蠕动 5u/s 现场）
+BT_Status JockeyCond_CloseStrafeTimeout(int client) {
+    float now = GetGameTime();
+    float start = BB_GetFloat(client, "_close_strafe_start", 0.0);
+    if (start <= 0.0) {
+        BB_SetFloat(client, "_close_strafe_start", now);
+    } else if (now - start >= 6.0) {
+        BB_SetFloat(client, "_close_strafe_start", 0.0);   // 重置，允许下次再进
+        return BT_FAILURE;
+    }
+    return BT_SUCCESS;
+}
+
 stock int BT_CreateJockeyTree() {
     // Riding — v4.0: 骑乘 steering（把人往队伍外带），不再原地 hold
     int rideSeq = BT_CreateSequence(2,
@@ -143,18 +172,20 @@ stock int BT_CreateJockeyTree() {
     // 窗口 = Smoker 拉中的 pin 广播；被拉的人无法移动，Jockey 骑 = 必中。
     // 骑上后再被 steering 往队伍外带 —— 锁链完整：拉→骑→拖走。
     // ==========================================
+    // v5.7: 距离改 target 口径 —— 原 IsInRange/IsNotInRange 量"最近幸存者"
+    // 而非 AcquirePinTarget 锁定的被拉者，链式配合判断对错了人
     int mode1ChainApproach = BT_CreateSequence(5,
         BT_CreateIsMode(1),
         BT_CreateCondition(CND_IsAttackWindow),
         BT_CreateAction(ACT_AcquirePinTarget),
-        BT_CreateIsNotInRange(500.0),
+        BT_CreateIsNotTargetInRange(500.0),
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
     int mode1ChainLeap = BT_CreateSequence(5,
         BT_CreateIsMode(1),
         BT_CreateCondition(CND_IsAttackWindow),
         BT_CreateAction(ACT_AcquirePinTarget),
-        BT_CreateIsInRange(500.0),
+        BT_CreateIsTargetInRange(500.0),
         BT_CreateCooldown(1.0, BT_CreateAction(JockeyAct_AlternatingHop))
     );
 
@@ -167,35 +198,43 @@ stock int BT_CreateJockeyTree() {
     // Now the approach runs when far; when close, it fails (Inverter trips)
     // and the selector moves to the attack branch.
 
+    // v5.6: 全部地形分支补 ACT_AcquireClosestTarget —— 原版地形分支无目标
+    // 获取：出生第一 tick 地形分支胜出时 FlankApproach/CircleFlank 空
+    // RUNNING（target 无效无按键输出）→ 整条命插件侧零输出（出生冻结）；
+    // + HasLOS → HasTargetLOS（引擎标志失真）+ 距离改 target 口径。
     // Ledge: approach (far) → flank
-    int ledgeApproach = BT_CreateSequence(5,
+    int ledgeApproach = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNearLedge),
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateInverter(BT_CreateIsInRange(400.0)),   // still far
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateInverter(BT_CreateIsTargetInRange(400.0)),   // still far
+        BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateAction(ACT_FlankApproach)
     );
-    int ledgeLeap = BT_CreateSequence(5,
+    int ledgeLeap = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNearLedge),
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(400.0),                       // close enough
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(400.0),                       // close enough
+        BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))  // v3.7: 2.0→1.2
     );
 
     // Narrow: approach (far) → hug wall
-    int narrowApproach = BT_CreateSequence(5,
+    int narrowApproach = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateInverter(BT_CreateIsInRange(350.0)),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateInverter(BT_CreateIsTargetInRange(350.0)),
+        BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateAction(ACT_HugWall)
     );
-    int narrowLeap = BT_CreateSequence(5,
+    int narrowLeap = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(350.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(350.0),
+        BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))  // v3.7: 2.0→1.2
     );
 
@@ -208,37 +247,45 @@ stock int BT_CreateJockeyTree() {
     );
     // Strat 0: Flank leap — circle around → leap from side
     // v4.0: 大弧线绕后（CircleFlank）—— 从视线外绕到队伍侧后方跳骑
-    int openS0_Approach = BT_CreateSequence(6,
+    // v5.6: +Acquire + HasTargetLOS + target 口径（同 ledge/narrow）
+    int openS0_Approach = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
-        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsNotInRange(400.0),
+        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsNotTargetInRange(400.0),
+        BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateAction(ACT_CircleFlank)
     );
-    int openS0_Leap = BT_CreateSequence(6,
+    int openS0_Leap = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
-        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(400.0),
+        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(400.0),
+        BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))
     );
     // Strat 1: Erratic leap — zigzag approach → leap from varied angle
-    int openS1_Approach = BT_CreateSequence(6,
+    // v5.6: +Acquire + HasTargetLOS + target 口径（同 ledge/narrow）
+    int openS1_Approach = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
-        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsNotInRange(350.0),
+        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsNotTargetInRange(350.0),
+        BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateAction(ACT_ErraticApproach)
     );
-    int openS1_Leap = BT_CreateSequence(6,
+    int openS1_Leap = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
-        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(350.0),
+        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(350.0),
+        BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCooldown(1.2, BT_CreateAction(JockeyAct_AlternatingHop))
     );
 
     // --- Standard hop attack ---
+    // v5.6: 700 → 450 —— 引擎有效 leap 距离实测 250-400u：400-700u 段按
+    // ATTACK 大概率被引擎拒绝 → 挠击（"跳一下挠一下"）。450u 对齐实测上限。
     int hopPreCond = BT_CreateSequence(3,
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(700.0)
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(450.0)
     );
 
     int hopAcquireTarget = BT_CreateAction(JockeyAct_AlternatingHop);
@@ -260,11 +307,17 @@ stock int BT_CreateJockeyTree() {
     // Don't blindly approach when too close — the engine default melee
     // (shared IN_ATTACK button) kicks in when leap can't fire.
     // ==========================================
-    int closeRangeStrafe = BT_CreateSequence(4,
+    // v5.2: 横移 + 前进（原 ACT_StrafeRandom 只横移不前进 —— ≤300u 无 LOS 时
+    // 原地左右晃，观感"站桩"；StrafeApproach 绕圈接近）
+    // v5.6: 加 6s 超时 —— 原版无超时：楼上/隔层横向 <300u 但永远无 LOS 时
+    // 该分支恒 RUNNING（38s 蠕动 5u/s 现场）。超时 FAIL → 落 strafeApproach
+    // 走位找路（引擎导航帧配合）。
+    int closeRangeStrafe = BT_CreateSequence(5,
         BT_CreateIsInRange(300.0),
-        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateAction(ACT_StrafeRandom)
+        BT_CreateCondition(JockeyCond_CloseStrafeTimeout),
+        BT_CreateAction(ACT_StrafeApproach)
     );
 
     // Root selector — v3.6: close-range strafe prevents blind melee at no LOS.

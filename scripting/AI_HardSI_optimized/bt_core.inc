@@ -74,6 +74,10 @@ StringMap g_hBTBlackboard[BT_MAX_CLIENTS];      // per-client key-value store
 
 // Running child index for composite nodes (per-client per-node)
 int     g_iBTRunningChild[BT_MAX_CLIENTS][BT_MAX_NODES];
+// v5.6: 最后命中子序号（SUCCESS/RUNNING 都记录）—— 原版 SUCCESS 分支把
+// runningChild 清 -1 → ai_debug 采样看不到 1-tick 的 SUCCESS 分支
+// （呕吐/拉人/吐酸等攻击命中全被读成 -1，"几乎从不攻击"是观测盲区）
+int     g_iBTLastWinningChild[BT_MAX_CLIENTS][BT_MAX_NODES];
 
 // ---------------------------------------------------------------------------
 // Tick context — allows leaf callbacks to access their node's params
@@ -404,10 +408,12 @@ BT_Status BT_TickNode(int nodeId, int client) {
                         BT_ResetNodeState(client, g_hBTChildren[nodeId].Get(prevRunning));
                     }
                     g_iBTRunningChild[client][nodeId] = i;
+                    g_iBTLastWinningChild[client][nodeId] = i;   // v5.6
                     return BT_RUNNING;
                 }
                 if (result == BT_SUCCESS) {
                     g_iBTRunningChild[client][nodeId] = -1;
+                    g_iBTLastWinningChild[client][nodeId] = i;   // v5.6: SUCCESS 也记录
                     return BT_SUCCESS;
                 }
                 // BT_FAILURE → continue to next child
@@ -500,8 +506,13 @@ BT_Status BT_TickNode(int nodeId, int client) {
             BT_Status result = BT_TickNode(childId, client);
 
             if (result != BT_RUNNING) {
-                // Child completed — reset the cooldown timer
-                BB_SetFloat(client, cdKey, now);
+                // v5.6: 只在 SUCCESS 时武装冷却 —— 原版 FAILURE 也 arm：条件
+                // 静态失败的分支（Charger 750u 门外、Smoker 拉人簇全灭）每
+                // 1.8s/12s 才重评一次，产生"冷却已结束仍不尝试"的评估量子；
+                // 且失败不消耗冷却（条件便宜，立即重试无代价）。
+                if (result == BT_SUCCESS) {
+                    BB_SetFloat(client, cdKey, now);
+                }
                 g_iBTRunningChild[client][nodeId] = -1;
             } else {
                 g_iBTRunningChild[client][nodeId] = 0;

@@ -49,6 +49,10 @@ float g_fTankLastBhop[MAXPLAYERS + 1];
 int   g_iTankBhopChain[MAXPLAYERS + 1];
 float g_fTankLastGround[MAXPLAYERS + 1];
 float g_fTankLastPunchJump[MAXPLAYERS + 1];
+// v5.1: instakill 递归防护 —— SDKHooks_TakeDamage 注入的伤害再次触发
+// player_hurt（Pre hook 在事件链内递归），2026-08-04 曾 5 次栈溢出
+// （"Not enough space on the stack"）。0.2s 内同一受害者不重复注入。
+float g_fTankLastInstakillAt[MAXPLAYERS + 1];
 
 // Forward declarations
 
@@ -212,10 +216,23 @@ BT_Status TankCond_IncappedNearby(int client) {
         float sPos[3]; GetClientAbsOrigin(s, sPos);
         if (GetVectorDistance(tPos, sPos) < 800.0) return BT_FAILURE;
     }
+    // v5.6: 处决掷骰 1.5s 节拍（对齐近战冷却）—— 原版每 tick 重掷 40%：
+    // 40% 帧按拳、60% 帧走位 → 补刀不连贯，倒地者差一拳没死（+ 两个目标
+    // 交替瞄准甩头）。
+    float now = GetGameTime();
+    float lastRoll = BB_GetFloat(client, "_tank_execute_roll", 0.0);
+    bool doExecute;
+    if (now - lastRoll >= 1.5) {
+        doExecute = (GetRandomFloat(0.0, 1.0) < 0.40);
+        BB_SetBool(client, "_tank_execute_do", doExecute);
+        BB_SetFloat(client, "_tank_execute_roll", now);
+    } else {
+        doExecute = BB_GetBool(client, "_tank_execute_do", false);
+    }
     for (int s = 1; s <= MaxClients; s++) {
         if (!IsSurvivor(s) || !IsPlayerAlive(s) || !IsIncapacitated(s)) continue;
         float sPos[3]; GetClientAbsOrigin(s, sPos);
-        if (GetVectorDistance(tPos, sPos) < 120.0 && GetRandomFloat(0.0, 1.0) < 0.40) {
+        if (GetVectorDistance(tPos, sPos) < 120.0 && doExecute) {
             BB_SetInt(client, "target", s);
             return BT_SUCCESS;
         }
@@ -320,7 +337,9 @@ BT_Status TankCond_BhopEligible(int client) {
     GetEntPropVector(client, Prop_Data, "m_vecVelocity", vel);
     float speed = SquareRoot(Pow(vel[0], 2.0) + Pow(vel[1], 2.0));
     if (speed < 120.0) return BT_FAILURE;
-    if (!GetEntProp(client, Prop_Send, "m_hasVisibleThreats")) return BT_FAILURE;
+    // v5.7: 引擎标志 → trace 视线 —— 插件每 2 帧覆盖朝向/按键致
+    // m_hasVisibleThreats 失真，Tank 连跳追人全程被禁用（呆站主因之一）
+    if (CND_HasTargetLOS(client) != BT_SUCCESS) return BT_FAILURE;
 
     // v4.0.5 FIX: 恢复 bhop 冷却 —— g_fTankLastBhop 此前只写不读，
     // 每 2 tick（~33ms）无条件连跳，boost 永续叠加 + IN_JUMP 每帧按 =
@@ -563,10 +582,16 @@ stock int BT_CreateTankTree() {
     // v3.2: Terrain-aware attack types
     // ==========================================
     // Narrow corridor: hold chokepoint + melee (survivors can't run past)
+    // v5.4.1 FIX: 守点距离 400→120 —— 原 400u 站桩死区：meleeCluster 的 3 个
+    // 子分支（协同拳/悬崖拳/开阔冲锋）条件全不满足时，narrowHoldSeq 无条件
+    // SUCCESS（400u 内 + LOS）→ Tank 在 120-400u 窄巷区间永久站桩（近战够
+    // 不着、岩石/跳扑/走位兜底全被抢——v4.0.2 移过 Charger 同款分支，Tank
+    // 漏了）。120u = 引擎近战距离，贴脸守点语义保留，区间外交 rock/bhop/
+    // MoveToTarget 兜底。
     int narrowHoldSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_IsNarrowSpace),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(400.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsInRange(120.0),
         BT_CreateAction(ACT_HoldChokepoint)
     );
 
@@ -584,7 +609,7 @@ stock int BT_CreateTankTree() {
         BT_CreateCondition(CND_IsOpenArea),
         BT_CreateStrategyIs(0),
         BT_CreateCondition(TankCond_RockEligible),
-        BT_CreateCondition(CND_HasLOS),
+        BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateAction(TankAct_AimRock),      // v4.1: 预判瞄准
         BT_CreateAction(ACT_Attack2),          // throw rock
         BT_CreateAction(ACT_SignalAttack)      // v5.0: 投石压制 = 开团信号（队友跟进）
@@ -592,20 +617,23 @@ stock int BT_CreateTankTree() {
     // Strategy 1: Direct charge — rush up and punch (instakill threat)
     // v4.0.5: 已移入下方近战簇（meleeCluster）—— 与 ledge punch 共享
     // Cooldown(1.5) 对齐引擎 z_tank_attack_interval=1.5
+    // v5.6: 700 → 150 —— 原版 150-700u 段对空气挥拳：引擎近战射程只有
+    // ~110-150u，幽灵拳每次还启动 1.5s 近战冷却（贴脸第一拳被延迟）。
     int openStrat1_Charge = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea),
         BT_CreateStrategyIs(1),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(700.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsInRange(150.0),
         BT_CreateAction(ACT_Attack)            // melee punch
     );
     // Strategy 2: Bhop chase — falls through to standard bhop below
 
     // Ledge: punch survivors off — charge at them near the edge
+    // v5.6: 300 → 150（同幽灵拳修复）
     int ledgePunchSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_IsNearLedge),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(300.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsInRange(150.0),
         BT_CreateAction(ACT_Attack)            // melee toward ledge
     );
 
@@ -618,8 +646,12 @@ stock int BT_CreateTankTree() {
         BT_CreateCondition(TankCond_IncappedNearby),
         BT_CreateAction(TankAct_ExecuteIncapped)
     );
-    int rockSeq = BT_CreateSequence(4,
+    // v5.6: 兜底路径补 HasTargetLOS —— 原版只有 openStrat0_Rock 有 LOS 门，
+    // 兜底 rockSeq 漏掉：目标在墙后/建筑内 >500u 时每 5s 对墙按 IN_ATTACK2，
+    // 石头砸墙 + 占用引擎 6s 扔石冷却（真需要远程压制时无石可用）。
+    int rockSeq = BT_CreateSequence(5,
         BT_CreateCondition(TankCond_RockEligible),
+        BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateAction(TankAct_AimRock),      // v4.1: 预判瞄准（fallback 路径同样接管）
         BT_CreateAction(ACT_Attack2),
         BT_CreateAction(ACT_SignalAttack)      // v5.0: 投石开团信号
@@ -642,10 +674,21 @@ stock int BT_CreateTankTree() {
         BT_CreateAction(TankAct_CoordPunch)
     );
 
+    // v5.6: 窄巷贴脸拳 —— 原版 meleeSelector 三子分支（协同/悬崖/开阔）在
+    // 窄巷全 FAIL → BT 近战在窄巷永不发（v5.4.1 只修了 120-400u 死区，
+    // ≤120u 窄巷仍无 BT 输出，贴脸站桩全靠引擎帧兜底）
+    int narrowMeleeSeq = BT_CreateSequence(3,
+        BT_CreateCondition(CND_IsNarrowSpace),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsInRange(150.0),
+        BT_CreateAction(ACT_Attack)            // melee punch in corridor
+    );
+
     int meleeSelector = BT_Create(BTN_SELECTOR);
     BT_AddChild(meleeSelector, coordPunchSeq);        // 1a. v4.1 协同窗口 → 拳杀被 pin 者
     BT_AddChild(meleeSelector, ledgePunchSeq);        // 1b. ledge → punch off cliff
     BT_AddChild(meleeSelector, openStrat1_Charge);    // 1c. open → charge punch
+    BT_AddChild(meleeSelector, narrowMeleeSeq);       // 1d. v5.6: 窄巷贴脸拳
     int meleeCluster = BT_CreateCooldown(1.5, meleeSelector);
 
     // ==========================================
@@ -671,6 +714,15 @@ stock int BT_CreateTankTree() {
     // ↓ FALLBACK: standard strategies (battle-tested since v2.2)
     BT_AddChild(attackSelector, punchJumpSeq);        // 5. ← punch-jump combo（自带 2s 冷却 + cvar 门控）
     BT_AddChild(attackSelector, bhopSeq);             // 6. ← bhop chase（v4.0.5 自带冷却）
+    // ==========================================
+    // v5.1: 站桩修复 —— 原树无"走向目标"兜底：melee/rock/bhop 全冷却或
+    // 门控不满足（近身 <500u 禁跳、>1600u 禁跳、撞墙无侧路、速度 <120）时
+    // attackSelector 全 FAIL → 根 SEQUENCE 整树 FAIL → Tank 无任何输出原地
+    // 冻结（引擎跳也被 OnPlayerRunCmd 每帧清掉）。加走位兜底（不按 ATTACK，
+    // 不重新选人 —— 沿用 targetSelector 刚选好的黑板 target），保证攻击
+    // 冷却期持续逼近目标。
+    // ==========================================
+    BT_AddChild(attackSelector, BT_CreateAction(ACT_MoveToTarget)); // 7. v5.1: ← 冷却期走位逼近
 
     // ==========================================
     // Root
@@ -742,6 +794,11 @@ public Action:Tank_OnPlayerHurt(Handle:event, const String:name[], bool:dontBroa
     int punchDamage = (g_hCvarTankPunchDamage_cached != null) ? GetConVarInt(g_hCvarTankPunchDamage_cached) : 150;
     int damagetype = GetEventInt(event, "type");
     if (!(damagetype & DMG_SLASH) && !(damagetype & DMG_CLUB)) return Plugin_Continue;
+    // v5.1: 递归防护 —— TakeDamage 注入后再次触发 player_hurt（同 damage 类型）
+    // 会重新进入本 hook → 无限递归栈溢出。0.2s 窗口内同一受害者跳过。
+    float now = GetGameTime();
+    if (g_fTankLastInstakillAt[victim] > 0.0 && now - g_fTankLastInstakillAt[victim] < 0.2) return Plugin_Continue;
+    g_fTankLastInstakillAt[victim] = now;
     int hp = GetClientHealth(victim);
     // max(hp+50, punchDamage)：hp+50 保证一般血量一拳打进倒地，
     // punchDamage 兜底（残血时 hp+50 可能 <100 不够击倒）

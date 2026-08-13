@@ -196,8 +196,8 @@ stock int BT_CreateChargerTree() {
     int narrowChargeSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(fChargeProx),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -212,14 +212,14 @@ stock int BT_CreateChargerTree() {
     int openS0_Approach = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateIsNotInRange(600.0),
+        BT_CreateIsNotTargetInRange(600.0),
         BT_CreateAction(ACT_CircleFlank)
     );
     int openS0_Charge = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(fChargeProx),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -227,14 +227,14 @@ stock int BT_CreateChargerTree() {
     int openS1_Approach = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateIsNotInRange(500.0),
+        BT_CreateIsNotTargetInRange(500.0),
         BT_CreateAction(ACT_ErraticApproach)
     );
     int openS1_Charge = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(fChargeProx),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -244,8 +244,8 @@ stock int BT_CreateChargerTree() {
     int ledgeChargeSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNearLedge),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(450.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(450.0),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -256,8 +256,8 @@ stock int BT_CreateChargerTree() {
     int lowHpSeq = BT_CreateSequence(6,
         BT_CreateHealthBelow(float(iHpThreshold)),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(fChargeProx),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -269,10 +269,14 @@ stock int BT_CreateChargerTree() {
     // v4.0.1 FIX: 补上 HasLOS + inRange —— 原版无任何距离/LOS 限制，
     //   攻击窗口（5.5s，常被其他 SI 攻击/pin 广播打开）一开，Charger 在
     //   2000u+ 外/隔墙也直接释放 charge，造成"出生对空气冲"与平时白冲。
-    int coordSeq = BT_CreateSequence(5,
+    // v5.7: 补 AcquireCoordTarget —— 原版门控量 BB target（常空/陈旧）
+    // 而瞄准/冲锋用 SI_GetCoordinatedTarget（另一幸存者），LOS 与距离判断
+    // 对错了人
+    int coordSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsAttackWindow),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(fChargeProx),
+        BT_CreateAction(ACT_AcquireCoordTarget),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ACT_SnapAimToCoordTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -285,8 +289,8 @@ stock int BT_CreateChargerTree() {
     int mode0Charge = BT_CreateSequence(6,
         BT_CreateIsMode(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(900.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(900.0),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -297,8 +301,8 @@ stock int BT_CreateChargerTree() {
     // ==========================================
     int acidCharge = BT_CreateSequence(5,
         BT_CreateAction(ChargerAct_AcquireAcidTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(fChargeProx),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -312,8 +316,8 @@ stock int BT_CreateChargerTree() {
     int breakthroughCharge = BT_CreateSequence(6,
         BT_CreateSurvivorsClustered(3, 500.0),
         BT_CreateAction(ACT_AcquireClusterTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(fChargeProx),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -321,8 +325,8 @@ stock int BT_CreateChargerTree() {
     // Default charge: in range + LOS → charge (v3.2 fix: was missing)
     int defaultChargeSeq = BT_CreateSequence(5,
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateCondition(CND_HasLOS),
-        BT_CreateIsInRange(fChargeProx),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
         BT_CreateAction(ChargerAct_Charge)
     );
@@ -332,15 +336,15 @@ stock int BT_CreateChargerTree() {
     // → falls to BlockCharge → Charger stands still extending cooldown forever.
     int noLosApproach = BT_CreateSequence(4,
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
-        BT_CreateIsInRange(fChargeProx),
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
+        BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ACT_StrafeMoveToTarget)   // keep moving, may regain LOS
     );
 
     // Standard approach: strafe toward target when too far to charge
     int approachSeq = BT_CreateSequence(3,
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateInverter(BT_CreateIsInRange(fChargeProx)),
+        BT_CreateInverter(BT_CreateIsTargetInRange(fChargeProx)),
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
@@ -356,7 +360,7 @@ stock int BT_CreateChargerTree() {
     // Close range + HasLOS → step back 0.4s then charge. If charge is on
     // cooldown, IN_ATTACK becomes melee punch (valid fallback 贴脸近战).
     int stepBackCharge = BT_CreateSequence(4,
-        BT_CreateCondition(CND_HasLOS),
+        BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsInRange(200.0),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateAction(ChargerAct_StepBackCharge)
@@ -367,7 +371,7 @@ stock int BT_CreateChargerTree() {
     // every tick. Now blindCharge fails naturally, selector moves to
     // next branch (noLosApproach / approachSeq / Wander).
     int blindCharge = BT_CreateSequence(5,
-        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
         BT_CreateIsInRange(400.0),
         BT_CreateRandomChance(0.30),
         BT_CreateAction(ACT_AcquireClosestTarget),
@@ -406,7 +410,7 @@ stock int BT_CreateChargerTree() {
     int breakthroughApproach = BT_CreateSequence(4,
         BT_CreateSurvivorsClustered(3, 500.0),
         BT_CreateAction(ACT_AcquireClusterTarget),
-        BT_CreateIsNotInRange(fChargeProx),
+        BT_CreateIsNotTargetInRange(fChargeProx),
         BT_CreateAction(ACT_CircleFlank)
     );
 
@@ -425,9 +429,21 @@ stock int BT_CreateChargerTree() {
     BT_AddChild(root, openS0_Approach);          // 5. v3.5: open strat0 → flank approach
     BT_AddChild(root, openS1_Approach);          // 6. v3.5: open strat1 → erratic approach
     // open strat2 → falls through to generic approaches
+    // ==========================================
+    // v5.1: 站桩修复 —— 原 child 9 直接挂 ChargerAct_BlockCharge：
+    //   ① 不按移动键 → 观感 = 站原地挨打（"傻站"）；
+    //   ② 每 2 tick 推后引擎 m_timestamp +0.1s → 引擎冲锋永久不就绪，
+    //      12s 插件冷却结束后尝试冲锋仍是挠击，循环站桩。
+    // 修复：冷却期改为走位逼近（不按 ATTACK，防挠击语义保留），
+    // m_timestamp 推后仅保留在出生保护分支（spawnProtect，2s 有界）。
+    // ==========================================
+    int cooldownReposition = BT_CreateSequence(2,
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_StrafeMoveToTarget)
+    );
     BT_AddChild(root, noLosApproach);            // 7. FALLBACK: in-range no-LOS approach
     BT_AddChild(root, approachSeq);              // 8. FALLBACK: approach from far
-    BT_AddChild(root, BT_CreateAction(ChargerAct_BlockCharge)); // 9. 冷却期间站桩（不按 ATTACK）
+    BT_AddChild(root, cooldownReposition);       // 9. v5.1: 冲锋冷却期走位逼近（不按 ATTACK）
     BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 10. last resort
 
     return root;
