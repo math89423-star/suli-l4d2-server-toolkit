@@ -58,6 +58,12 @@ float g_fHunterMissEscapeCooldown[MAXPLAYERS + 1];
 // crouchApproach 需要用它判断"是否已进入扑击范围"来决定蹲伏 vs 站立快跑。
 float g_fHunterPounceRange = 1000.0;
 
+// v5.12: 欺骗性跳跃冷却（检测被瞄准时触发闪避跳）
+float g_fHunterEvasiveCooldown[MAXPLAYERS + 1];
+
+// v5.16: 墙面二段跳状态跟踪
+bool g_bHunterUsedWallPounce[MAXPLAYERS + 1];  // 本次起跳是否已使用二段跳
+
 // Forward declarations for tree builder
 
 // ---------------------------------------------------------------------------
@@ -73,6 +79,7 @@ BT_Status HunterCond_JustMissed(int client) {
     int victim = GetEntPropEnt(client, Prop_Send, "m_pounceVictim");
     if (victim > 0) {
         g_bHunterJustLunged[client] = false;  // clear flag on success
+        g_bHunterUsedWallPounce[client] = false;  // v5.16: 重置二段跳标记
         return BT_FAILURE;
     }
 
@@ -80,18 +87,215 @@ BT_Status HunterCond_JustMissed(int client) {
     float now = GetGameTime();
     if (g_fHunterMissEscapeCooldown[client] > now) return BT_FAILURE;
 
+    // v5.19 FIX: 加距离门控 —— 逃跑跳的本意是"扑空落在幸存者脸前，会被
+    // 秒杀，先跳开"。原版无距离条件：远距离扑击落地不足（1000u 扑击物理
+    // 上够不到，落在半路）也判定 JustMissed → 朝反方向随机跳开 → 3s 冷却
+    // 后重新接近 → 再扑空 = v5.3 归因于"射程"的"跳一下扑一下"循环真凶。
+    // 只有确实贴近幸存者（≤400u）才逃；落在远处一律不逃，交给
+    // sprint/crouch 接近分支继续压上去重扑。
+    float own[3];
+    GetClientAbsOrigin(client, own);
+    int prox = GetSurvivorProximity(own);
+    if (prox <= 0 || float(prox) > 400.0) {
+        g_bHunterJustLunged[client] = false;        // 清标记，不留残留状态
+        g_bHunterUsedWallPounce[client] = false;
+        return BT_FAILURE;
+    }
+
     return BT_SUCCESS;
 }
 
 // Action: Jump away in random direction after missed pounce
+// v5.17: 逃跑跳同时按扑击键，避免浪费跳跃高度
+// v5.20: 归零 pitch — 扑击是水平技能，引擎自动计算弧线
 BT_Status HunterAct_EscapeJump(int client) {
     float ang[3];
     GetClientEyeAngles(client, ang);
+    ang[0] = 0.0;  // v5.20: zero pitch for pounce
     ang[1] += GetRandomFloat(60.0, 120.0) * (GetRandomInt(0, 1) ? 1.0 : -1.0);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     BT_AddButton(client, IN_JUMP);
+    BT_AddButton(client, IN_ATTACK);  // v5.17: 同时按扑击，逃跑跳转扑击跳
     g_bHunterJustLunged[client] = false;
+    g_bHunterUsedWallPounce[client] = false;  // v5.16: 重置二段跳标记
     g_fHunterMissEscapeCooldown[client] = GetGameTime() + 3.0;
+    return BT_SUCCESS;
+}
+
+// ============================================================================
+// v5.16: 墙面二段跳（Wall Pounce）
+// Hunter 扑空后在空中检测墙面，可以进行二次扑击
+// ============================================================================
+
+// Condition: Hunter 在空中贴墙且可以进行二段跳
+BT_Status HunterCond_CanWallPounce(int client) {
+    // 必须在空中
+    if (GetEntityFlags(client) & FL_ONGROUND) return BT_FAILURE;
+
+    // 必须刚扑击过（扑空状态）
+    if (!g_bHunterJustLunged[client]) return BT_FAILURE;
+
+    // 本次起跳已使用过二段跳
+    if (g_bHunterUsedWallPounce[client]) return BT_FAILURE;
+
+    // 必须有足够的垂直速度（正在下落或上升）
+    float vel[3];
+    GetEntPropVector(client, Prop_Data, "m_vecVelocity", vel);
+    if (FloatAbs(vel[2]) < 50.0) return BT_FAILURE;
+
+    // 检测四个方向是否有墙面（距离 < 80u）
+    float pos[3], ang[3];
+    GetClientAbsOrigin(client, pos);
+    GetClientEyeAngles(client, ang);
+
+    float checkDirs[4][3];
+    // 前
+    GetAngleVectors(ang, checkDirs[0], NULL_VECTOR, NULL_VECTOR);
+    // 左
+    ang[1] -= 90.0;
+    GetAngleVectors(ang, checkDirs[1], NULL_VECTOR, NULL_VECTOR);
+    // 右
+    ang[1] += 180.0;
+    GetAngleVectors(ang, checkDirs[2], NULL_VECTOR, NULL_VECTOR);
+    // 后
+    ang[1] += 90.0;
+    GetAngleVectors(ang, checkDirs[3], NULL_VECTOR, NULL_VECTOR);
+
+    for (int i = 0; i < 4; i++) {
+        float endPos[3];
+        endPos[0] = pos[0] + checkDirs[i][0] * 80.0;
+        endPos[1] = pos[1] + checkDirs[i][1] * 80.0;
+        endPos[2] = pos[2] + checkDirs[i][2] * 80.0;
+
+        TR_TraceRayFilter(pos, endPos, MASK_PLAYERSOLID, RayType_EndPoint, TracerayFilter, client);
+        if (TR_DidHit() && TR_GetFraction() < 0.9) {
+            // 检测到墙面，记录墙面方向
+            BB_SetFloat(client, "_wall_pounce_yaw", ang[1] - 90.0 * float(i));
+            return BT_SUCCESS;
+        }
+    }
+
+    return BT_FAILURE;
+}
+
+// Action: 执行墙面二段跳
+BT_Status HunterAct_WallPounce(int client) {
+    // 获取最近的幸存者作为目标
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        target = ACT_AcquireClosestTarget(client);
+    }
+
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        // 瞄准目标
+        float myPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, myPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(myPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+
+        // v5.20: 归零基础 pitch（扑击水平），再加小偏移模拟墙面反弹不稳定性
+        ang[0] = 0.0 + GetRandomFloat(-10.0, 10.0);
+        ang[1] += GetRandomFloat(-15.0, 15.0);
+
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+
+    // 执行二段跳扑击
+    BT_AddButton(client, IN_ATTACK);
+    g_bHunterUsedWallPounce[client] = true;
+    SI_SignalAttack(client);
+
+    return BT_SUCCESS;
+}
+
+// ============================================================================
+// v5.12: 欺骗性跳跃（Evasive Jump）
+// 当 Hunter 检测到被幸存者瞄准时，执行随机方向的闪避跳跃
+// 来源：Improved Hunter AI (Steam Workshop #3140922442)
+// ============================================================================
+
+// Condition: Hunter is being aimed at by a survivor
+BT_Status HunterCond_UnderThreat(int client) {
+    // 冷却检查（避免频繁跳）
+    float now = GetGameTime();
+    if (g_fHunterEvasiveCooldown[client] > now) return BT_FAILURE;
+
+    // 必须在地面且未蹲伏（蹲伏时是潜行接近，不适合跳跃）
+    if (!(GetEntityFlags(client) & FL_ONGROUND)) return BT_FAILURE;
+    if (GetEntityFlags(client) & FL_DUCKING) return BT_FAILURE;
+
+    float hunterPos[3], hunterAng[3];
+    GetClientAbsOrigin(client, hunterPos);
+    GetClientEyeAngles(client, hunterAng);
+
+    // 遍历所有幸存者，检测是否有人瞄准 Hunter
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsClientInGame(i) || !IsPlayerAlive(i)) continue;
+        if (GetClientTeam(i) != 2) continue;  // 只检查幸存者
+
+        float survivorPos[3], survivorAng[3];
+        GetClientAbsOrigin(i, survivorPos);
+        GetClientEyeAngles(i, survivorAng);
+
+        float distance = GetVectorDistance(hunterPos, survivorPos);
+
+        // 距离必须在 300-800u 之间
+        // 太近（<300u）来不及反应，太远（>800u）没有威胁
+        if (distance < 300.0 || distance > 800.0) continue;
+
+        // 计算幸存者到 Hunter 的方向向量
+        float toHunter[3], dir[3];
+        MakeVectorFromPoints(survivorPos, hunterPos, toHunter);
+        NormalizeVector(toHunter, toHunter);
+
+        // 计算幸存者的视线方向向量
+        GetAngleVectors(survivorAng, dir, NULL_VECTOR, NULL_VECTOR);
+
+        // 计算夹角（点积）
+        float dotProduct = GetVectorDotProduct(dir, toHunter);
+
+        // 夹角 < 15° 判定为瞄准（cos(15°) ≈ 0.966）
+        if (dotProduct > 0.966) {
+            // 额外检查：幸存者必须有视线（不能被墙挡住）
+            TR_TraceRayFilter(survivorPos, hunterPos, MASK_SHOT, RayType_EndPoint, TracerayFilter, i);
+            if (TR_GetFraction() > 0.95) {  // 95% 通畅即判定有视线
+                return BT_SUCCESS;  // 检测到威胁
+            }
+        }
+    }
+
+    return BT_FAILURE;  // 无威胁
+}
+
+// Action: Perform evasive jump to avoid being aimed at
+BT_Status HunterAct_EvasiveJump(int client) {
+    float ang[3];
+    GetClientEyeAngles(client, ang);
+
+    // 随机选择侧向或后向跳跃
+    // 60-120° 左右侧跳，或 150-180° 后跳
+    float jumpAngle;
+    int jumpType = GetRandomInt(0, 2);
+
+    if (jumpType == 0) {
+        // 左侧跳
+        jumpAngle = GetRandomFloat(60.0, 120.0);
+    } else if (jumpType == 1) {
+        // 右侧跳
+        jumpAngle = GetRandomFloat(-120.0, -60.0);
+    } else {
+        // 后跳
+        jumpAngle = GetRandomFloat(150.0, 180.0) * (GetRandomInt(0, 1) ? 1.0 : -1.0);
+    }
+
+    ang[1] += jumpAngle;
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_AddButton(client, IN_JUMP);
+
+    // 设置冷却时间（3-5 秒）
+    g_fHunterEvasiveCooldown[client] = GetGameTime() + GetRandomFloat(3.0, 5.0);
+
     return BT_SUCCESS;
 }
 
@@ -165,6 +369,133 @@ BT_Status HunterAct_ClimbHighGround(int client) {
 }
 
 // ============================================================================
+// v5.15: 骚扰模式接近（Harasser Approach）
+// 保持 600-1000u 距离游走，但允许机会性扑击（玩家落单/背对时）
+// ============================================================================
+
+BT_Status HunterAct_HarasserApproach(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        return BT_FAILURE;
+    }
+
+    float myPos[3], tPos[3];
+    GetClientAbsOrigin(client, myPos);
+    GetClientAbsOrigin(target, tPos);
+    float distance = GetVectorDistance(myPos, tPos);
+
+    // === v5.15: 机会性扑击检测 ===
+    // 检查冷却（降低攻击频率，比正常模式少 40%）
+    float now = GetGameTime();
+    float lastOpportunisticPounce = BB_GetFloat(client, "_harass_last_pounce", 0.0);
+    bool canOpportunisticPounce = (now - lastOpportunisticPounce > 8.0);  // 8秒冷却
+
+    if (canOpportunisticPounce && distance >= 400.0 && distance <= 800.0) {
+        // 检测玩家是否落单（距离队友 >500u）
+        bool isIsolated = true;
+        for (int i = 1; i <= MaxClients; i++) {
+            if (i == target || !IsSurvivor(i) || !IsPlayerAlive(i)) continue;
+            float tPos2[3];
+            GetClientAbsOrigin(i, tPos2);
+            if (GetVectorDistance(tPos, tPos2) < 500.0) {
+                isIsolated = false;
+                break;
+            }
+        }
+
+        // 检测玩家是否背对（视角差 >90°）
+        bool isFacingAway = false;
+        float tAng[3], dir[3], lookDir[3];
+        GetClientEyeAngles(target, tAng);
+        GetAngleVectors(tAng, lookDir, NULL_VECTOR, NULL_VECTOR);
+        MakeVectorFromPoints(tPos, myPos, dir);
+        NormalizeVector(dir, dir);
+        float dot = GetVectorDotProduct(lookDir, dir);
+        if (dot < 0.0) {  // 背对（>90°）
+            isFacingAway = true;
+        }
+
+        // 满足条件：进行机会性扑击
+        if ((isIsolated || isFacingAway) && (GetEntityFlags(client) & FL_ONGROUND)) {
+            // 检查 LOS
+            TR_TraceRayFilter(myPos, tPos, MASK_SHOT, RayType_EndPoint, TracerayFilter, client);
+            if (TR_GetFraction() > 0.95) {
+                // 蹲下准备扑击（如果还没蹲）
+                if (!(GetEntityFlags(client) & FL_DUCKING)) {
+                    BT_AddButton(client, IN_DUCK);
+                    float ang[3];
+                    MakeVectorFromPoints(myPos, tPos, dir);
+                    GetVectorAngles(dir, ang);
+                    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+                    return BT_RUNNING;
+                }
+
+                // 已蹲下：执行扑击
+                BB_SetFloat(client, "_harass_last_pounce", now);
+                float ang[3];
+                MakeVectorFromPoints(myPos, tPos, dir);
+                GetVectorAngles(dir, ang);
+                ang[0] = 0.0;  // v5.20: zero pitch for pounce
+                BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+                BT_AddButton(client, IN_ATTACK);
+                SI_SignalAttack(client);
+                return BT_RUNNING;
+            }
+        }
+    }
+
+    // === 正常骚扰行为：距离控制 ===
+    if (distance > 1000.0) {
+        // 太远：接近到 800u
+        float dir[3], ang[3];
+        MakeVectorFromPoints(myPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        // 添加 ±30° 偏移，不直线接近
+        ang[1] += GetRandomFloat(-30.0, 30.0);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        BT_AddButton(client, IN_FORWARD);
+        BT_RemoveButton(client, IN_DUCK);  // 全速跑
+    } else if (distance < 600.0) {
+        // v5.19 FIX: 原版"太近就转身后退到 700u" —— 观感就是用户反馈的
+        // "傻站着跑走"。后退是 Smoker 的保距逻辑，对 Hunter 是纯负收益：
+        // 已经贴到 600u 内还往外跑，等放行时又得重新跑回来。
+        // 改为原地蹲守：蹲姿本身是扑击前置态，CND_HarasserReleased 一放行，
+        // fastPounce（root 分支 10）下一 tick 直接扑出去，零过渡损耗。
+        float dir[3], ang[3];
+        MakeVectorFromPoints(myPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);   // 面向目标，不反向
+        BT_AddButton(client, IN_DUCK);                     // 蹲守 = 隐蔽 + 待扑
+        BT_RemoveButton(client, IN_FORWARD);
+    } else {
+        // 600-1000u：横移骚扰
+        float dir[3], ang[3];
+        MakeVectorFromPoints(myPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        // 面向目标但横移
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+
+        // 随机横移方向
+        float nextSwitch = BB_GetFloat(client, "_harass_strafe_next", 0.0);
+        if (nextSwitch <= 0.0 || now >= nextSwitch) {
+            BB_SetBool(client, "_harass_strafe_left", GetRandomInt(0, 1) == 0);
+            BB_SetFloat(client, "_harass_strafe_next", now + GetRandomFloat(0.5, 1.0));
+        }
+
+        if (BB_GetBool(client, "_harass_strafe_left", false)) {
+            BT_AddButton(client, IN_MOVELEFT);
+        } else {
+            BT_AddButton(client, IN_MOVERIGHT);
+        }
+
+        BT_RemoveButton(client, IN_DUCK);
+    }
+
+    BT_StuckDetour(client);
+    return BT_RUNNING;
+}
+
+// ============================================================================
 // v3.3 NEW ACTIONS: sprint approach + crouch approach
 // ============================================================================
 
@@ -175,23 +506,25 @@ BT_Status HunterAct_ClimbHighGround(int client) {
 // jitter every frame = snake-dance, forward progress halved, "slow jog" look).
 // v5.5: flank-behind — 30% of cycles aim at a point 200u BEHIND the target,
 // so the sprint arcs around to the survivor's back for a blind-side pounce.
+// v5.11: 增强横移+角度偏移（用户反馈"直来直去"）—— 切换间隔缩短到 0.2-0.5s，
+// 角度偏移加大到 ±40°，绕后概率提升到 50%，绕后距离加大到 300u。
 BT_Status HunterAct_SprintApproach(int client) {
     float now = GetGameTime();
 
-    // Strafe + aim-offset roll — change together every 0.3-0.8s
+    // Strafe + aim-offset roll — change together every 0.2-0.5s（加快横移切换）
     float nextSwitch = BB_GetFloat(client, "_strafe_next");
     if (nextSwitch <= 0.0 || now >= nextSwitch) {
         bool goLeft = (GetRandomInt(0, 1) == 0);
         BB_SetBool(client, "_strafe_left", goLeft);
-        // 缓存 ±25° 偏移 —— 换向时才重掷，蛇形平滑而非每帧抖动
-        BB_SetFloat(client, "_aim_offset", GetRandomFloat(-25.0, 25.0));
-        BB_SetFloat(client, "_strafe_next", now + GetRandomFloat(0.3, 0.8));
+        // 缓存 ±40° 偏移 —— 换向时才重掷，蛇形更明显
+        BB_SetFloat(client, "_aim_offset", GetRandomFloat(-40.0, 40.0));
+        BB_SetFloat(client, "_strafe_next", now + GetRandomFloat(0.2, 0.5));
     }
-    // Flank-behind roll — independent, slower cadence (1.2-2.2s per cycle)
+    // Flank-behind roll — 提升到 50% 概率，更频繁绕后
     float nextFlank = BB_GetFloat(client, "_flank_next");
     if (nextFlank <= 0.0 || now >= nextFlank) {
-        BB_SetBool(client, "_flank_behind", GetRandomFloat(0.0, 1.0) < 0.3);
-        BB_SetFloat(client, "_flank_next", now + GetRandomFloat(1.2, 2.2));
+        BB_SetBool(client, "_flank_behind", GetRandomFloat(0.0, 1.0) < 0.5);
+        BB_SetFloat(client, "_flank_next", now + GetRandomFloat(1.0, 1.8));
     }
     if (BB_GetBool(client, "_strafe_left", false)) {
         BT_AddButton(client, IN_MOVELEFT);
@@ -210,10 +543,10 @@ BT_Status HunterAct_SprintApproach(int client) {
         MakeVectorFromPoints(sPos, tPos, dir);
         GetVectorAngles(dir, ang);
         if (BB_GetBool(client, "_flank_behind", false)) {
-            // 绕后跑位：aim 目标后方 200u 的地面点 → 跑弧线绕到背后
+            // 绕后跑位：aim 目标后方 300u 的地面点 → 跑更大弧线绕到背后
             float behind[3];
-            behind[0] = tPos[0] + dir[0] * 200.0;
-            behind[1] = tPos[1] + dir[1] * 200.0;
+            behind[0] = tPos[0] + dir[0] * 300.0;
+            behind[1] = tPos[1] + dir[1] * 300.0;
             behind[2] = tPos[2];
             MakeVectorFromPoints(sPos, behind, dir);
             GetVectorAngles(dir, ang);
@@ -236,6 +569,7 @@ BT_Status HunterAct_SprintApproach(int client) {
 // Fixes the old crouchApproachSeq bug: it used ACT_StrafeRandom which only
 // pressed IN_MOVELEFT/IN_MOVERIGHT with NO forward movement at all.
 // The Hunter was literally strafing in place without closing distance.
+// v5.11: 增强横移频率（用户反馈"直来直去"）—— 切换间隔缩短到 0.3-0.8s。
 BT_Status HunterAct_CrouchApproach(int client) {
     float dist = 999999.0;
     int target = BB_GetInt(client, "target", -1);
@@ -246,18 +580,20 @@ BT_Status HunterAct_CrouchApproach(int client) {
         dist = GetVectorDistance(sPos, tPos);
         MakeVectorFromPoints(sPos, tPos, dir);
         GetVectorAngles(dir, ang);
+        // v5.11: 蹲伏接近时也加 ±20° 偏移，不再只有横移
+        ang[1] += GetRandomFloat(-20.0, 20.0);
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
 
-    // Lateral strafe — change direction every 0.5-1.2s
+    // Lateral strafe — change direction every 0.3-0.8s（加快横移切换）
     float now = GetGameTime();
-    float nextSwitch = BB_GetFloat(client, "_strafe_next");
+    float nextSwitch = BB_GetFloat(client, "_strafe_next_crouch");
     if (nextSwitch <= 0.0 || now >= nextSwitch) {
         bool goLeft = (GetRandomInt(0, 1) == 0);
-        BB_SetBool(client, "_strafe_left", goLeft);
-        BB_SetFloat(client, "_strafe_next", now + GetRandomFloat(0.5, 1.2));
+        BB_SetBool(client, "_strafe_left_crouch", goLeft);
+        BB_SetFloat(client, "_strafe_next_crouch", now + GetRandomFloat(0.3, 0.8));
     }
-    if (BB_GetBool(client, "_strafe_left", false)) {
+    if (BB_GetBool(client, "_strafe_left_crouch", false)) {
         BT_AddButton(client, IN_MOVELEFT);
         BT_RemoveButton(client, IN_MOVERIGHT);
     } else {
@@ -299,12 +635,13 @@ BT_Status HunterCond_HighPounceChance(int client) {
 // ============================================================================
 // v3.5: Wide Gaussian angle offset — larger spread for open-terrain pounces.
 // Uses sum-of-3-uniforms to approximate Gaussian with ~25° std dev (vs 15° standard).
+// v5.11: 加大到 ~35° 标准差，使开阔地形扑击更难预测。
 // ============================================================================
 
 BT_Status HunterAct_WideGaussOffset(int client) {
     float ang[3];
     GetClientEyeAngles(client, ang);
-    float offset = (GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0)) * 25.0;
+    float offset = (GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0)) * 35.0;
     ang[1] += offset;
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     return BT_SUCCESS;
@@ -354,7 +691,14 @@ stock int BT_CreateHunterTree() {
     // 设置），引擎只在 500u 内发起扑击；插件 1000u 就按 ATTACK = 600-1000u
     // 区间全无效按键（扑不出 → 扑空 → missEsc 逃跳 → 再扑 = "跳一下扑一下"
     // 循环）。cvar 已由 Hunter_OnModuleStart 创建，此处防无 cvar 时掉回旧值。
-    float fPounceRange = 500.0;
+    // v5.19 REVERT: fallback 500→1000。v5.3 把门控从 1000 砍到 500 的依据是
+    // "引擎 hunter_pounce_ready_range=500 只在 500u 内发起扑击"，但该 cvar 是
+    // 本模块自己 SetConVarInt 设的（见 Hunter_OnModuleStart），且它管的是引擎
+    // bot 的蹲伏准备判定，不是 IN_ATTACK 扑击射程 —— ENGINE_CVARS.md 第 54 行
+    // 已确认扑击射程无 cvar（全硬编码），第 111 行记录 1000 是 v4.0.1 实战
+    // 验证值。500 门控让 500-1000u 全部扑击分支不可达（观感"远处根本不会扑"），
+    // 现恢复 1000，并把引擎 ready_range 一起抬到 1000 消除两者不一致。
+    float fPounceRange = 1000.0;
     float fStraightRange = 200.0;
     ConVar hCvar = FindConVar("ai_fast_pounce_proximity");
     if (hCvar != null) fPounceRange = GetConVarFloat(hCvar);
@@ -366,6 +710,30 @@ stock int BT_CreateHunterTree() {
     int missEscSeq = BT_CreateSequence(2,
         BT_CreateCondition(HunterCond_JustMissed),
         BT_CreateAction(HunterAct_EscapeJump)
+    );
+
+    // v5.12: 欺骗性跳跃 —— 检测到被瞄准时触发闪避
+    int evasiveJumpSeq = BT_CreateSequence(2,
+        BT_CreateCondition(HunterCond_UnderThreat),
+        BT_CreateAction(HunterAct_EvasiveJump)
+    );
+
+    // v5.16: 墙面二段跳 —— 空中贴墙时可以进行二次扑击
+    int wallPounceSeq = BT_CreateSequence(2,
+        BT_CreateCondition(HunterCond_CanWallPounce),
+        BT_CreateAction(HunterAct_WallPounce)
+    );
+
+    // v5.13: 骚扰模式 —— 作为骚扰者时保持距离，等待发起者开团
+    // 条件：是骚扰者 AND 尚未解放
+    // v5.18: 解放条件放宽为 CND_HarasserReleased（发起者得手 OR 齐射令下）
+    int harassSeq = BT_CreateSequence(3,
+        BT_CreateCondition(CND_IsHarasser),
+        BT_CreateInverter(BT_CreateCondition(CND_HarasserReleased)),
+        BT_CreateSequence(2,
+            BT_CreateAction(ACT_AcquireClosestTarget),
+            BT_CreateAction(HunterAct_HarasserApproach)
+        )
     );
 
     // v3.2: HasHighGround check so Hunter only climbs when there is
@@ -483,11 +851,15 @@ stock int BT_CreateHunterTree() {
         BT_CreateCondition(CND_IsDucking)
     );
 
+    // v5.18 功能 2：加挂边/倒地守卫 —— ACT_AcquireClosestTarget 底层
+    // GetClosestSurvivor 只查 IsPlayerAlive，不过滤倒地/挂边，会锁上挂边者
+    // 白扑一次。CND_TargetIsPinnable 同时覆盖"已被控"，语义包含原
+    // CND_IsTargetPinned 反向闸，故替换而非叠加。
     int pounceInnerSeq = BT_CreateSequence(4,
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
-        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
+        BT_CreateCondition(CND_TargetIsPinnable)
     );
 
     // v3.2: GaussianAimOffset for unpredictable pounce angles.
@@ -513,7 +885,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fStraightRange),
-        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
+        BT_CreateCondition(CND_TargetIsPinnable)   // v5.18: 同 pounceInnerSeq
     );
     int closeAttackSeq = BT_CreateSequence(2,
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
@@ -538,9 +910,12 @@ stock int BT_CreateHunterTree() {
     // v5.5 FIX: 去掉 NOT IsDucking —— 蹲姿出生的 Hunter 远处也会站起冲刺
     //       （SprintApproach 内部 RemoveButton(IN_DUCK)），不再掉进
     //       crouchApproach 兜底慢走。远距离一律冲刺。
+    // v5.19: 停跑距离改绝对值 400 —— 原 fPounceRange-100 在门控恢复 1000 后
+    // 会变成 900u 停跑，400-900u 掉进 crouchApproach 蹲爬 = v5.4/v5.5 修过的
+    // "慢速蠕动"回归。400 是 v5.4 实测消除边界回弹的值，与门控解耦。
     int sprintApproachSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_OnGround),
-        BT_CreateInverter(BT_CreateIsInRange(fPounceRange - 100.0)),
+        BT_CreateInverter(BT_CreateIsInRange(400.0)),
         BT_CreateSequence(2,
             BT_CreateAction(ACT_AcquireClosestTarget),
             BT_CreateAction(HunterAct_SprintApproach)
@@ -574,9 +949,11 @@ stock int BT_CreateHunterTree() {
     // Old version used ACT_StrafeRandom which only did lateral movement.
     // v5.5: 加 ≤600u 门控 —— 只允许扑击距离边缘的最后一小段蹲爬接近；
     //       更远处一律交给 sprintApproachSeq 全速冲刺（不再兜底慢走）。
+    // v5.19: 门控改绝对值 600 —— 同 sprintApproachSeq，防门控恢复 1000 后
+    // 蹲爬区扩到 1100u（v5.5 明确只允许"扑击距离边缘最后一小段"蹲爬）。
     int crouchApproachSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_OnGround),
-        BT_CreateIsInRange(fPounceRange + 100.0),
+        BT_CreateIsInRange(600.0),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateAction(HunterAct_CrouchApproach)
     );
@@ -633,43 +1010,75 @@ stock int BT_CreateHunterTree() {
     BT_AddChild(fastPounceSeq, pounceInnerSeq);
     BT_AddChild(fastPounceSeq, attackActionSeq);
 
-    // Root selector — priority order (v3.5):
+    // Root selector — priority order (v5.16):
     //   1. Escape after miss (safety first)
-    //   2. High-ground positioning (tactical advantage)
-    //   3. Narrow corridor → straight pounce
-    //   4a. Open area → roll strategy token
-    //   4b. Open + strat0 → wide flank pounce (±25° Gauss)
-    //   4c. Open + strat1 → erratic pounce (standard ±15° Gauss)
-    //   4d. Open + strat2 → falls through to standard fast pounce
-    //   5. Semi open → hug wall approach
-    //   6. Close range (≤200) → direct pounce (no Gauss, faster) [v3.3]
-    //   7. Standard fast pounce (ducking + LOS + inRange → pounce with Gauss)
-    //   8. In range + not ducking → crouch to prepare pounce [v3.3]
-    //   9. Far away → SPRINT full speed toward target [v3.3]
-    //   10. In range + ducking + no LOS → crouch approach with forward movement [v3.3]
-    //   11. Last resort → wander
+    //   2. Wall pounce when airborne near wall [v5.16 NEW]
+    //   3. Evasive jump when being aimed at [v5.12]
+    //   4. Harasser mode (keep distance until initiator engages) [v5.15]
+    //   5. High-ground positioning (tactical advantage)
+    //   6. Narrow corridor → straight pounce
+    //   7a. Open area → roll strategy token
+    //   7b. Open + strat0 → wide flank pounce (±35° Gauss)
+    //   7c. Open + strat1 → erratic pounce (standard ±15° Gauss)
+    //   7d. Open + strat2 → falls through to standard fast pounce
+    //   8. Semi open → hug wall approach
+    //   9. Close range (≤200) → direct pounce (no Gauss, faster) [v3.3]
+    //   10. Standard fast pounce (ducking + LOS + inRange → pounce with Gauss)
+    //   11. In range + not ducking → crouch to prepare pounce [v3.3]
+    //   12. Far away → SPRINT full speed toward target [v3.3]
+    //   13. In range + ducking + no LOS → crouch approach with forward movement [v3.3]
+    //   14. Last resort → wander
     //
-    // The sprint→crouch→pounce flow (8→7 or 9→8→7):
-    //   Tick N:   Hunter far away → branch 9 (sprint) activates, runs toward target
-    //   Tick N+1: Entered pounce range → branch 8 (crouchPrep) fires, presses DUCK
-    //   Tick N+2: FL_DUCKING set → branch 7 (fastPounce) fires, POUNCES!
+    // The sprint→crouch→pounce flow (11→10 or 12→11→10):
+    //   Tick N:   Hunter far away → branch 12 (sprint) activates, runs toward target
+    //   Tick N+1: Entered pounce range → branch 11 (crouchPrep) fires, presses DUCK
+    //   Tick N+2: FL_DUCKING set → branch 10 (fastPounce) fires, POUNCES!
+    // ==========================================
+    // v5.18 功能 1：flow 路线感知（两支）
+    // ------------------------------------------
+    // a) 已在前方 → 蹲守（Hunter 蹲着不动最难被发现，且蹲姿是扑击前置态，
+    //    玩家一进射程 branch 10 立刻接管扑出去 —— 埋伏与攻击天然衔接）
+    // b) 落在后方 → 朝 flow 增大方向绕行抢位，而不是从背后直线追
+    //    （从后方追 = 全队枪线正对，白给）
+    // 两支都排在扑击分支之后：能扑就扑，够不到才走路线逻辑。
+    // ==========================================
+    int routeAmbushSeq = BT_CreateSequence(4,
+        BT_CreateIsAheadOnRoute(500.0),
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
+        BT_CreateIsNotInRange(700.0),
+        BT_CreateSequence(2,
+            BT_CreateAction(ACT_Crouch),            // 蹲守 = 隐蔽 + 扑击前置态
+            BT_CreateAction(ACT_HoldRouteAmbush)
+        )
+    );
+    int routeFlankSeq = BT_CreateSequence(3,
+        BT_CreateIsBehindOnRoute(800.0),            // 落后 800 flow 以上
+        BT_CreateIsNotInRange(900.0),               // 900u 内已能打，别绕了
+        BT_CreateAction(ACT_MoveToRouteAhead)
+    );
+
     int root = BT_Create(BTN_SELECTOR);
     BT_AddChild(root, missEscSeq);              // 1. escape after miss
-    BT_AddChild(root, highPounceSeq);           // 2. high-ground positioning
-    BT_AddChild(root, narrowPounceSeq);         // 3. v3.2: narrow → straight pounce
-    BT_AddChild(root, coordPounceSeq);          // 3.5. v4.0: mode 4/6 分散扑（防 dogpile）
-    BT_AddChild(root, disruptionSeq);           // 3.6. v5.0: 枪线扰乱 → 扑火力输出者
-    BT_AddChild(root, openStrategyRoll);        // 4a. v3.5: open → roll token
-    BT_AddChild(root, openStrat0_WidePounce);   // 4b. v3.5: open strat0 → wide pounce
-    BT_AddChild(root, openStrat1_ErraticPounce);// 4c. v3.5: open strat1 → erratic pounce
-    // 4d: open strat2 → falls through to fastPounceSeq
-    BT_AddChild(root, semiApproachSeq);         // 5. v3.2: semi → hug wall
-    BT_AddChild(root, closePounceSeq);          // 6. v3.3: close-range direct pounce
-    BT_AddChild(root, fastPounceSeq);           // 7. standard fast pounce (Gauss angle)
-    BT_AddChild(root, crouchPrepSeq);           // 8. v3.3: inRange + noDuck → crouch
-    BT_AddChild(root, sprintApproachSeq);       // 9. v3.3: far away → SPRINT full speed
-    BT_AddChild(root, crouchApproachSeq);       // 10. v3.3: inRange + ducking + noLOS → strafe+forward
-    BT_AddChild(root, wander);                  // 11. last resort
+    BT_AddChild(root, wallPounceSeq);           // 2. v5.16: wall pounce when airborne
+    BT_AddChild(root, evasiveJumpSeq);          // 3. v5.12: evasive jump when aimed at
+    BT_AddChild(root, harassSeq);               // 4. v5.15: harasser mode (keep distance)
+    BT_AddChild(root, highPounceSeq);           // 5. high-ground positioning
+    BT_AddChild(root, narrowPounceSeq);         // 6. v3.2: narrow → straight pounce
+    BT_AddChild(root, coordPounceSeq);          // 6.5. v4.0: mode 4/6 分散扑（防 dogpile）
+    BT_AddChild(root, disruptionSeq);           // 6.6. v5.0: 枪线扰乱 → 扑火力输出者
+    BT_AddChild(root, openStrategyRoll);        // 7a. v3.5: open → roll token
+    BT_AddChild(root, openStrat0_WidePounce);   // 7b. v3.5: open strat0 → wide pounce
+    BT_AddChild(root, openStrat1_ErraticPounce);// 7c. v3.5: open strat1 → erratic pounce
+    // 7d: open strat2 → falls through to fastPounceSeq
+    BT_AddChild(root, semiApproachSeq);         // 8. v3.2: semi → hug wall
+    BT_AddChild(root, closePounceSeq);          // 9. v3.3: close-range direct pounce
+    BT_AddChild(root, fastPounceSeq);           // 10. standard fast pounce (Gauss angle)
+    BT_AddChild(root, crouchPrepSeq);           // 11. v3.3: inRange + noDuck → crouch
+    BT_AddChild(root, sprintApproachSeq);       // 12. v3.3: far away → SPRINT full speed
+    BT_AddChild(root, crouchApproachSeq);       // 13. v3.3: inRange + ducking + noLOS → strafe+forward
+    BT_AddChild(root, routeAmbushSeq);          // 13b. v5.18: flow 前方 → 蹲守埋伏
+    BT_AddChild(root, routeFlankSeq);           // 13c. v5.18: flow 后方 → 绕行抢位
+    BT_AddChild(root, wander);                  // 14. last resort
 
     return root;
 }
@@ -682,9 +1091,12 @@ public Hunter_OnModuleStart() {
     // reload 时引擎 cvar 常驻 → 存在性判断防重复创建告警。
     ConVar hCvar = FindConVar("ai_fast_pounce_proximity");
     if (hCvar == null) {
-        hCvar = CreateConVar("ai_fast_pounce_proximity", "500",
-            "Hunter 扑击距离门控（对齐引擎 hunter_pounce_ready_range=500）",
+        hCvar = CreateConVar("ai_fast_pounce_proximity", "1000",
+            "Hunter 扑击距离门控（v5.19: 恢复 v4.0.1 实战验证值 1000）",
             FCVAR_NONE, true, 100.0, true, 2000.0);
+    } else if (hCvar.FloatValue < 1000.0) {
+        // v5.19: reload 时引擎 cvar 常驻，旧值 500 会被继承 → 强制抬回
+        hCvar.SetFloat(1000.0);
     }
     hCvar = FindConVar("ai_straight_pounce_proximity");
     if (hCvar == null) {
@@ -693,7 +1105,9 @@ public Hunter_OnModuleStart() {
             FCVAR_NONE, true, 50.0, true, 1000.0);
     }
     SetConVarInt(FindConVar("hunter_committed_attack_range"), 10000);
-    SetConVarInt(FindConVar("hunter_pounce_ready_range"), 500);
+    // v5.19: 500→1000 —— 与 BT 门控 fPounceRange 对齐。引擎默认就是 500，
+    // v5.3 误把这个"自设值"当成引擎硬限制来反推 BT 门控。
+    SetConVarInt(FindConVar("hunter_pounce_ready_range"), 1000);
     SetConVarInt(FindConVar("hunter_leap_away_give_up_range"), 0);
     SetConVarInt(FindConVar("hunter_pounce_max_loft_angle"), 0);
 }

@@ -97,10 +97,125 @@ BT_Status ChargerAct_AcquireAcidTarget(int client) {
     return BT_FAILURE;
 }
 
+// ============================================================================
+// v5.15: 骚扰模式接近（Harasser Approach）
+// 保持 400-800u 距离威慑，但允许短距离冲锋（玩家边缘/落单时）
+// ============================================================================
+
+BT_Status ChargerAct_HarasserApproach(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        return BT_FAILURE;
+    }
+
+    float myPos[3], tPos[3];
+    GetClientAbsOrigin(client, myPos);
+    GetClientAbsOrigin(target, tPos);
+    float distance = GetVectorDistance(myPos, tPos);
+
+    // === v5.15: 机会性冲锋检测 ===
+    // 检查冷却（降低攻击频率，比正常模式少 50%）
+    float now = GetGameTime();
+    float lastOpportunisticCharge = BB_GetFloat(client, "_harass_last_charge", 0.0);
+    bool canOpportunisticCharge = (now - lastOpportunisticCharge > 18.0);  // 18秒冷却（正常12秒）
+
+    if (canOpportunisticCharge && distance >= 300.0 && distance <= 600.0) {
+        // 检测玩家是否落单（距离队友 >500u）
+        bool isIsolated = true;
+        for (int i = 1; i <= MaxClients; i++) {
+            if (i == target || !IsSurvivor(i) || !IsPlayerAlive(i)) continue;
+            float tPos2[3];
+            GetClientAbsOrigin(i, tPos2);
+            if (GetVectorDistance(tPos, tPos2) < 500.0) {
+                isIsolated = false;
+                break;
+            }
+        }
+
+        // 检测玩家是否接近边缘（前方 200u 内有悬崖）
+        bool nearEdge = false;
+        float tAng[3], forwardVec[3], checkPos[3];
+        GetClientEyeAngles(target, tAng);
+        GetAngleVectors(tAng, forwardVec, NULL_VECTOR, NULL_VECTOR);
+        checkPos[0] = tPos[0] + forwardVec[0] * 200.0;
+        checkPos[1] = tPos[1] + forwardVec[1] * 200.0;
+        checkPos[2] = tPos[2];
+
+        float groundCheck[3];
+        groundCheck[0] = checkPos[0];
+        groundCheck[1] = checkPos[1];
+        groundCheck[2] = checkPos[2] - 300.0;
+
+        TR_TraceRayFilter(checkPos, groundCheck, MASK_PLAYERSOLID, RayType_EndPoint, TracerayFilter, client);
+        if (!TR_DidHit() || TR_GetFraction() > 0.8) {
+            nearEdge = true;
+        }
+
+        // 满足条件：进行短距离冲锋（距离限制 600u）
+        if (isIsolated || nearEdge) {
+            // 检查 LOS
+            TR_TraceRayFilter(myPos, tPos, MASK_SHOT, RayType_EndPoint, TracerayFilter, client);
+            if (TR_GetFraction() > 0.95) {
+                BB_SetFloat(client, "_harass_last_charge", now);
+                float dir[3], ang[3];
+                MakeVectorFromPoints(myPos, tPos, dir);
+                GetVectorAngles(dir, ang);
+                BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+                BT_AddButton(client, IN_ATTACK);
+                BT_AddButton(client, IN_FORWARD);
+                SI_SignalAttack(client);
+                return BT_RUNNING;
+            }
+        }
+    }
+
+    // === 正常骚扰行为：距离控制 ===
+    if (distance > 800.0) {
+        // 太远：接近
+        float dir[3], ang[3];
+        MakeVectorFromPoints(myPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        BT_AddButton(client, IN_FORWARD);
+    } else if (distance < 400.0) {
+        // 太近：后退
+        float dir[3], ang[3];
+        MakeVectorFromPoints(myPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        ang[1] += 180.0;  // 反向
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        BT_AddButton(client, IN_FORWARD);
+    } else {
+        // 400-800u：横移威慑
+        float dir[3], ang[3];
+        MakeVectorFromPoints(myPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+
+        // 随机横移
+        float nextSwitch = BB_GetFloat(client, "_harass_strafe_next", 0.0);
+        if (nextSwitch <= 0.0 || now >= nextSwitch) {
+            BB_SetBool(client, "_harass_strafe_left", GetRandomInt(0, 1) == 0);
+            BB_SetFloat(client, "_harass_strafe_next", now + GetRandomFloat(0.5, 1.2));
+        }
+
+        if (BB_GetBool(client, "_harass_strafe_left", false)) {
+            BT_AddButton(client, IN_MOVELEFT);
+        } else {
+            BT_AddButton(client, IN_MOVERIGHT);
+        }
+    }
+
+    BT_StuckDetour(client);
+    return BT_RUNNING;
+}
+
 // v3.8: Aim at blackboard target before charging.
 // Fixes "charging into empty walls" — previously ChargerAct_Charge fired
 // IN_ATTACK+IN_FORWARD in whatever direction the previous BT branch left,
 // which could be WANDER's random angle pointing at a wall.
+// v5.20: Zero pitch — charge is horizontal movement, aiming up/down causes
+// collision with ceiling/ground. Only yaw matters for charge direction.
 BT_Status ChargerAct_AimAtTarget(int client) {
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
@@ -109,6 +224,7 @@ BT_Status ChargerAct_AimAtTarget(int client) {
         GetClientAbsOrigin(target, tPos);
         MakeVectorFromPoints(sPos, tPos, dir);
         GetVectorAngles(dir, ang);
+        ang[0] = 0.0;  // v5.20: zero pitch — charge horizontally
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
     return BT_SUCCESS;
@@ -125,7 +241,15 @@ BT_Status ChargerAct_Charge(int client) {
 // v3.6: Blind charge — charge even without LOS (30% chance).
 // Charger's charge has a wide hitbox that can clip survivors around corners.
 // Sometimes a blind charge is better than circling forever.
+// v5.20: Zero pitch + add cooldown to prevent spam (was firing every 0.17s).
 BT_Status ChargerAct_BlindCharge(int client) {
+    // v5.20: cooldown check — prevent blind charge spam (30%×60tick = every 0.17s)
+    float now = GetGameTime();
+    float lastBlind = BB_GetFloat(client, "_charger_last_blind", 0.0);
+    if (now - lastBlind < 8.0) return BT_FAILURE;  // 8s cooldown for blind charges
+
+    BB_SetFloat(client, "_charger_last_blind", now);
+
     // Face the acquired target direction even without LOS
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
@@ -134,6 +258,7 @@ BT_Status ChargerAct_BlindCharge(int client) {
         GetClientAbsOrigin(target, tPos);
         MakeVectorFromPoints(sPos, tPos, dir);
         GetVectorAngles(dir, ang);
+        ang[0] = 0.0;  // v5.20: zero pitch
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
     BT_AddButton(client, IN_ATTACK);
@@ -402,7 +527,33 @@ stock int BT_CreateChargerTree() {
     BT_AddChild(chargeCluster, openS1_Charge);     // v3.5: open strat1 → erratic charge
     BT_AddChild(chargeCluster, lowHpSeq);          // FALLBACK: low HP charge
     BT_AddChild(chargeCluster, defaultChargeSeq);  // FALLBACK: default charge
-    int cooldownCharge = BT_CreateCooldown(12.0, chargeCluster);  // v4.0.3: 对齐 z_charge_interval=12s
+
+    // v5.18 功能 2：冲锋前的挂边守卫
+    // ------------------------------------------
+    // 12s 冷却的冲锋是 Charger 最贵的资源。GetClosestSurvivor 不过滤倒地/挂边
+    // （只查 IsPlayerAlive），所以 defaultChargeSeq 这类 fallback 会锁上挂边者
+    // 白冲一次。这里在整簇外加守卫：目标不可控（挂边/倒地/已被控）时整簇 FAIL，
+    // 树落到走位分支等一个站着的目标，冷却不被浪费。
+    //
+    // 例外：挂边者本身值得撞（撞落即死），但那由 hangingCharge 单独处理，
+    // 它显式选人所以不受本守卫影响 —— 守卫只挡"误锁"，不挡"故意打"。
+    int guardedChargeCluster = BT_CreateSequence(2,
+        BT_CreateCondition(CND_TargetIsPinnable),
+        chargeCluster
+    );
+
+    // 挂边者专用冲锋：把挂边的人撞下去（即死）。显式选人 + 400u 内，
+    // 排在守卫簇之前，是主动机会而非误锁。
+    int hangingCharge = BT_CreateSequence(3,
+        BT_CreateAcquireHangingTarget(400.0),
+        BT_CreateAction(ChargerAct_AimAtTarget),
+        BT_CreateAction(ChargerAct_Charge)
+    );
+
+    int chargeRoot = BT_Create(BTN_SELECTOR);
+    BT_AddChild(chargeRoot, hangingCharge);        // v5.18: 撞落挂边者
+    BT_AddChild(chargeRoot, guardedChargeCluster); // v5.18: 守卫后的原冲锋簇
+    int cooldownCharge = BT_CreateCooldown(12.0, chargeRoot);  // v4.0.3: 对齐 z_charge_interval=12s
 
     // v5.0 突破手绕行：12s 冲锋冷却期间绕侧后接近密集区（CircleFlank 大弧线，
     // 从生还者视线外绕到侧后方），技能冷却一好立即被 cooldownCharge 的
@@ -423,11 +574,24 @@ stock int BT_CreateChargerTree() {
     );
     BT_AddChild(root, spawnProtect);                               // 0. v4.0.1
     BT_AddChild(root, BT_CreateCondition(CND_IsPinningSurvivor)); // 1
-    BT_AddChild(root, cooldownCharge);          // 2. v4.0.3: 全部冲锋分支（2s 冷却）
-    BT_AddChild(root, breakthroughApproach);    // 3. v5.0: 冷却期绕侧后接近密集区
-    BT_AddChild(root, openStrategyRoll);         // 4. v3.5: open → roll token
-    BT_AddChild(root, openS0_Approach);          // 5. v3.5: open strat0 → flank approach
-    BT_AddChild(root, openS1_Approach);          // 6. v3.5: open strat1 → erratic approach
+
+    // v5.13: 骚扰模式 —— 作为骚扰者时不冲锋，只接近威慑
+    // v5.18: 解放条件放宽为 CND_HarasserReleased（发起者得手 OR 齐射令下）
+    int harassSeq = BT_CreateSequence(3,
+        BT_CreateCondition(CND_IsHarasser),
+        BT_CreateInverter(BT_CreateCondition(CND_HarasserReleased)),
+        BT_CreateSequence(2,
+            BT_CreateAction(ACT_AcquireClosestTarget),
+            BT_CreateAction(ChargerAct_HarasserApproach)
+        )
+    );
+    BT_AddChild(root, harassSeq);                  // 2. v5.13: harasser mode
+
+    BT_AddChild(root, cooldownCharge);          // 3. v4.0.3: 全部冲锋分支（12s 冷却）
+    BT_AddChild(root, breakthroughApproach);    // 4. v5.0: 冷却期绕侧后接近密集区
+    BT_AddChild(root, openStrategyRoll);         // 5. v3.5: open → roll token
+    BT_AddChild(root, openS0_Approach);          // 6. v3.5: open strat0 → flank approach
+    BT_AddChild(root, openS1_Approach);          // 7. v3.5: open strat1 → erratic approach
     // open strat2 → falls through to generic approaches
     // ==========================================
     // v5.1: 站桩修复 —— 原 child 9 直接挂 ChargerAct_BlockCharge：
@@ -441,10 +605,10 @@ stock int BT_CreateChargerTree() {
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
-    BT_AddChild(root, noLosApproach);            // 7. FALLBACK: in-range no-LOS approach
-    BT_AddChild(root, approachSeq);              // 8. FALLBACK: approach from far
-    BT_AddChild(root, cooldownReposition);       // 9. v5.1: 冲锋冷却期走位逼近（不按 ATTACK）
-    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 10. last resort
+    BT_AddChild(root, noLosApproach);            // 8. FALLBACK: in-range no-LOS approach
+    BT_AddChild(root, approachSeq);              // 9. FALLBACK: approach from far
+    BT_AddChild(root, cooldownReposition);       // 10. v5.1: 冲锋冷却期走位逼近（不按 ATTACK）
+    BT_AddChild(root, BT_CreateAction(ACT_Wander));             // 11. last resort
 
     return root;
 }
