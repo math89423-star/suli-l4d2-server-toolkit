@@ -32,7 +32,7 @@
 #include <sourcemod>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION     "5.0.1 2026-08-12"
+#define PLUGIN_VERSION     "5.0.3 2026-08-14"
 #define CONFIG_FILENAME    "l4d_path_to_goal"
 
 #define TEAM_SURVIVOR      2
@@ -126,11 +126,10 @@ void ResetMapState()
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		g_bGuideToggled[i] = false;
-		if (g_hToggleTimer[i] != null)
-		{
-			KillTimer(g_hToggleTimer[i]);
-			g_hToggleTimer[i] = null;
-		}
+		// v5.0.2: 不强制删除 timer（会导致正在执行的 timer 崩溃），
+		// 只清空句柄。Timer 回调会检查 g_bGuideToggled[i] = false
+		// 并返回 Plugin_Stop 自然结束。
+		g_hToggleTimer[i] = null;
 		if (g_hPathCache[i] != null)
 		{
 			delete g_hPathCache[i];
@@ -710,26 +709,23 @@ void FindGoalEntity()
 public void OnPluginEnd()
 {
 	// v5.0.2: 清理所有客户端定时器
+	// 不强制删除 timer（正在执行的 timer 会崩溃），只清标志和句柄。
+	// Timer 回调检查 g_bGuideToggled[i] 后自然结束。
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (g_hToggleTimer[i] != null)
-		{
-			KillTimer(g_hToggleTimer[i]);
-			g_hToggleTimer[i] = null;
-		}
+		g_bGuideToggled[i] = false;
+		g_hToggleTimer[i] = null;
 	}
 }
 
 public void OnMapEnd()
 {
 	// v5.0.2: 清理所有客户端定时器
+	// 不强制删除 timer（正在执行的 timer 会崩溃），只清标志和句柄。
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (g_hToggleTimer[i] != null)
-		{
-			KillTimer(g_hToggleTimer[i]);
-			g_hToggleTimer[i] = null;
-		}
+		g_bGuideToggled[i] = false;
+		g_hToggleTimer[i] = null;
 	}
 }
 
@@ -788,8 +784,11 @@ void Guide_UpdateRedrawTimer()
 		}
 		else if (!g_bGuideToggled[i] && g_hToggleTimer[i] != null)
 		{
-			// 关闭导航线且有定时器 → 杀掉
-			KillTimer(g_hToggleTimer[i]);
+			// 关闭导航线且有定时器 → 标记关闭
+			// v5.0.3: 不删除 timer（正在执行的 timer 会崩溃 Handle.~Handle）。
+			// 只清标志，timer 回调检查 g_bGuideToggled[i] = false 后返回
+			// Plugin_Stop 自然结束。句柄也清空防止重复处理。
+			g_bGuideToggled[i] = false;
 			g_hToggleTimer[i] = null;
 		}
 	}

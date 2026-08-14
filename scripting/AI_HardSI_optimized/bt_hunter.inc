@@ -1,5 +1,5 @@
 // ============================================================================
-// bt_hunter.inc — Hunter Behavior Tree (v5.9)
+// bt_hunter.inc — Hunter Behavior Tree (v5.10)
 // ============================================================================
 // Replaces the old AI_Hunter.sp flat logic with a BT-driven decision tree.
 // Key behaviors preserved from v2.4:
@@ -494,15 +494,17 @@ stock int BT_CreateHunterTree() {
     // Sum-of-3-uniforms approximates Gaussian with ~15° std dev spread.
     // v5.5: OverheadOffset 插在 SnapAim 之后 —— 30% 概率改瞄目标后方头顶，
     // 过顶抛物线落后（掷不中则保留 SnapAim 的瞄准，Gauss 照常微调）。
-    int attackActionSeq = BT_CreateSequence(4,
+    // v5.10 FIX: 移除 Cooldown 包裹 —— fastPounceSeq 是 v5.9 遗漏的最后一个
+    // 站桩 bug：冷却期内前置条件满足但 Cooldown FAIL → 整支 FAIL → selector
+    // 反复选中分支7又反复 FAIL = 站着不动。引擎自带扑击冷却（z_lunge_interval
+    // 默认 0.5s），插件侧不需要再锁。直接合并攻击序列到 fastPounceSeq。
+    int attackActionSeq = BT_CreateSequence(5,
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(HunterAct_OverheadOffset),
         BT_CreateAction(ACT_GaussianAimOffset),
-        BT_CreateAction(ACT_QueueLunge)
+        BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(ACT_SignalAttack)
     );
-
-    int cooldownAttack = BT_CreateCooldown(1.0, attackActionSeq);
-    int signalCoord = BT_CreateAction(ACT_SignalAttack);
 
     // --- v3.3: Close-range direct pounce (no Gauss offset, faster reaction) ---
     int closePounceSeq = BT_CreateSequence(6,
@@ -629,8 +631,7 @@ stock int BT_CreateHunterTree() {
 
     // --- Build main tree ---
     BT_AddChild(fastPounceSeq, pounceInnerSeq);
-    BT_AddChild(fastPounceSeq, cooldownAttack);
-    BT_AddChild(fastPounceSeq, signalCoord);
+    BT_AddChild(fastPounceSeq, attackActionSeq);
 
     // Root selector — priority order (v3.5):
     //   1. Escape after miss (safety first)
