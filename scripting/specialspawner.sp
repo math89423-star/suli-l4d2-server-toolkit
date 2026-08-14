@@ -935,6 +935,9 @@ public void OnClientDisconnect(int client) {
 // 不会重发，刷怪定时器链会断（特感停刷到换图）。引擎状态不受插件重载影响，
 // 用 L4D_HasAnySurvivorLeftSafeArea 检测 → 已离开安全区则重建链。
 public void OnMapStart() {
+	// v2.1.0 热重载时重新检测 pressure_tracker
+	CheckPressureTracker();
+
 	if (L4D_HasAnySurvivorLeftSafeArea()) {
 		g_bLeftSafeArea = true;
 		// v2.0.0 热重载兜底: 状态机与全部 timer 随卸载清零 → 从收尾期恢复
@@ -1199,7 +1202,8 @@ Action tmrSpawnSpecial(Handle timer) {
 	g_Phase = PHASE_PRESSURE;
 
 	int totalSI = GetTotalSI();
-	bool started = ExecuteSpawnQueue(totalSI, true);
+	// v2.1.0 FIX: 新波次开始应传 false（非 retry），才能触发 OnWaveStarted 通知
+	bool started = ExecuteSpawnQueue(totalSI, false);
 
 	// v2.0.0: 零波（上限满/全倒/无站立生还者）直接进收尾期轮询, 链条不断
 	if (!started)

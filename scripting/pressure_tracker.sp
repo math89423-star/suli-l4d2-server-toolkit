@@ -190,6 +190,7 @@ public void OnPluginStart()
 // ============================================================================
 public void OnWaveStarted()
 {
+    LogMessage("[Pressure] OnWaveStarted called | Enable: %d", g_cvEnable.BoolValue);
     if (!g_cvEnable.BoolValue)
         return;
 
@@ -198,6 +199,7 @@ public void OnWaveStarted()
     g_iWaveDamage = 0;
     g_iWaveIncaps = 0;
     g_iWaveDeaths = 0;
+    LogMessage("[Pressure] Wave started | Active: %d", g_bWaveActive);
 }
 
 // ============================================================================
@@ -205,6 +207,7 @@ public void OnWaveStarted()
 // ============================================================================
 public void OnWaveCleared()
 {
+    LogMessage("[Pressure] OnWaveCleared called | Enable: %d | WaveActive: %d", g_cvEnable.BoolValue, g_bWaveActive);
     if (!g_cvEnable.BoolValue || !g_bWaveActive)
         return;
 
@@ -385,8 +388,10 @@ void SwitchToTier(int newTier)
 // ============================================================================
 void AnnounceTierChange(int oldTier, int newTier)
 {
+    LogMessage("[Pressure] AnnounceTierChange called: T%d -> T%d", oldTier, newTier);
     if (newTier > oldTier) {
         // Heating announcements
+        LogMessage("[Pressure] Heating announcement for tier %d", newTier);
         switch (newTier) {
             case 2: {
                 PrintToChatAll("\x04[压力系统] \x05特感威胁正在上升，请保持警惕！");
@@ -404,6 +409,7 @@ void AnnounceTierChange(int oldTier, int newTier)
     }
     else {
         // Cooling announcements
+        LogMessage("[Pressure] Cooling announcement for tier %d", newTier);
         switch (newTier) {
             case 4: {
                 PrintToChatAll("\x04[压力系统] \x05特感攻势有所减弱，抓紧喘息！");

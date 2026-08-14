@@ -265,8 +265,43 @@ BT_Status SpitterAct_Spit(int client) {
     float sPos[3], tPos[3], dir[3], ang[3];
     GetClientAbsOrigin(client, sPos);
     GetClientAbsOrigin(target, tPos);
-    MakeVectorFromPoints(sPos, tPos, dir);
-    GetVectorAngles(dir, ang);
+
+    // === v5.16: 预判投掷 ===
+    // 获取目标移动速度
+    float vel[3];
+    GetEntPropVector(target, Prop_Data, "m_vecVelocity", vel);
+    float speed = SquareRoot(vel[0]*vel[0] + vel[1]*vel[1]);  // 水平速度
+
+    // 如果目标在快速移动（>150u/s），进行预判
+    if (speed > 150.0) {
+        float distance = GetVectorDistance(sPos, tPos);
+
+        // 估算飞行时间（酸液抛物线速度约 1000-1200 u/s）
+        float flightTime = distance / 1100.0;
+
+        // 计算预判点（保守系数 0.65，避免过度预判）
+        float predictedPos[3];
+        predictedPos[0] = tPos[0] + vel[0] * flightTime * 0.65;
+        predictedPos[1] = tPos[1] + vel[1] * flightTime * 0.65;
+        predictedPos[2] = tPos[2];  // 保持相同高度
+
+        // 检查预判点是否合理（不超过 300u 偏移）
+        float predictOffset = GetVectorDistance(tPos, predictedPos);
+        if (predictOffset < 300.0) {
+            // 使用预判点
+            MakeVectorFromPoints(sPos, predictedPos, dir);
+            GetVectorAngles(dir, ang);
+        } else {
+            // 预判偏移过大，使用原点
+            MakeVectorFromPoints(sPos, tPos, dir);
+            GetVectorAngles(dir, ang);
+        }
+    } else {
+        // 目标静止或慢速移动，直接瞄准
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+    }
+
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     BT_AddButton(client, IN_ATTACK);   // v5.7: 按住至真实发射
 

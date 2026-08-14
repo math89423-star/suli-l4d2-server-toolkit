@@ -26,7 +26,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-#define BT_MAX_NODES   768    // max total nodes across all trees (v3.7: 512→768)
+#define BT_MAX_NODES   1024   // max total nodes across all trees (v3.7: 512→768; v5.18: 768→1024)
 #define BT_MAX_CLIENTS MAXPLAYERS + 1
 
 enum BT_Status {

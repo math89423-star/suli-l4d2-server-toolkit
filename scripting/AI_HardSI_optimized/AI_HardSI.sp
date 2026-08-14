@@ -211,6 +211,12 @@ ConVar g_hCvarTankAggroBhop = null;
 // v5.1: 诊断输出（ai_debug）
 ConVar g_hCvarDebug = null;
 
+// v5.18 功能 3：同步齐射 cvar（状态机实现见文件下方 Wave_EvaluateSync）
+ConVar g_hCvarWaveSync        = null;  // 0=关（纯接力）1=开（接力+齐射）
+ConVar g_hCvarWaveSyncRatio   = null;
+ConVar g_hCvarWaveSyncTimeout = null;
+ConVar g_hCvarWaveSyncRange   = null;  // 判定"就位"的距离
+
 // v5.8: 压力系统集成 — AI 攻击性调制
 ConVar g_hCvarPressureAggression = null;
 float  g_fPressureAggression = 1.0;  // Default T3 baseline
@@ -248,6 +254,26 @@ public OnPluginStart() {
         "Print per-SI root branch index + terrain + target distance to SM log every 2s: 0=OFF, 1=ON",
         FCVAR_NONE, true, 0.0, true, 1.0);
 
+    // --- v5.18 功能 3：同步齐射 ---
+    g_hCvarWaveSync = CreateConVar("ai_wave_sync", "1",
+        "Synchronized alpha strike: harassers stage then strike together. 0=OFF (relay only), 1=ON",
+        FCVAR_NONE, true, 0.0, true, 1.0);
+    g_hCvarWaveSyncRatio = CreateConVar("ai_wave_sync_ratio", "0.6",
+        "Fraction of harassers in position required to order the alpha strike",
+        FCVAR_NONE, true, 0.1, true, 1.0);
+    g_hCvarWaveSyncTimeout = CreateConVar("ai_wave_sync_timeout", "12.0",
+        "Max seconds to stage before striking anyway (prevents stuck SI stalling the wave)",
+        FCVAR_NONE, true, 3.0, true, 60.0);
+    g_hCvarWaveSyncRange = CreateConVar("ai_wave_sync_range", "900.0",
+        "Distance to nearest survivor counted as 'in position' for wave sync",
+        FCVAR_NONE, true, 300.0, true, 2000.0);
+
+    // v5.19: 骚扰态硬超时 —— 没有 Boomer/Smoker 发起者的波次里，骚扰者
+    // 曾会无限期保持距离（观感"傻站着不打"）。超过此秒数强制放行开打。
+    CreateConVar("ai_harass_max_hold", "5.0",
+        "Max seconds a harasser holds off before attacking regardless of initiator",
+        FCVAR_NONE, true, 0.0, true, 30.0);
+
     // --- Per-SI module initialization (cvars + game tuning) ---
     Smoker_OnModuleStart();
     Hunter_OnModuleStart();
@@ -280,6 +306,100 @@ public OnPluginStart() {
 
     // --- v5.1: 诊断定时器（ai_debug=1 时才输出） ---
     CreateTimer(2.0, Timer_DebugReport, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// ============================================================================
+// v5.16: Tank 物体投掷瞄准
+// ============================================================================
+
+// 监听物理道具被创建
+public void OnEntityCreated(int entity, const char[] classname) {
+    if (entity <= 0 || entity > 2048) return;
+
+    // 监听物理道具（车辆、桌子等）
+    if (StrEqual(classname, "prop_physics") ||
+        StrEqual(classname, "prop_car_alarm") ||
+        StrEqual(classname, "prop_physics_multiplayer")) {
+
+        // 延迟 0.1 秒后检查是否被 Tank 击打
+        CreateTimer(0.1, Timer_CheckPropVelocity, entity, TIMER_FLAG_NO_MAPCHANGE);
+    }
+}
+
+// 检查物理道具是否被 Tank 击打并修改其飞行轨迹
+Action Timer_CheckPropVelocity(Handle timer, int entity) {
+    if (!IsValidEntity(entity)) return Plugin_Stop;
+
+    // 获取物体速度
+    float vel[3];
+    GetEntPropVector(entity, Prop_Data, "m_vecVelocity", vel);
+    float speed = SquareRoot(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]);
+
+    // 如果物体正在高速移动（>400 u/s），可能是被 Tank 击打
+    if (speed > 400.0) {
+        // 查找最近的 Tank
+        int tank = -1;
+        float propPos[3];
+        GetEntPropVector(entity, Prop_Data, "m_vecOrigin", propPos);
+
+        for (int i = 1; i <= MaxClients; i++) {
+            if (!IsClientInGame(i) || !IsPlayerAlive(i)) continue;
+            if (GetClientTeam(i) != 3) continue;
+            if (GetEntProp(i, Prop_Send, "m_zombieClass") != ZC_TANK) continue;
+
+            float tankPos[3];
+            GetClientAbsOrigin(i, tankPos);
+            float dist = GetVectorDistance(tankPos, propPos);
+
+            // Tank 在附近（<300u）
+            if (dist < 300.0) {
+                tank = i;
+                break;
+            }
+        }
+
+        if (tank > 0) {
+            // 找到最近的幸存者
+            int target = -1;
+            float minDist = 999999.0;
+
+            for (int i = 1; i <= MaxClients; i++) {
+                if (!IsClientInGame(i) || !IsPlayerAlive(i)) continue;
+                if (GetClientTeam(i) != 2) continue;
+
+                float sPos[3];
+                GetClientAbsOrigin(i, sPos);
+                float dist = GetVectorDistance(propPos, sPos);
+
+                if (dist < minDist && dist < 1500.0) {
+                    minDist = dist;
+                    target = i;
+                }
+            }
+
+            // 如果找到目标，修改物体飞行方向
+            if (target > 0) {
+                float targetPos[3];
+                GetClientAbsOrigin(target, targetPos);
+
+                // 计算从物体到目标的方向
+                float dir[3];
+                MakeVectorFromPoints(propPos, targetPos, dir);
+                NormalizeVector(dir, dir);
+
+                // 保持原速度大小，但改变方向朝向幸存者
+                float newVel[3];
+                newVel[0] = dir[0] * speed * 0.8;  // 0.8 系数避免过于精准
+                newVel[1] = dir[1] * speed * 0.8;
+                newVel[2] = dir[2] * speed * 0.5 + vel[2] * 0.5;  // 保留部分原有垂直速度
+
+                // 设置新速度
+                TeleportEntity(entity, NULL_VECTOR, NULL_VECTOR, newVel);
+            }
+        }
+    }
+
+    return Plugin_Stop;
 }
 
 // ============================================================================
@@ -403,6 +523,10 @@ public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast)
         BT_Bind(client, rootId);
         // v5.8: 注入压力攻击性到黑板（spawn 时注入一次，cvar 变化时批量更新）
         BB_SetFloat(client, "_pressure_aggr", g_fPressureAggression);
+
+        // v5.13: 攻击发起者机制 —— 分配角色（发起者 or 骚扰者）
+        AssignWaveRole(client);
+        Harass_ResetHold(client);   // v5.19: 新生成 SI 重置骚扰超时计时
     }
 
     // Per-SI spawn initialization (reset per-SI state)
@@ -471,6 +595,9 @@ public Action:OnPlayerRunCmd(int client, int &buttons, int &impulse,
 
     // Reset BT movement accumulators
     BT_ResetMovement(client);
+
+    // v5.18: 齐射状态机（内部 0.5s 节流，每 SI 调用无妨）
+    Wave_EvaluateSync();
 
     // Set tank aggression mode on blackboard (cached handle, no FindConVar per tick)
     BB_SetBool(client, "tank_aggro", g_hCvarTankAggroBhop != null && GetConVarBool(g_hCvarTankAggroBhop));
@@ -623,4 +750,189 @@ public Action:Timer_DebugReport(Handle:timer) {
             cls, i, branch, terr, dist);
     }
     return Plugin_Continue;
+}
+
+// ============================================================================
+// v5.13: 攻击发起者机制（Attack Initiator Role）
+// ============================================================================
+// 每波攻击指定一个"发起者"（Boomer 或 Smoker），其他特感作为"骚扰者"
+// 来源：Legend of Dragon 战术原则
+//
+// 角色定义：
+//   ROLE_INITIATOR (1) - 发起者：优先攻击，全力进攻
+//   ROLE_HARASSER (2)  - 骚扰者：保持距离，等待发起者成功后再全力进攻
+//
+// 分配规则：
+//   - 每波首个生成的 Boomer 或 Smoker 自动成为发起者
+//   - 其他所有特感（包括后续的 Boomer/Smoker）为骚扰者
+//   - Tank 不参与角色系统（独立行为）
+// ============================================================================
+
+// 全局变量：记录当前波是否已有发起者
+bool g_bWaveHasInitiator = false;
+float g_fWaveStartTime = 0.0;
+
+// ---------------------------------------------------------------------------
+// v5.18 功能 3：同步齐射（Synchronized Alpha Strike）
+// ---------------------------------------------------------------------------
+// 既有的发起者/骚扰者是"接力式"：骚扰者等发起者得手才转全力（CND_InitiatorEngaged）。
+// 齐射是另一条路：全体就位后同时发动。两者压力曲线不同，这里做成并存 ——
+// 骚扰者转全力的闸门 = 发起者得手 OR 齐射令下。
+//
+// 状态机：
+//   STAGE_NONE(0)    无波次在待命
+//   STAGE_STAGING(1) 待命中：骚扰者到位但按住不打
+//   STAGE_STRIKE(2)  齐射令已下：全体全力进攻（持续到本波结束）
+//
+// 触发齐射的两个条件（任一）：
+//   a) 就位比例 ≥ ai_wave_sync_ratio（默认 0.6）
+//   b) 待命超时 ai_wave_sync_timeout（默认 12s）—— 防卡死，避免有特感
+//      卡在远处导致整波永不发动
+// ---------------------------------------------------------------------------
+#define STAGE_NONE      0
+#define STAGE_STAGING   1
+#define STAGE_STRIKE    2
+
+int   g_iWaveStage       = STAGE_NONE;
+float g_fWaveStageStart  = 0.0;
+float g_fWaveNextEval    = 0.0;
+
+// cvar 句柄声明见文件上方（SourcePawn 全局变量须先声明后用，
+// OnPluginStart 的 CreateConVar 在本段之前）
+
+// 波次重置（在新波开始时调用，可由 specialspawner 或其他插件触发）
+public void ResetWaveRoles() {
+    g_bWaveHasInitiator = false;
+    g_fWaveStartTime = GetGameTime();
+    g_iWaveStage = STAGE_NONE;
+    g_fWaveStageStart = 0.0;
+}
+
+// 齐射令是否已下（供 bt_common 的 CND_WaveStrikeOrdered 读取）
+stock bool Wave_IsStrikeOrdered() {
+    if (g_hCvarWaveSync == null || !g_hCvarWaveSync.BoolValue) return false;
+    return (g_iWaveStage == STAGE_STRIKE);
+}
+
+// 是否处于待命阶段（骚扰者应按住不打）
+stock bool Wave_IsStaging() {
+    if (g_hCvarWaveSync == null || !g_hCvarWaveSync.BoolValue) return false;
+    return (g_iWaveStage == STAGE_STAGING);
+}
+
+// 齐射状态机评估：每 0.5s 一次，在主 tick 里调用
+void Wave_EvaluateSync() {
+    if (g_hCvarWaveSync == null || !g_hCvarWaveSync.BoolValue) {
+        g_iWaveStage = STAGE_NONE;
+        return;
+    }
+
+    float now = GetGameTime();
+    if (now < g_fWaveNextEval) return;
+    g_fWaveNextEval = now + 0.5;
+
+    // 统计活着的骚扰者 / 其中已就位的
+    int total = 0, ready = 0;
+    float readyRange = g_hCvarWaveSyncRange.FloatValue;
+
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsClientInGame(i) || !IsPlayerAlive(i)) continue;
+        if (GetClientTeam(i) != 3) continue;
+        int class = GetEntProp(i, Prop_Send, "m_zombieClass");
+        if (class == 8) continue;                       // Tank 不参与
+        if (BB_GetInt(i, "wave_role", 0) != 2) continue; // 只算骚扰者
+
+        total++;
+
+        // 就位判定：距最近幸存者 ≤ readyRange 且有 LOS
+        float pos[3];
+        GetClientAbsOrigin(i, pos);
+        int prox = GetSurvivorProximity(pos);
+        if (prox > 0 && float(prox) <= readyRange) {
+            ready++;
+        }
+    }
+
+    // 没有骚扰者 → 回到无波次状态
+    if (total == 0) {
+        if (g_iWaveStage != STAGE_NONE) {
+            g_iWaveStage = STAGE_NONE;
+        }
+        return;
+    }
+
+    // 齐射已下令：保持到本波打完（骚扰者全死或换波由 ResetWaveRoles 重置）
+    if (g_iWaveStage == STAGE_STRIKE) return;
+
+    // 进入待命
+    if (g_iWaveStage == STAGE_NONE) {
+        g_iWaveStage = STAGE_STAGING;
+        g_fWaveStageStart = now;
+        if (g_hCvarDebug != null && g_hCvarDebug.BoolValue) {
+            LogMessage("[AI_HardSI] Wave sync: STAGING (%d harassers)", total);
+        }
+        return;
+    }
+
+    // 待命中：检查两个发动条件
+    float ratio = float(ready) / float(total);
+    float wantRatio = g_hCvarWaveSyncRatio.FloatValue;
+    float timeout = g_hCvarWaveSyncTimeout.FloatValue;
+    bool byRatio = (ratio >= wantRatio);
+    bool byTimeout = (now - g_fWaveStageStart >= timeout);
+
+    if (byRatio || byTimeout) {
+        g_iWaveStage = STAGE_STRIKE;
+        if (g_hCvarDebug != null && g_hCvarDebug.BoolValue) {
+            LogMessage("[AI_HardSI] Wave sync: STRIKE (%d/%d ready, %.0f%%, by=%s)",
+                ready, total, ratio * 100.0, byTimeout ? "timeout" : "ratio");
+        }
+    }
+}
+
+// 为新生成的特感分配角色
+stock void AssignWaveRole(int client) {
+    if (!IsClientInGame(client) || !IsPlayerAlive(client)) {
+        return;
+    }
+
+    int class = GetEntProp(client, Prop_Send, "m_zombieClass");
+
+    // Tank 不参与角色系统
+    if (class == 8) {
+        BB_SetInt(client, "wave_role", 0);  // ROLE_NONE
+        return;
+    }
+
+    // 检测波次重置（超过 60 秒未分配发起者，视为新波）
+    float now = GetGameTime();
+    if (now - g_fWaveStartTime > 60.0) {
+        g_bWaveHasInitiator = false;
+        g_fWaveStartTime = now;
+    }
+
+    // 如果已有发起者，所有新生成的特感都是骚扰者
+    if (g_bWaveHasInitiator) {
+        BB_SetInt(client, "wave_role", 2);  // ROLE_HARASSER
+        return;
+    }
+
+    // 首个 Boomer 或 Smoker 成为发起者
+    if (class == 2 || class == 1) {  // Boomer=2, Smoker=1
+        BB_SetInt(client, "wave_role", 1);  // ROLE_INITIATOR
+        g_bWaveHasInitiator = true;
+        g_fWaveStartTime = now;
+
+        // 调试日志
+        char className[16];
+        if (class == 2) {
+            strcopy(className, sizeof(className), "Boomer");
+        } else {
+            strcopy(className, sizeof(className), "Smoker");
+        }
+        LogMessage("[AI_HardSI] %s(%d) assigned as INITIATOR", className, client);
+    } else {
+        // 其他特感默认为骚扰者
+        BB_SetInt(client, "wave_role", 2);  // ROLE_HARASSER
+    }
 }

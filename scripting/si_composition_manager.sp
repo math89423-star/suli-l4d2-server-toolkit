@@ -734,11 +734,11 @@ void AnnounceWave()
     // 冷静时长抵扣），旧"播旧钉值"对齐技巧失效；倒计时播报由 specialspawner
     // 进入冷静期时统一给出（[特感] 波次清剿完毕，X 秒后下一波）。
     if (effective < spawnSize) {
-        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只(\x03倒地补偿 %d→%d\x01)! 进攻策略: \x05%s\x01",
-            effective, spawnSize, effective, modeName);
+        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只(\x03倒地补偿 %d→%d\x01)!",
+            effective, spawnSize, effective);
     } else {
-        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只! 进攻策略: \x05%s\x01",
-            spawnSize, modeName);
+        PrintToChatAll("\x04[SI波次]\x01 特感已刷新 \x05%d\x01只!",
+            spawnSize);
     }
 }
 

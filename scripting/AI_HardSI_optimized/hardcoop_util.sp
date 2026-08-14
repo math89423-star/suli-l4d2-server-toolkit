@@ -1083,3 +1083,142 @@ stock int SI_GetHighestThreatSurvivor(const float siPos[3], float maxDist = 0.0)
 	}
 	return best;
 }
+
+// ============================================================================
+// v5.18 功能 2：挂边状态工具
+// ----------------------------------------------------------------------------
+// 挂边（m_isHangingFromLedge）时 m_isIncapacitated 也为 1，所以既有的
+// IsIncapacitated() 已把挂边算进去。这里拆出三态以便行为树区分：
+//   挂边     = 一击落地即死，白给目标，但控制技能打上去是空转
+//   地面倒地 = 可被补刀，控制技能同样空转
+//   站立     = 正常目标
+// ============================================================================
+
+// 挂边中（吊在边缘等人拉）
+stock bool SI_IsHangingFromLedge(int client) {
+	if (!IsSurvivor(client) || !IsPlayerAlive(client)) return false;
+	return view_as<bool>(GetEntProp(client, Prop_Send, "m_isHangingFromLedge"));
+}
+
+// 地面倒地（倒地但不是挂边）
+stock bool SI_IsIncappedOnGround(int client) {
+	if (!IsSurvivor(client) || !IsPlayerAlive(client)) return false;
+	if (!GetEntProp(client, Prop_Send, "m_isIncapacitated")) return false;
+	return !GetEntProp(client, Prop_Send, "m_isHangingFromLedge");
+}
+
+// 可作为控制技能（扑/拉/骑/冲）目标：站立且未被控
+// 挂边/倒地的人对控制技能免疫或无意义 —— 打上去纯浪费冷却
+stock bool SI_IsPinnable(int client) {
+	if (!IsSurvivor(client) || !IsPlayerAlive(client)) return false;
+	if (IsPinned(client)) return false;
+	return !GetEntProp(client, Prop_Send, "m_isIncapacitated");
+}
+
+// 最近的挂边幸存者（Tank/Charger 的优先击落目标）
+stock int SI_GetHangingSurvivor(const float siPos[3], float maxDist = 0.0) {
+	int best = -1;
+	float bestDist = -1.0;
+	for (int s = 1; s <= MaxClients; s++) {
+		if (!SI_IsHangingFromLedge(s)) continue;
+		float sPos[3];
+		GetClientAbsOrigin(s, sPos);
+		float d = GetVectorDistance(siPos, sPos);
+		if (maxDist > 0.0 && d > maxDist) continue;
+		if (bestDist < 0.0 || d < bestDist) {
+			bestDist = d;
+			best = s;
+		}
+	}
+	return best;
+}
+
+// ============================================================================
+// v5.18 功能 1：flow（逃跑路线）感知
+// ----------------------------------------------------------------------------
+// flow = nav 区域到战役出口的弧长递增值。领队 flow 就是"队伍推进到哪了"，
+// flow 更大的位置 = 玩家还没走到但必经的前方。用它做前置埋伏，
+// 把特感从"追着打"变成"等着打"。
+// GetFlow() 定义见本文件上方，-1 表示点不在 nav 上。
+// ============================================================================
+
+// 领队 flow（缓存 0.25s，避免每 tick 重算全队）
+static int  s_iLeadFlowCache    = -1;
+static float s_fLeadFlowCacheAt = 0.0;
+
+stock int SI_GetLeadFlow() {
+	float now = GetGameTime();
+	if (s_iLeadFlowCache >= 0 && now - s_fLeadFlowCacheAt < 0.25) {
+		return s_iLeadFlowCache;
+	}
+	int lead = -1;
+	float origin[3];
+	for (int s = 1; s <= MaxClients; s++) {
+		if (!IsSurvivor(s) || !IsPlayerAlive(s)) continue;
+		GetClientAbsOrigin(s, origin);
+		int f = GetFlow(origin);
+		if (f > lead) lead = f;
+	}
+	s_iLeadFlowCache    = lead;
+	s_fLeadFlowCacheAt  = now;
+	return lead;
+}
+
+// 自身 flow（-1 = 不在 nav 上，调用方须放弃 flow 逻辑走原分支）
+stock int SI_GetOwnFlow(int client) {
+	if (!IsClientInGame(client) || !IsPlayerAlive(client)) return -1;
+	float origin[3];
+	GetClientAbsOrigin(client, origin);
+	return GetFlow(origin);
+}
+
+// 相对领队的 flow 偏移：>0 在队伍前方（路线上游），<0 在后方
+// 返回 SI_FLOW_INVALID 表示任一端不在 nav 上
+#define SI_FLOW_INVALID -99999
+
+stock int SI_GetFlowOffset(int client) {
+	int own  = SI_GetOwnFlow(client);
+	if (own < 0) return SI_FLOW_INVALID;
+	int lead = SI_GetLeadFlow();
+	if (lead < 0) return SI_FLOW_INVALID;
+	return own - lead;
+}
+
+// 探测 flow 增大的方向（朝出口/玩家前方）。8 向采样半径 probeRadius，
+// 取 flow 最大的方向写入 outDir（单位化的水平向量）。
+// 返回 false = 无有效 nav 采样点，调用方须退回原行为。
+stock bool SI_ProbeForwardRouteDir(int client, float outDir[3], float probeRadius = 220.0) {
+	float origin[3];
+	GetClientAbsOrigin(client, origin);
+	int baseFlow = GetFlow(origin);
+	if (baseFlow < 0) return false;
+
+	int   bestFlow = baseFlow;
+	float bestDir[3];
+	bool  found = false;
+
+	for (int i = 0; i < 8; i++) {
+		float ang = float(i) * 45.0;
+		float rad = DegToRad(ang);
+		float probe[3];
+		probe[0] = origin[0] + Cosine(rad) * probeRadius;
+		probe[1] = origin[1] + Sine(rad)   * probeRadius;
+		probe[2] = origin[2];
+
+		int f = GetFlow(probe);
+		if (f < 0) continue;
+		if (f > bestFlow) {
+			bestFlow = f;
+			bestDir[0] = Cosine(rad);
+			bestDir[1] = Sine(rad);
+			bestDir[2] = 0.0;
+			found = true;
+		}
+	}
+
+	if (!found) return false;
+	outDir[0] = bestDir[0];
+	outDir[1] = bestDir[1];
+	outDir[2] = bestDir[2];
+	return true;
+}

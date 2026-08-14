@@ -471,6 +471,25 @@ stock int BT_CreateSmokerTree() {
     BT_AddChild(pullCluster, pullSeq);            // standard pull (fallback)
     int cooldownPull = BT_CreateCooldown(1.8, pullCluster);
 
+    // ==========================================
+    // v5.18 功能 1：flow 前置埋伏
+    // ------------------------------------------
+    // Smoker 是唯一的纯远程控制位，最怕的就是主动接近后被集火。
+    // 出生点若已在队伍推进方向的前方（flow 领先），最优解是原地蹲守
+    // 等玩家走进舌头射程 —— 而不是拱过去暴露。
+    //
+    // 排在拉人簇之后：有 LOS + 射程内时拉人优先（branch 2 先命中），
+    // 只有"够不到人"时才转埋伏，不会压制既有攻击行为。
+    // flow 不可用（无 nav / 三方图）时 CND_IsAheadOnRoute 返回 FAILURE，
+    // 整支退化为不存在，行为与 v5.17 完全一致。
+    // ==========================================
+    int routeAmbushSeq = BT_CreateSequence(4,
+        BT_CreateIsAheadOnRoute(600.0),                        // 领先队伍 600 flow
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),// 有视线就该拉了
+        BT_CreateIsNotInRange(850.0),                          // 射程内交给 closeRangeStrafe
+        BT_CreateAction(ACT_HoldRouteAmbush)
+    );
+
     // Root selector — v4.0.3: 攻击簇冷却 → 走位/选人，挠击消除。
     int root = BT_Create(BTN_SELECTOR);
     // v5.0 控制链核心：拉中 → SI_SignalAttack 开窗（队友跟进集火被拉者，
@@ -482,6 +501,7 @@ stock int BT_CreateSmokerTree() {
     );
     BT_AddChild(root, pinSeq); // 1. v5.0: 拉中 → 开窗 + 拖酸
     BT_AddChild(root, cooldownPull);          // 2. v4.0.3: 全部拉人分支（1.8s 冷却）
+    BT_AddChild(root, routeAmbushSeq);        // 2b. v5.18: flow 前方 → 蹲守等人进射程
     BT_AddChild(root, mode3Approach);         // 3. v4.0: mode 3 → 外侧走位接近
     BT_AddChild(root, openStrategyRoll);      // 4a. open → roll token
     BT_AddChild(root, openS0_Approach);       // 4c. open strat0 → flank approach

@@ -11,3 +11,10 @@ desastre_1a
 hls_15
 labirinferno_parte1
 castle_map_01
+tmr01
+g1m1
+bad_news1
+e3m1_phobosanomaly
+bridge
+w4e1_basement
+dam1_roads

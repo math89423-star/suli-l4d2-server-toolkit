@@ -327,6 +327,127 @@ BT_Status CND_IsAggressiveMode(int client) {
     return BB_GetBool(client, "tank_aggro", false) ? BT_SUCCESS : BT_FAILURE;
 }
 
+// ============================================================================
+// v5.13: 攻击发起者机制（Attack Initiator Role）
+// 来源：Legend of Dragon 战术原则
+// 每波攻击指定一个"发起者"（Boomer 或 Smoker），其他特感作为"骚扰者"
+// ============================================================================
+
+// 角色定义
+#define ROLE_NONE       0
+#define ROLE_INITIATOR  1   // 发起者：优先攻击，全力进攻
+#define ROLE_HARASSER   2   // 骚扰者：保持距离，等待发起者成功后再全力进攻
+
+// Check if this SI is the attack initiator
+BT_Status CND_IsInitiator(int client) {
+    int role = BB_GetInt(client, "wave_role", ROLE_NONE);
+    return (role == ROLE_INITIATOR) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// Check if this SI is a harasser (not initiator)
+BT_Status CND_IsHarasser(int client) {
+    int role = BB_GetInt(client, "wave_role", ROLE_NONE);
+    return (role == ROLE_HARASSER) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// ===========================================================================
+// v5.18 功能 3：齐射闸门节点
+// ===========================================================================
+
+// 齐射令已下 —— 骚扰者可全力进攻
+BT_Status CND_WaveStrikeOrdered(int client) {
+    return Wave_IsStrikeOrdered() ? BT_SUCCESS : BT_FAILURE;
+}
+
+// 待命阶段 —— 骚扰者到位但按住不打
+BT_Status CND_WaveStaging(int client) {
+    return Wave_IsStaging() ? BT_SUCCESS : BT_FAILURE;
+}
+
+// 骚扰者解放闸：发起者得手 OR 齐射令下（v5.18 起替代裸 CND_InitiatorEngaged
+// 作为骚扰分支的放行条件，两种战术并存）
+//
+// v5.19 FIX（用户反馈"Hunter 远处不扑，傻站着又跑走"根因之一）：
+// 原版只有两条放行路径，二者都可能长期不成立 —— AssignWaveRole 只把
+// 首个 Boomer/Smoker 设为 INITIATOR，其余（含所有 Hunter，class 3 永远
+// 进 else）一律 ROLE_HARASSER。若本波没刷出 Boomer/Smoker，
+// g_bWaveHasInitiator 恒 false，CND_InitiatorEngaged 永假；
+// 齐射又要等 ai_wave_sync_timeout（12s）。骚扰分支排在扑击分支之前
+// （root 分支 4），于是 Hunter 全程走 HarasserApproach：
+//   600-1000u → 横移原地（观感"傻站着"）
+//   <600u     → 转身后退（观感"跑走"）
+// 补两条放行：
+//   ① 硬超时 ai_harass_max_hold（默认 5s）—— 蹲坑再久也得打
+//   ② 目标已进扑击距离且有 LOS —— 到嘴边的肉不放
+static float s_fHarassHoldStart[MAXPLAYERS + 1];
+static ConVar s_hHarassHold = null;      // 缓存句柄：本函数是每 tick 每 SI 热路径
+static ConVar s_hHarassGate = null;      // FindConVar 是字符串查表，不能每 tick 调
+
+stock void Harass_ResetHold(int client) {
+    if (client > 0 && client <= MAXPLAYERS) s_fHarassHoldStart[client] = 0.0;
+}
+
+BT_Status CND_HarasserReleased(int client) {
+    if (Wave_IsStrikeOrdered()) return BT_SUCCESS;
+    if (CND_InitiatorEngaged(client) == BT_SUCCESS) return BT_SUCCESS;
+
+    if (s_hHarassHold == null) s_hHarassHold = FindConVar("ai_harass_max_hold");
+    if (s_hHarassGate == null) s_hHarassGate = FindConVar("ai_fast_pounce_proximity");
+
+    // ① 硬超时先判（一次浮点比较）—— 放在 ② 之前纯为省开销：两条是 OR
+    // 关系，结果不受顺序影响，但超时一旦成立就直接返回，后面的
+    // GetSurvivorProximity + TraceRay 完全不用跑。
+    float now = GetGameTime();
+    if (s_fHarassHoldStart[client] <= 0.0) {
+        s_fHarassHoldStart[client] = now;   // 首次进入骚扰态打时间戳
+    } else {
+        float maxHold = (s_hHarassHold != null) ? s_hHarassHold.FloatValue : 5.0;
+        if (now - s_fHarassHoldStart[client] >= maxHold) return BT_SUCCESS;
+    }
+
+    // ② 到嘴边就打：最近幸存者已在扑击距离内且视线通畅
+    float pounceGate = (s_hHarassGate != null) ? s_hHarassGate.FloatValue : 1000.0;
+    float own[3];
+    GetClientAbsOrigin(client, own);
+    int prox = GetSurvivorProximity(own);
+    if (prox <= 0 || float(prox) > pounceGate) return BT_FAILURE;
+
+    int near = GetClosestSurvivor(own);
+    if (near <= 0) return BT_FAILURE;
+
+    float tPos[3];
+    GetClientAbsOrigin(near, tPos);
+    TR_TraceRayFilter(own, tPos, MASK_SHOT, RayType_EndPoint, TracerayFilter, client);
+    return (TR_GetFraction() > 0.9) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// Check if the initiator has successfully engaged (pinned a survivor)
+BT_Status CND_InitiatorEngaged(int client) {
+    // 检查是否有 Boomer 或 Smoker 成功控制了幸存者
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsClientInGame(i) || !IsPlayerAlive(i)) continue;
+        if (GetClientTeam(i) != 3) continue;  // 必须是特感
+
+        int class = GetEntProp(i, Prop_Send, "m_zombieClass");
+
+        // 检查 Boomer（呕吐成功）或 Smoker（拉人成功）
+        if (class == 2) {  // Boomer
+            // 检查是否正在呕吐或刚呕吐过（黑板标记）
+            if (BB_GetBool(i, "just_vomited", false)) {
+                return BT_SUCCESS;
+            }
+        } else if (class == 1) {  // Smoker
+            // 检查是否正在拉人
+            int victim = GetEntPropEnt(i, Prop_Send, "m_tongueVictim");
+            if (victim > 0) {
+                return BT_SUCCESS;
+            }
+        }
+    }
+
+    return BT_FAILURE;
+}
+
 // Check if the current target is pinned (avoid dogpiling)
 // v5.7: 优先黑板 target（与 HasTargetLOS/IsTargetInRange 同口径）——
 // 原版只读引擎 GetClientAimTarget，与 LOS/距离门控量的人不一致，
@@ -340,6 +461,141 @@ BT_Status CND_IsTargetPinned(int client) {
         return BT_SUCCESS;
     }
     return BT_FAILURE;
+}
+
+// ===========================================================================
+// v5.18 功能 2：挂边感知节点
+// ===========================================================================
+
+// 黑板 target 挂边中 —— Tank/Charger 应优先击落（一下即死）
+BT_Status CND_TargetIsHanging(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0) return BT_FAILURE;
+    return SI_IsHangingFromLedge(target) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// 黑板 target 可被控制（站立且未被控）——
+// 控制类特感（Hunter/Smoker/Jockey/Charger）释放前的守卫：
+// 挂边/倒地的人打上去是空转冷却
+BT_Status CND_TargetIsPinnable(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0) return BT_FAILURE;
+    return SI_IsPinnable(target) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// 取最近挂边幸存者写入黑板（UserParam1 = 最大距离，0 = 不限）
+BT_Status ACT_AcquireHangingTarget(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    float maxDist = g_fBTNodeUserParam1[nodeId];
+    float pos[3];
+    GetClientAbsOrigin(client, pos);
+    int t = SI_GetHangingSurvivor(pos, maxDist);
+    if (t <= 0) return BT_FAILURE;
+    BB_SetInt(client, "target", t);
+    return BT_SUCCESS;
+}
+
+stock int BT_CreateAcquireHangingTarget(float maxDist) {
+    int n = BT_CreateAction(ACT_AcquireHangingTarget);
+    BT_SetUserParam1(n, maxDist);
+    return n;
+}
+
+// ===========================================================================
+// v5.18 功能 1：flow 路线感知节点
+// ---------------------------------------------------------------------------
+// 全部节点在 flow 不可用（无 nav / 三方图无 nav 数据）时返回 FAILURE，
+// 让行为树自然退回既有分支 —— 不改变无 nav 图的行为。
+// ===========================================================================
+
+// 自身在队伍前方（路线上游）。UserParam1 = 最小领先量（flow 单位）
+BT_Status CND_IsAheadOnRoute(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    float minLead = g_fBTNodeUserParam1[nodeId];
+    int off = SI_GetFlowOffset(client);
+    if (off == SI_FLOW_INVALID) return BT_FAILURE;
+    return (float(off) >= minLead) ? BT_SUCCESS : BT_FAILURE;
+}
+
+stock int BT_CreateIsAheadOnRoute(float minLead) {
+    int n = BT_CreateCondition(CND_IsAheadOnRoute);
+    BT_SetUserParam1(n, minLead);
+    return n;
+}
+
+// 自身落在队伍后方。UserParam1 = 最小落后量（正数，内部取负比较）
+BT_Status CND_IsBehindOnRoute(int client) {
+    int nodeId = g_iBTCurrentTickNode;
+    float minBehind = g_fBTNodeUserParam1[nodeId];
+    int off = SI_GetFlowOffset(client);
+    if (off == SI_FLOW_INVALID) return BT_FAILURE;
+    return (float(off) <= -minBehind) ? BT_SUCCESS : BT_FAILURE;
+}
+
+stock int BT_CreateIsBehindOnRoute(float minBehind) {
+    int n = BT_CreateCondition(CND_IsBehindOnRoute);
+    BT_SetUserParam1(n, minBehind);
+    return n;
+}
+
+// 朝 flow 增大方向移动 —— 抢到玩家前方去（前置埋伏的前半段）。
+// 方向缓存 1.5s：8 向 nav 采样不便每 tick 做，且频繁改向会原地抖。
+BT_Status ACT_MoveToRouteAhead(int client) {
+    float now = GetGameTime();
+    float nextProbe = BB_GetFloat(client, "_route_probe_next", 0.0);
+    float dir[3];
+
+    if (now >= nextProbe) {
+        if (!SI_ProbeForwardRouteDir(client, dir)) {
+            // 无有效采样：标记短冷却避免每 tick 重试，交还控制权
+            BB_SetFloat(client, "_route_probe_next", now + 0.5);
+            return BT_FAILURE;
+        }
+        BB_SetFloat(client, "_route_dir_x", dir[0]);
+        BB_SetFloat(client, "_route_dir_y", dir[1]);
+        BB_SetFloat(client, "_route_probe_next", now + 1.5);
+    } else {
+        dir[0] = BB_GetFloat(client, "_route_dir_x", 0.0);
+        dir[1] = BB_GetFloat(client, "_route_dir_y", 0.0);
+        if (dir[0] == 0.0 && dir[1] == 0.0) return BT_FAILURE;
+    }
+
+    float yaw = RadToDeg(ArcTangent2(dir[1], dir[0]));
+    BT_SetAimAngles(client, 0.0, yaw);
+    BT_AddButton(client, IN_FORWARD);
+    BT_AddButton(client, IN_SPEED);   // 跑起来，抢位要快
+    return BT_RUNNING;
+}
+
+// 在路线前方蹲守 —— 已抢到前方，停下等玩家走进来（前置埋伏的后半段）。
+// 不主动接近：接近就暴露，埋伏的价值在于玩家自己走进射程。
+BT_Status ACT_HoldRouteAmbush(int client) {
+    BT_ResetMovement(client);
+
+    // 朝玩家来的方向看（flow 减小方向 = 队伍推进来的方向）
+    int lead = -1;
+    float bestFlowDist = -1.0;
+    float own[3];
+    GetClientAbsOrigin(client, own);
+    for (int s = 1; s <= MaxClients; s++) {
+        if (!IsSurvivor(s) || !IsPlayerAlive(s)) continue;
+        float sPos[3];
+        GetClientAbsOrigin(s, sPos);
+        float d = GetVectorDistance(own, sPos);
+        if (bestFlowDist < 0.0 || d < bestFlowDist) {
+            bestFlowDist = d;
+            lead = s;
+        }
+    }
+    if (lead > 0) {
+        float sPos[3], dirv[3];
+        GetClientAbsOrigin(lead, sPos);
+        MakeVectorFromPoints(own, sPos, dirv);
+        float ang[3];
+        GetVectorAngles(dirv, ang);
+        BT_SetAimAngles(client, ang[0], ang[1]);
+    }
+    return BT_RUNNING;
 }
 
 // ---------------------------------------------------------------------------

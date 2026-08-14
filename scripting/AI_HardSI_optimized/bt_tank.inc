@@ -571,7 +571,13 @@ stock int BT_CreateTankTree() {
         BT_CreateAction(ACT_AcquirePinTarget)
     );
 
+    // v5.18 功能 2：挂边优先 —— 挂边者一拳打落即死，是 Tank 效率最高的目标。
+    // 排在选人链最前（协同窗口之前）：挂边是限时机会，队友几秒就拉起来了，
+    // 而协同 pin 目标随时都能打。400u 内才接管，不为一个挂边者横跨半张图。
+    int selectHanging = BT_CreateAcquireHangingTarget(400.0);
+
     int targetSelector = BT_Create(BTN_SELECTOR);
+    BT_AddChild(targetSelector, selectHanging);        // v5.18: 挂边者优先击落
     BT_AddChild(targetSelector, coordPinSeq);         // v4.1: 窗口内锁 pin 目标
     BT_AddChild(targetSelector, selectDamager);      // 防风筝：有人打 Tank 追射手
     BT_AddChild(targetSelector, selectCluster);      // v5.0: 开团 → 冲密集区
