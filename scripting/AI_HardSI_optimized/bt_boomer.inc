@@ -37,6 +37,7 @@ BT_Status BoomerCnd_HasVomited(int client) {
     if (GetGameTime() - vomitTime > 10.0) {
         BB_SetFloat(client, "_boomer_vomit_time", 0.0);
         BB_SetBool(client, "_boomer_approach", false);
+        BB_SetBool(client, "just_vomited", false);   // v5.22: 与吐中标记同生命周期清零
         return BT_FAILURE;
     }
     return BT_SUCCESS;
@@ -348,6 +349,12 @@ public OnPlayerBoomed(Handle:event, const String:name[], bool:dontBroadcast) {
         // 只在真的吐到人后才锁 + 掷 80/20 后置行为。
         BB_SetBool(attacker, "_boomer_vomit_hit", true);
         BB_SetFloat(attacker, "_boomer_vomit_time", GetGameTime());
+        // v5.22 FIX: 补写 just_vomited —— CND_InitiatorEngaged(bt_common.inc:436)
+        // 读此键判定 Boomer 发起者是否得手，但全代码库从无写入点 → 恒假 →
+        // Boomer 当发起者时骚扰者(Hunter/Jockey/Charger)只能靠 5s 硬超时放行，
+        // 配合窗口延迟 5s。此键与 _boomer_vomit_time 同生命周期，在 Boomer_Tick
+        // 的 10s 到期处(bt_boomer.inc:38 一带)一并清零。
+        BB_SetBool(attacker, "just_vomited", true);
         bool approach = (GetRandomFloat(0.0, 1.0) < 0.8);
         BB_SetBool(attacker, "_boomer_approach", approach);
     }

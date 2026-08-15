@@ -314,7 +314,7 @@ stock int BT_CreateSmokerTree() {
     // Strat 0: Flank pull — move to side → pull from unexpected angle
     int openS0_Approach = BT_CreateSequence(4,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
-        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),  // v5.22: HasLOS → HasTargetLOS（引擎标志失真）
         BT_CreateAction(ACT_FlankApproach)
     );
     // v5.6: 移除序列内 AcquireTarget（选人只归 branch 8，2s 一次 + 4s 时效；
@@ -331,9 +331,10 @@ stock int BT_CreateSmokerTree() {
     // Strat 1: Erratic pull — zigzag approach → pull from varied angle
     // v3.7 FIX: was HasLOS (dead code — pull fires first when HasLOS=true).
     // Changed to Inverter(HasLOS): approach when no LOS to regain angle.
+    // v5.22: HasLOS → HasTargetLOS（引擎标志失真，与拉人分支口径统一）
     int openS1_Approach = BT_CreateSequence(4,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
-        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
         BT_CreateAction(ACT_ErraticApproach)
     );
     // v5.6: 同 openS0_Pull
@@ -424,7 +425,7 @@ stock int BT_CreateSmokerTree() {
     int mode3Approach = BT_CreateSequence(4,
         BT_CreateIsMode(3),
         BT_CreateAction(SmokerAct_AcquireBoomedTarget),
-        BT_CreateInverter(BT_CreateCondition(CND_HasLOS)),
+        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),  // v5.22: 序列内已获取 boomed target，改口径
         BT_CreateAction(SmokerAct_ApproachOutside)
     );
 

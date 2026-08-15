@@ -240,9 +240,11 @@ BT_Status HunterCond_UnderThreat(int client) {
 
         float distance = GetVectorDistance(hunterPos, survivorPos);
 
-        // 距离必须在 300-800u 之间
-        // 太近（<300u）来不及反应，太远（>800u）没有威胁
-        if (distance < 300.0 || distance > 800.0) continue;
+        // v5.22 FIX: 距离限制改为 <400u 高危区 —— 原版 300-800u 全区间触发，
+        // 打断中远距离的横移接近节奏（用户观感"跳一下蹲一下"，正常接近被
+        // 跳跃抢占）。现在只在近距离（<400u）被瞄准时规避，400u 外依靠横移
+        // 接近+扑击，不跳。下限 150u：极近距离来不及反应，且扑击分支已接管。
+        if (distance < 150.0 || distance >= 400.0) continue;
 
         // 计算幸存者到 Hunter 的方向向量
         float toHunter[3], dir[3];
