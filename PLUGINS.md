@@ -1,6 +1,6 @@
 # L4D2 服务器插件清单
 
-> 服务器: 81.71.101.135:27015 | 73 active / 0 disabled | 更新时间: 2026-08-03
+> 服务器: 81.71.101.135:27015 | 74 active / 0 disabled | 更新时间: 2026-08-15
 
 ## 🛠 核心依赖
 
@@ -87,6 +87,7 @@
 | `l4dmultislots.smx` | 多人生存者 — 最多 24 人，最少 4 人，免大厅等待；alive_bot_time 30 |
 | `Defib_Fix.smx` | 电击器修复 v2.0.2 本地适配 — 修 5+ 幸存者电击错乱/电到活人（GameConfGetAddress+全局 detour）+ 复活清尸 native L4D2_KillSurvivorDeathModel（2026-08-03） |
 | `l4d2_chainsaw_fuel.smx` | 电锯燃料量控制 |
+| `l4d2_enhanced_adrenaline.smx` | 肾上腺素强化 v1.0.0 — 持续时间延长至 45s（l4d2_adrenaline_duration）+ 近战挥砍速度 +25%（l4d2_adrenaline_melee_boost，依赖 WeaponHandling 的 WH_OnMeleeSwing）|
 | `l4d2_loot_drop.smx` | 击杀掉落 v1.8.0 — 小僵尸1%(胆汁/土制)｜特感4%单件(燃烧瓶1/药肾上1/弹药包2)｜Tank必掉3件(医疗/电击/M60/榴弹4选1+投掷物+小药)｜Witch 4选1(高爆35/燃烧35/医疗15/电击15) |
 | `l4d2_give_items.smx` | 右键递物 — 手持投掷物对队友右键递出（对方槽位空才给）；医疗包/药/电击器 cvar 开关默认关 |
 | `l4d2_common_kill_reward.smx` | 击杀小僵尸奖励 |
