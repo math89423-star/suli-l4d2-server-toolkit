@@ -937,8 +937,17 @@ BT_Status ACT_StrafeMoveToTarget(int client) {
 // Creates unpredictable pounce angles — survivors can't easily dodge.
 // Uses sum-of-3-uniforms to approximate Gaussian with ~15° std dev.
 BT_Status ACT_GaussianAimOffset(int client) {
+    // v5.21 FIX: 从累加器读取而不是 EyeAngles —— SnapAimToBlackboardTarget 写的
+    // 是累加器，同一 tick 内 EyeAngles 还是旧值。读 EyeAngles 导致偏移加到上一
+    // tick 的陈旧视角上，覆盖掉前面节点刚算好的精确瞄准 → 观感直线扑击。
     float ang[3];
-    GetClientEyeAngles(client, ang);
+    if (g_bBT_AnglesSet[client]) {
+        ang[0] = g_fBT_Angles[client][0];
+        ang[1] = g_fBT_Angles[client][1];
+        ang[2] = g_fBT_Angles[client][2];
+    } else {
+        GetClientEyeAngles(client, ang);
+    }
     float offset = (GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0)) * 15.0;
     ang[1] += offset;
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);

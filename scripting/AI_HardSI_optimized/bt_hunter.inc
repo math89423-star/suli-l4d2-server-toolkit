@@ -639,8 +639,15 @@ BT_Status HunterCond_HighPounceChance(int client) {
 // ============================================================================
 
 BT_Status HunterAct_WideGaussOffset(int client) {
+    // v5.21 FIX: 同 ACT_GaussianAimOffset —— 从累加器读，不读 EyeAngles
     float ang[3];
-    GetClientEyeAngles(client, ang);
+    if (g_bBT_AnglesSet[client]) {
+        ang[0] = g_fBT_Angles[client][0];
+        ang[1] = g_fBT_Angles[client][1];
+        ang[2] = g_fBT_Angles[client][2];
+    } else {
+        GetClientEyeAngles(client, ang);
+    }
     float offset = (GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0)) * 35.0;
     ang[1] += offset;
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
@@ -698,7 +705,8 @@ stock int BT_CreateHunterTree() {
     // 已确认扑击射程无 cvar（全硬编码），第 111 行记录 1000 是 v4.0.1 实战
     // 验证值。500 门控让 500-1000u 全部扑击分支不可达（观感"远处根本不会扑"），
     // 现恢复 1000，并把引擎 ready_range 一起抬到 1000 消除两者不一致。
-    float fPounceRange = 1000.0;
+    // v5.21: 1000→1500 —— 用户要求从更远处就扑击，提升攻击性
+    float fPounceRange = 1500.0;
     float fStraightRange = 200.0;
     ConVar hCvar = FindConVar("ai_fast_pounce_proximity");
     if (hCvar != null) fPounceRange = GetConVarFloat(hCvar);
@@ -727,14 +735,17 @@ stock int BT_CreateHunterTree() {
     // v5.13: 骚扰模式 —— 作为骚扰者时保持距离，等待发起者开团
     // 条件：是骚扰者 AND 尚未解放
     // v5.18: 解放条件放宽为 CND_HarasserReleased（发起者得手 OR 齐射令下）
-    int harassSeq = BT_CreateSequence(3,
-        BT_CreateCondition(CND_IsHarasser),
-        BT_CreateInverter(BT_CreateCondition(CND_HarasserReleased)),
-        BT_CreateSequence(2,
-            BT_CreateAction(ACT_AcquireClosestTarget),
-            BT_CreateAction(HunterAct_HarasserApproach)
-        )
-    );
+    // v5.21: 用户反馈 Hunter 体感无差异 —— 骚扰机制导致 Hunter 永远保持距离不扑击
+    //        （只有 Boomer/Smoker 能当发起者，Hunter 100% 是骚扰者）。
+    //        完全禁用骚扰模式，改为纯攻击性 AI。
+    // int harassSeq = BT_CreateSequence(3,
+    //     BT_CreateCondition(CND_IsHarasser),
+    //     BT_CreateInverter(BT_CreateCondition(CND_HarasserReleased)),
+    //     BT_CreateSequence(2,
+    //         BT_CreateAction(ACT_AcquireClosestTarget),
+    //         BT_CreateAction(HunterAct_HarasserApproach)
+    //     )
+    // );
 
     // v3.2: HasHighGround check so Hunter only climbs when there is
     // actually elevated ground above. Without it, 35% of crouched ticks trace-hit
@@ -1061,7 +1072,7 @@ stock int BT_CreateHunterTree() {
     BT_AddChild(root, missEscSeq);              // 1. escape after miss
     BT_AddChild(root, wallPounceSeq);           // 2. v5.16: wall pounce when airborne
     BT_AddChild(root, evasiveJumpSeq);          // 3. v5.12: evasive jump when aimed at
-    BT_AddChild(root, harassSeq);               // 4. v5.15: harasser mode (keep distance)
+    // 4. v5.21: 骚扰模式已禁用（方案 C 纯攻击性 AI）—— Hunter 不再保持距离等待发起者
     BT_AddChild(root, highPounceSeq);           // 5. high-ground positioning
     BT_AddChild(root, narrowPounceSeq);         // 6. v3.2: narrow → straight pounce
     BT_AddChild(root, coordPounceSeq);          // 6.5. v4.0: mode 4/6 分散扑（防 dogpile）
@@ -1091,12 +1102,12 @@ public Hunter_OnModuleStart() {
     // reload 时引擎 cvar 常驻 → 存在性判断防重复创建告警。
     ConVar hCvar = FindConVar("ai_fast_pounce_proximity");
     if (hCvar == null) {
-        hCvar = CreateConVar("ai_fast_pounce_proximity", "1000",
-            "Hunter 扑击距离门控（v5.19: 恢复 v4.0.1 实战验证值 1000）",
-            FCVAR_NONE, true, 100.0, true, 2000.0);
-    } else if (hCvar.FloatValue < 1000.0) {
-        // v5.19: reload 时引擎 cvar 常驻，旧值 500 会被继承 → 强制抬回
-        hCvar.SetFloat(1000.0);
+        hCvar = CreateConVar("ai_fast_pounce_proximity", "1500",
+            "Hunter 扑击距离门控（v5.21: 增加到 1500u，从更远处就扑击）",
+            FCVAR_NONE, true, 100.0, true, 3000.0);
+    } else if (hCvar.FloatValue < 1500.0) {
+        // v5.21: 增加扑击距离到 1500u，让 Hunter 更激进
+        hCvar.SetFloat(1500.0);
     }
     hCvar = FindConVar("ai_straight_pounce_proximity");
     if (hCvar == null) {
@@ -1105,9 +1116,8 @@ public Hunter_OnModuleStart() {
             FCVAR_NONE, true, 50.0, true, 1000.0);
     }
     SetConVarInt(FindConVar("hunter_committed_attack_range"), 10000);
-    // v5.19: 500→1000 —— 与 BT 门控 fPounceRange 对齐。引擎默认就是 500，
-    // v5.3 误把这个"自设值"当成引擎硬限制来反推 BT 门控。
-    SetConVarInt(FindConVar("hunter_pounce_ready_range"), 1000);
+    // v5.21: 1000→1500 —— 与 BT 门控 fPounceRange 对齐，让 Hunter 从更远处就准备扑击
+    SetConVarInt(FindConVar("hunter_pounce_ready_range"), 1500);
     SetConVarInt(FindConVar("hunter_leap_away_give_up_range"), 0);
     SetConVarInt(FindConVar("hunter_pounce_max_loft_angle"), 0);
 }

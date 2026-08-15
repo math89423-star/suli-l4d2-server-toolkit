@@ -9,6 +9,26 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.8.0（2026-08-15）：新增「火力支援IV-AGM导弹」（artillery6，15000 分）
+ * ——仿 BF5 V1 小队增援：单发导弹从天俯冲 + 落点一次瞬爆清场。与 I/II/III
+ * 的「持续 N 秒落罐」机制根本不同（那三档走 Art_LaunchBarrage 按秒排队），
+ * V1 走独立 V1_Launch 路径。素材全原版零客户端分发：
+ *   模型 models/missiles/f18_agm65maverick.mdl（c1m2 武器店那发导弹）
+ *        ⚠ 无 .phy → prop_physics 报 "Can't create physics object"，
+ *          必须 prop_dynamic_override + TeleportEntity 插值推轨迹
+ *   粒子 missile_hit_explosionshockwave + gen_rockblast_posZ +
+ *        gas_explosion_main + gen_dest_risingsmoke（用户逐个试播定稿）
+ *        ⚠ 必须 AddToStringTable("ParticleEffectNames") 注册，否则静默不生成
+ *        ⚠ 不用 missile_hit1_f / tanker_fireball / gen_dest_fireball——
+ *          那三个是油罐车着火效果，会留持续火焰；BF5 的 V1 只有向上浮尘烟云
+ *   音效 overpass_jets.wav（俯冲）+ Tanker_Explosion.wav（爆炸）
+ *        ⚠ 落地前必须 StopSound 掐飞行音轨，否则两轨叠响（听着像播了多次）
+ * 平衡默认（全 cvar 可热调）：杀伤半径 1000/700/500（露天/中层/室内）、
+ * 俯冲 1.6s / 2600u 高、预警 8s（比其它档长，给逃跑时间）、红色瞄准圈、
+ * Tank 秒杀、幸存者友伤开（BF5 原味）、每图全服限购 1 次。
+ * ⚠ SHOP_SLOTS 24→25：必须与 g_ShopTable 初始化行数严格一致，少了 spcomp
+ * 静默截断末行（v1.8.0 前本文件就是 25 行配 24，弹药补充被吃掉）。
+ *
  * v1.7.5（2026-08-12）：**修复透视特感死亡残留发光框**（用户实测：特感
  * 死亡后蓝色透视框不消失）——根因：WallhackApplyGlow/WallhackClearGlow
  * 都跳过 !IsPlayerAlive 的特感，m_iGlowType 3 残留在尸体/鬼魂实体上
@@ -66,7 +86,7 @@
  * 瓦斯罐/煤气罐 100、汽油桶 3500、止痛药/肾上腺素 1000、电击器 3500、
  * 医疗包 3000、激光 1500、M60 5000、电锯 5000、榴弹 6500、复活币 8500、
  * 透视 4000/5min（生效期间不可重复购买）、近战盲盒 1000、烟花 1200、
- * 火力支援I-绿色雨幕 3500/15s、火力支援II-地狱烈火 6500/25s、火力支援III-饱和轰炸 7500/30s（罐+榴弹混合）。
+ * 火力支援I-绿色雨幕 3500/15s、火力支援II-地狱烈火 6500/25s、火力支援III-区域轰炸 7500/30s（罐+榴弹混合）。
  * v1.7.3: + 弹药补充 800（补给品，补满主/副武器弹匣+后备，上限表见 ShopAmmoRefill）。
  *
  * v1.0.1（2026-08-03）：火力支援仅收紧半径（时长 30s/25s 不变）——
@@ -209,7 +229,7 @@
  * ③菜单分类顺序：武器/道具/医疗/[火力支援(第4)]/[其他(第5)]——AddItem
  * 顺序 0,1,2,4,3（cat 值不变，显示顺序调换）。
  * v1.4.4（2026-08-03）：火力支援 II/III 对调编号 + 轰炸涨价（用户实测反馈
- * "2 和 3 都过强"）——「火力支援III-饱和轰炸」7500/30s（原 II-轰炸 5500，其余
+ * "2 和 3 都过强"）——「火力支援III-区域轰炸」7500/30s（原 II-轰炸 5500，其余
  * 参数不变）、「火力支援II-地狱烈火」6500/25s（原 III-燃烧，全不变）。编号按
  * 价格升序：I-胆汁雨 3500 < II-燃烧 6500 < III-轰炸 7500。
  * v1.4.5（2026-08-03）：正式定名（用户拍板，弃用"胆汁雨/燃烧/轰炸"直白词）——
@@ -230,7 +250,7 @@
  * v1.4.9（2026-08-03）：分类涨价（用户拍板）——投掷品 ×1.5：胆汁 1275/
  * 土质炸弹 1350/燃烧瓶 3750；补给品 ×1.25：药/肾上腺素 1250、电击器 4375、
  * 医疗包 3750、燃烧弹包/高爆弹包 625。
- * v1.5.0（2026-08-03）：火力支援III 改名「饱和轰炸」（用户拍板，仅显示名，
+ * v1.5.0（2026-08-03）：火力支援III 改名「区域轰炸」（用户拍板，仅显示名，
  * 覆盖商店表/cvar 描述/注释全部文案；classname/kind/价格机制全不变）。
  * v1.5.1（2026-08-03）：复活套装（用户拍板）——监听 si_hud v1.9.2 的
  * SH_OnClientRespawned 全局 forward，复活币死亡复活时发放固定装备 +
@@ -249,7 +269,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.7.5"
+#define PLUGIN_VERSION "1.8.0"
 
 // ============================================================================
 // SH_ public API（l4d2_si_hud >= v1.9.0 导出；契约见 include/l4d2_si_hud.inc）
@@ -305,6 +325,35 @@ ConVar g_cvArt5Duration;    // v1.3.0: V-混合轰炸独立时长（TEST 25s）/
 ConVar g_cvArt5RadiusOut;
 ConVar g_cvArt5RadiusMid;
 ConVar g_cvArt5RadiusSmall;
+// v1.8.0: IV-AGM导弹（artillery6）。单发瞬爆，无 duration 概念，只有杀伤半径 +
+// 俯冲时长 + 各目标类型伤害。三个平衡开关（Tank 秒杀 / 幸存者友伤 / 每图限购）
+// 全部走 cvar，随时热改不用重编。
+ConVar g_cvArt6RadiusOut;
+ConVar g_cvArt6RadiusMid;
+ConVar g_cvArt6RadiusSmall;
+ConVar g_cvArt6DiveTime;    // 俯冲时长（秒），从生成到落地
+ConVar g_cvArt6DiveHeight;  // 俯冲起始高度（落点上方）
+ConVar g_cvArt6TankKill;    // 1=Tank 秒杀 0=按 tank_damage 扣血
+ConVar g_cvArt6TankDamage;  // TankKill=0 时对 Tank 的伤害
+ConVar g_cvArt6Friendly;    // 1=幸存者也被炸（BF5 原味）0=幸存者免伤
+// v1.8.2: 幸存者分圈伤害（用户定稿：内圈秒杀倒地太无脑，改成只有贴脸的才倒地）
+ConVar g_cvArt6SurvInner;   // 内圈半径（秒杀倒地区）
+ConVar g_cvArt6SurvDmgIn;   // 内圈边界伤害（刚出秒杀区）
+ConVar g_cvArt6SurvDmgOut;  // 外圈边缘伤害（冲击波最远处）
+// v1.8.3: 屏幕震动 + 物理推力
+ConVar g_cvArt6ShakeAmp;    // 震动幅度（0=关闭）
+ConVar g_cvArt6ShakeFreq;   // 震动频率 Hz
+ConVar g_cvArt6ShakeDur;    // 震动持续秒数
+ConVar g_cvArt6PushForce;   // 推力强度（0=关闭）
+ConVar g_cvArt6MaxPerMap;   // 每图全服限购次数（0=不限）
+ConVar g_cvArt6WarnTime;    // 预警秒数（覆盖通用 warn）
+// v1.8.1: 特效铺开——单个粒子的尺寸烘死在 pcf 里，服务端改不了（info_particle_system
+// 在 L4D2 没有 scale 键值，m_flModelScale 对粒子无效）。要让爆炸看起来覆盖到杀伤
+// 半径那么大，唯一办法是在落点周围环形补放同一套粒子。
+ConVar g_cvArt6FxRings;     // 环数（0=只放落点中心）
+ConVar g_cvArt6FxPerRing;   // 每环点数
+ConVar g_cvArt6FxSpread;    // 最外环半径占杀伤半径的比例（0.0-1.0）
+ConVar g_cvArt6FxWave;      // 逐环延迟秒数（制造由内向外的扩张波）
 ConVar g_cvArt5CanPct;      // v1.3.0: 罐子占比 %（余下为榴弹）
 ConVar g_cvArtHeightMin;
 ConVar g_cvArtHeightMax;
@@ -340,7 +389,8 @@ ConVar g_cvRespawnHealth;   // v1.5.1: 复活套装满血值（0=不动）
 #define ART4_GRENADES_MIN_PER_SEC 1
 #define ART4_GRENADES_MAX_PER_SEC 2
 // v1.3.0: V-混合轰炸每秒总件数（罐+榴弹混合，用户拍板可调）
-#define ART5_MIN_PER_SEC 2
+// v1.8.18: 改为每 2.5 秒 1-3 个（实测 1.5s×2-3 太快）
+#define ART5_MIN_PER_SEC 1
 #define ART5_MAX_PER_SEC 3
 // v1.2.0: 引信 ~1.2s——生成高度特调 1500u（-900 初速 ≈1.1s 触地，贴近
 // 地面空爆）；罐子高度（1800-2600）会让榴弹在半空空爆，伤害打空浪费
@@ -358,7 +408,7 @@ ConVar g_cvRespawnHealth;   // v1.5.1: 复活套装满血值（0=不动）
 #define ART3_BREAK_PARTICLE  "boomer_explosion"
 #define ART3_CHASE_DURATION  8.0      // 吸引实体存活秒数（控场时长）
 
-#define SHOP_SLOTS      24      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）
+#define SHOP_SLOTS      25      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）；v1.8.0: 24→25（火力支援IV-AGM导弹）——⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
 
 #define MELEE_POOL_COUNT   12
 
@@ -395,20 +445,26 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "医疗包",      "weapon_first_aid_kit",             3750,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3000）
     { "激光瞄准",    "weapon_upgradepack_laser_sight",   1500,  0,  0 },   // v1.7.96: 用户定稿 1500（原 3500）
     { "M60 轻机枪",  "weapon_rifle_m60",                 5000,  0,  0 },   // v1.7.96: 用户定稿 5000
-    { "电锯",        "weapon_chainsaw",                  5000,  0,  0 },   // v1.7.44
+    { "电锯",        "weapon_chainsaw",                  3500,  0,  0 },   // v1.8.6: 降价 5000→3500
     { "榴弹发射器",  "weapon_grenade_launcher",          6500,  0,  0 },   // v1.7.96: 用户定稿 6500（原 8000）
     // v1.7.0: "复活币 8500" 商品已删除（复活体系改为积分复活，见 si_hud v1.12.0）
     // v1.7.1: 删除后透视特感滑到槽 11，WALLHACK_SLOT 已同步改 11
-    { "透视特感",    "wallhack",                         4000,  0,  3 },   // v1.8.1: 用户定稿 4000/5分钟（原 6000/3分钟；可续费至 15 分钟）
+    { "透视特感",    "wallhack",                         5000,  0,  3 },   // v1.8.6: 涨价 4000→5000
     { "近战盲盒",    "melee_box",                        1000,  0,  0 },   // v1.7.96: 用户定稿 1000（原 3000）
     { "烟花",        "weapon_fireworkcrate",             1200,  0,  1 },   // v1.7.96: 用户定稿 1200（原 2500）
     // v1.4.3: 按价格重排编号（用户拍板）——胆汁雨 3500 最低 = I、轰炸 5500 = II、
     // 燃烧 6500 = III（原 III-胆汁雨/I-轰炸/II-燃烧）；v1.4.5 定名：绿色雨幕/地狱烈火/地毯轰炸
-    { "火力支援II-地狱烈火", "artillery2",                 8500,   0,  4 },  // v1.4.8: 用户定稿涨价 6500→8500（25s）；v1.0.1: 半径收紧 10%
-    { "火力支援I-绿色雨幕", "artillery3",             4500,  0,  4 }   // v1.4.8: 用户定稿涨价 3500→4500（15s，范围=轰炸 75%，每 2 秒 1-2 罐）
-    // v1.3.0: 支援V-混合轰炸 → v1.4.0 转正定稿「火力支援III-饱和轰炸」5500/30s
+    // v1.8.5: 范围收紧20% + 频率降低 + 价格调整：绿色雨幕6500/地狱烈火10000/区域轰炸14500
+    { "火力支援II-地狱烈火", "artillery2",                 10000,   0,  4 },  // v1.8.5: 涨价 8500→10000
+    { "火力支援I-绿色雨幕", "artillery3",             6500,  0,  4 }   // v1.8.5: 涨价 4500→6500
+    // v1.3.0: 支援V-混合轰炸 → v1.4.0 转正定稿「火力支援III-区域轰炸」5500/30s
     // （罐+榴弹 1:1；原火力支援I-炮击 artillery + IV-榴弹雨 artillery4 已禁用，表行删除）
-    , { "火力支援III-饱和轰炸", "artillery5",               10000,  0,  4 }   // v1.4.8: 用户定稿涨价 7500→10000（30s）
+    , { "火力支援III-区域轰炸", "artillery5",               14500,  0,  4 }   // v1.8.5: 涨价 10000→14500（改为全榴弹）
+    // v1.8.0: 支援IV-AGM导弹（artillery6）——仿 BF5 V1 小队增援：单发导弹俯冲 + 一次
+    // 瞬爆清场。与 I/II/III 的"持续落罐"机制不同，走独立 V1_Launch 路径（不进
+    // Art_LaunchBarrage）。素材全为原版（models/missiles/f18_agm65maverick.mdl +
+    // gen_rockblast_posZ/gas_explosion_main 粒子），零客户端分发。
+    , { "火力支援IV-AGM导弹", "artillery6",                  18000,  0,  4 }   // v1.8.4: 定稿价 18000
     // v1.4.0: 新增商品（用户定稿；表尾追加不动透视特感槽位 12）——
     // 马格南 2000（武器栏）、燃烧弹包/高爆弹包 500（升级包走现有
     // ShopSpawn 通用生成路径，与激光瞄准同类）
@@ -424,7 +480,8 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     , { "燃烧瓶",      "weapon_molotov",                 3750,  0,  5 }   // v1.4.9: 投掷品 ×1.5（原 2500）
     // v1.7.3: 弹药补充——特殊商品（不 spawn 实体，直接补满主/副武器弹匣+后备弹药，
     // 见 ShopAmmoRefill）；表尾追加不动 WALLHACK_SLOT 11；价格 800 默认（用户可调）
-    , { "弹药补充",    "ammo_refill",                     800,  0,  2 }
+    // v1.8.6: 移入其他类（cat 2→3），涨价 800→4500
+    , { "弹药补充",    "ammo_refill",                     4500,  0,  3 }
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -482,6 +539,11 @@ int       g_iArtWarnBuyer;                    // 召唤者
 float     g_fArtWarnEnd;                      // 预警结束 GameTime
 Handle    g_hArtWarnTimer;                    // 预警光圈心跳
 int       g_iArtWarnLastSec;                  // 上次播报的剩余秒数（每秒倒计时去重）
+// v1.8.0: AGM导弹状态。g_iArt6MapUses 每图重置（限购计数）；模型/粒子索引在
+// OnMapStart precache（粒子必须注册进 ParticleEffectNames 才能生成，见 V1_PrecacheParticle）
+int       g_iArt6MapUses;                     // 本图 V1 已用次数
+int       g_iArt6MdlIdx = -1;                 // 导弹模型 precache 索引
+bool      g_bArt6AssetOk;                     // 素材就绪（模型+粒子+音效）
 
 // ============================================================================
 // Plugin Info
@@ -553,17 +615,19 @@ public void OnPluginStart()
     g_cvArtRadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
     // v1.0.1: II 独立半径组，收紧 10%：750→675 / 525→472.5 / 375→337.5
-    g_cvArt2RadiusOut = CreateConVar("si_hud_art2_radius_out", "675.0",
+    // v1.8.5: 收紧20%：675→540 / 472.5→378 / 337.5→270
+    // v1.8.7: 再收紧15%：540→459 / 378→321.3 / 270→229.5（火焰蔓延实际范围更大）
+    g_cvArt2RadiusOut = CreateConVar("si_hud_art2_radius_out", "459.0",
         "Spread radius (units) of the 火力支援II-地狱烈火 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt2RadiusMid = CreateConVar("si_hud_art2_radius_mid", "472.5",
+    g_cvArt2RadiusMid = CreateConVar("si_hud_art2_radius_mid", "321.3",
         "Spread radius for ceiling >= 900 (火力支援II-地狱烈火).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt2RadiusSmall = CreateConVar("si_hud_art2_radius_small", "337.5",
+    g_cvArt2RadiusSmall = CreateConVar("si_hud_art2_radius_small", "229.5",
         "Spread radius for ceiling 600-900 (火力支援II-地狱烈火).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
@@ -576,24 +640,25 @@ public void OnPluginStart()
 
     // v1.4.0: III 范围 = 火力支援I-轰炸的 75%（用户定稿）：562.5→421.875 /
     // 393.75→295.3125 / 281.25→210.9375（纯控场圈收小）
-    g_cvArt3RadiusOut = CreateConVar("si_hud_art3_radius_out", "421.875",
+    // v1.8.5: 收紧20%：421.875→337.5 / 295.3125→236.25 / 210.9375→168.75
+    g_cvArt3RadiusOut = CreateConVar("si_hud_art3_radius_out", "337.5",
         "Spread radius (units) of the 火力支援I-绿色雨幕 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt3RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt3RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt3RadiusMid = CreateConVar("si_hud_art3_radius_mid", "295.3125",
+    g_cvArt3RadiusMid = CreateConVar("si_hud_art3_radius_mid", "236.25",
         "Spread radius for ceiling >= 900 (火力支援I-绿色雨幕).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt3RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt3RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt3RadiusSmall = CreateConVar("si_hud_art3_radius_small", "210.9375",
+    g_cvArt3RadiusSmall = CreateConVar("si_hud_art3_radius_small", "168.75",
         "Spread radius for ceiling 600-900 (火力支援I-绿色雨幕).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt3RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt3RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
     // v1.2.0: IV-榴弹雨独立组（TEST 15s；半径收紧档 = 有伤害口径同 I/II）
     g_cvArt4Duration = CreateConVar("si_hud_art4_duration", "15.0",
-        "Total barrage duration in seconds for 火力支援IV-榴弹雨 (disabled item; grenade path reused by 火力支援III-饱和轰炸).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+        "Total barrage duration in seconds for 火力支援IV-榴弹雨 (disabled item; grenade path reused by 火力支援III-区域轰炸).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArt4Duration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArt4Duration.SetBounds(ConVarBound_Lower, true, 5.0);
 
@@ -614,30 +679,91 @@ public void OnPluginStart()
 
     // v1.3.0: V-混合轰炸独立组（用户定稿 TEST 25s；半径同 I 562.5/393.75/281.25；
     // 混合比 can_pct 罐子占比，余下为榴弹——全引擎路径，无新增 native）
+    // v1.8.5: 收紧20%：562.5→450.0 / 393.75→315.0 / 281.25→225.0
+    // v1.8.7: 放大10%：450.0→495.0 / 315.0→346.5 / 225.0→247.5
     g_cvArt5Duration = CreateConVar("si_hud_art5_duration", "30.0",   // v1.4.0: 用户定稿 30s
-        "Total barrage duration in seconds for 火力支援III-饱和轰炸 (cans+grenades mixed, 2-3 items per second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
+        "Total barrage duration in seconds for 火力支援III-区域轰炸 (cans+grenades mixed, 2-3 items per second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArt5Duration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArt5Duration.SetBounds(ConVarBound_Lower, true, 5.0);
 
-    g_cvArt5RadiusOut = CreateConVar("si_hud_art5_radius_out", "562.5",
-        "Spread radius (units) of the 火力支援III-饱和轰炸 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+    g_cvArt5RadiusOut = CreateConVar("si_hud_art5_radius_out", "495.0",
+        "Spread radius (units) of the 火力支援III-区域轰炸 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt5RadiusMid = CreateConVar("si_hud_art5_radius_mid", "393.75",
-        "Spread radius for ceiling >= 900 (火力支援III-饱和轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+    g_cvArt5RadiusMid = CreateConVar("si_hud_art5_radius_mid", "346.5",
+        "Spread radius for ceiling >= 900 (火力支援III-区域轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt5RadiusSmall = CreateConVar("si_hud_art5_radius_small", "281.25",
-        "Spread radius for ceiling 600-900 (火力支援III-饱和轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
+    g_cvArt5RadiusSmall = CreateConVar("si_hud_art5_radius_small", "247.5",
+        "Spread radius for ceiling 600-900 (火力支援III-区域轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt5CanPct = CreateConVar("si_hud_art5_can_pct", "50.0",
-        "Percent of falling items that are propane/oxygen cans in 火力支援III-饱和轰炸 (rest are grenades).", FCVAR_NOTIFY, true, 0.0, true, 100.0);
+    g_cvArt5CanPct = CreateConVar("si_hud_art5_can_pct", "0.0",   // v1.8.5: 改为全榴弹（0% 罐子）
+        "Percent of falling items that are propane/oxygen cans in 火力支援III-区域轰炸 (rest are grenades).", FCVAR_NOTIFY, true, 0.0, true, 100.0);
     g_cvArt5CanPct.SetBounds(ConVarBound_Upper, true, 100.0);
     g_cvArt5CanPct.SetBounds(ConVarBound_Lower, true, 0.0);
+
+    // ===== v1.8.0: IV-AGM导弹（artillery6）=====
+    // 半径比 III-区域轰炸大（562.5）——V1 是一击清场技，定 1000/700/500
+    g_cvArt6RadiusOut = CreateConVar("si_hud_art6_radius_out", "600.0",
+        "Kill radius outdoors (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 100.0, true, 2500.0);
+    g_cvArt6RadiusOut.SetBounds(ConVarBound_Upper, true, 2500.0);
+    g_cvArt6RadiusOut.SetBounds(ConVarBound_Lower, true, 100.0);
+
+    g_cvArt6RadiusMid = CreateConVar("si_hud_art6_radius_mid", "450.0",
+        "Kill radius for ceiling >=900 (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 100.0, true, 2500.0);
+    g_cvArt6RadiusMid.SetBounds(ConVarBound_Upper, true, 2500.0);
+    g_cvArt6RadiusMid.SetBounds(ConVarBound_Lower, true, 100.0);
+
+    g_cvArt6RadiusSmall = CreateConVar("si_hud_art6_radius_small", "350.0",
+        "Kill radius for ceiling 600-900 (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 100.0, true, 2500.0);
+    g_cvArt6RadiusSmall.SetBounds(ConVarBound_Upper, true, 2500.0);
+    g_cvArt6RadiusSmall.SetBounds(ConVarBound_Lower, true, 100.0);
+
+    g_cvArt6DiveTime = CreateConVar("si_hud_art6_dive_time", "5.0",
+        "Missile dive duration seconds (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 0.3, true, 8.0);
+    g_cvArt6DiveHeight = CreateConVar("si_hud_art6_dive_height", "2600.0",
+        "Missile spawn height above impact point.", FCVAR_NOTIFY, true, 500.0, true, 6000.0);
+
+    // 平衡三开关（用户可随时热改）
+    g_cvArt6TankKill = CreateConVar("si_hud_art6_tank_kill", "1",
+        "1 = V1 instantly kills Tank, 0 = deal si_hud_art6_tank_damage instead.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvArt6TankDamage = CreateConVar("si_hud_art6_tank_damage", "3000.0",
+        "Damage dealt to Tank when si_hud_art6_tank_kill is 0.", FCVAR_NOTIFY, true, 100.0, true, 20000.0);
+    g_cvArt6Friendly = CreateConVar("si_hud_art6_friendly_fire", "1",
+        "1 = survivors inside blast are killed too (BF5 behaviour), 0 = survivors immune.",
+        FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvArt6SurvInner = CreateConVar("si_hud_art6_surv_inner_radius", "80.0",
+        "Inner kill zone radius for survivors (instakill/incap).", FCVAR_NOTIFY, true, 0.0, true, 1000.0);
+    g_cvArt6SurvDmgIn = CreateConVar("si_hud_art6_surv_damage_inner", "100.0",
+        "Damage at inner radius edge (just outside instakill zone).", FCVAR_NOTIFY, true, 10.0, true, 200.0);
+    g_cvArt6SurvDmgOut = CreateConVar("si_hud_art6_surv_damage_outer", "15.0",
+        "Damage at outer blast radius edge.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
+    g_cvArt6ShakeAmp = CreateConVar("si_hud_art6_shake_amp", "16.0",
+        "Screen shake amplitude (0 = disabled).", FCVAR_NOTIFY, true, 0.0, true, 50.0);
+    g_cvArt6ShakeFreq = CreateConVar("si_hud_art6_shake_freq", "150.0",
+        "Screen shake frequency in Hz.", FCVAR_NOTIFY, true, 50.0, true, 255.0);
+    g_cvArt6ShakeDur = CreateConVar("si_hud_art6_shake_duration", "3.0",
+        "Screen shake duration in seconds.", FCVAR_NOTIFY, true, 0.5, true, 10.0);
+    g_cvArt6PushForce = CreateConVar("si_hud_art6_push_force", "600.0",
+        "Physics push force away from impact (0 = disabled).", FCVAR_NOTIFY, true, 0.0, true, 2000.0);
+    g_cvArt6MaxPerMap = CreateConVar("si_hud_art6_max_per_map", "0",
+        "Server-wide V1 purchases allowed per map (0 = unlimited).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
+    g_cvArt6FxRings = CreateConVar("si_hud_art6_fx_rings", "0",
+        "Extra particle rings around impact (0 = center only). Widens the visual blast.",
+        FCVAR_NOTIFY, true, 0.0, true, 4.0);
+    g_cvArt6FxPerRing = CreateConVar("si_hud_art6_fx_per_ring", "6",
+        "Particle spawn points per ring.", FCVAR_NOTIFY, true, 3.0, true, 12.0);
+    g_cvArt6FxSpread = CreateConVar("si_hud_art6_fx_spread", "0.75",
+        "Outermost ring radius as a fraction of the kill radius.", FCVAR_NOTIFY, true, 0.1, true, 1.0);
+    g_cvArt6FxWave = CreateConVar("si_hud_art6_fx_wave", "0.09",
+        "Delay per ring in seconds, creating an outward expanding blast wave.",
+        FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvArt6WarnTime = CreateConVar("si_hud_art6_warn", "8.0",
+        "Warning seconds before V1 dives (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 1.0, true, 30.0);
 
     g_cvArtHeightMin = CreateConVar("si_hud_art_height_min", "1800.0",
         "Min drop height (units) for open areas.", FCVAR_NOTIFY, true, 400.0, true, 8000.0);
@@ -722,7 +848,7 @@ public void OnPluginStart()
         "[DEBUG] 火力支援IV: spawn one grenade at the crosshair (empty-server test).");
     // v1.3.0: 空服实测脚手架——准星单件（admin；随机罐子或榴弹，走正式 kind=5 分流）
     RegAdminCmd("sm_art5test", Cmd_Art5Test, ADMFLAG_ROOT,
-        "[DEBUG] 火力支援III-饱和轰炸: spawn one random mixed item at the crosshair (empty-server test).");
+        "[DEBUG] 火力支援III-区域轰炸: spawn one random mixed item at the crosshair (empty-server test).");
     // v1.6.0: 测试发分——直接写钱包（admin；sm_shop_give <名字> <积分>）
     RegAdminCmd("sm_shop_give", Cmd_ShopGive, ADMFLAG_ROOT,
         "[DEBUG] give wallet score: sm_shop_give <name> <amount>");
@@ -775,6 +901,10 @@ public void OnAllPluginsLoaded()
 
 public void OnMapStart()
 {
+    // v1.8.0: AGM导弹素材 precache + 每图限购计数重置
+    V1_PrecacheAssets();
+    g_iArt6MapUses = 0;
+
     // shop heavy weapons — precache models (non-campaign maps don't
     // precache M60 / grenade launcher; without this the items spawn invisible)
     PrecacheModel("models/w_models/weapons/w_m60.mdl");
@@ -1323,7 +1453,8 @@ void ShopBuy(int client, int slot)
         || StrEqual(g_ShopTable[slot].classname, "artillery2")
         || StrEqual(g_ShopTable[slot].classname, "artillery3")
         || StrEqual(g_ShopTable[slot].classname, "artillery4")
-        || StrEqual(g_ShopTable[slot].classname, "artillery5"))
+        || StrEqual(g_ShopTable[slot].classname, "artillery5")
+        || StrEqual(g_ShopTable[slot].classname, "artillery6"))
     {
         // v1.7.0: 倒地/死亡拦截已上移统一到 ShopBuy 入口（全商店禁购），此处不再需要
         // v1.7.80: 全局硬冷却——轰炸中/结束后 si_hud_art_cooldown 秒内全体禁止购买（用户拍板）
@@ -1346,6 +1477,19 @@ void ShopBuy(int client, int slot)
             g_iShopBought[client][slot]--;
             PrintToChat(client, "\x04[商店]\x01 你已在瞄准中，请先确认或取消（右键）");
             return;
+        }
+        // v1.8.0: V1 每图全服限购（0=不限）——太强，默认 1 次/图
+        if (StrEqual(g_ShopTable[slot].classname, "artillery6"))
+        {
+            int cap = g_cvArt6MaxPerMap.IntValue;
+            if (cap > 0 && g_iArt6MapUses >= cap)
+            {
+                SH_AddWallet(client, price);
+                g_iShopBought[client][slot]--;
+                PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 本图已用完（%d/%d 次），积分已退回",
+                    g_ShopTable[slot].name, g_iArt6MapUses, cap);
+                return;
+            }
         }
         // v1.2.1: 支援III 检查 left4dhooks native 可用性——失败拒绝购买退款（防白花钱）
         if (StrEqual(g_ShopTable[slot].classname, "artillery3"))
@@ -1442,25 +1586,28 @@ int Ammo_ClipMax(const char[] cls)
 
 int Ammo_ReserveMax(const char[] cls)
 {
+    // v1.8.6: 使用服务器配置的倍率弹药（l4d2_ammo_set.cfg）
     if (StrEqual(cls, "weapon_pistol") || StrEqual(cls, "weapon_pistol_magnum"))
         return 100;
     if (StrEqual(cls, "weapon_smg") || StrEqual(cls, "weapon_smg_silenced")
         || StrEqual(cls, "weapon_smg_mp5"))
-        return 650;
+        return 720;   // 官方 650 → 服务器配置 720 (smgammo)
     if (StrEqual(cls, "weapon_rifle") || StrEqual(cls, "weapon_rifle_sg552")
         || StrEqual(cls, "weapon_rifle_ak47") || StrEqual(cls, "weapon_rifle_desert"))
-        return 360;
+        return 540;   // 官方 360 → 服务器配置 540 (assaultammo)
     if (StrEqual(cls, "weapon_rifle_m60"))
-        return 150;
+        return 192;   // 官方 150 → 服务器配置 192 (hotgunammo)
     if (StrEqual(cls, "weapon_hunting_rifle") || StrEqual(cls, "weapon_sniper_military")
         || StrEqual(cls, "weapon_sniper_scout") || StrEqual(cls, "weapon_sniper_awp"))
-        return 180;
+        return 225;   // 官方 180 → 服务器配置 225 (huntingrifleammo)
+    if (StrEqual(cls, "weapon_sniper_military"))
+        return 270;   // 服务器配置 270 (sniperrifleammo)
     if (StrEqual(cls, "weapon_pumpshotgun") || StrEqual(cls, "weapon_shotgun_chrome")
         || StrEqual(cls, "weapon_autoshotgun") || StrEqual(cls, "weapon_shotgun_spas"))
-        return 72;
+        return 270;   // 官方 72 → 服务器配置 270 (autoshotgunammo)
     if (StrEqual(cls, "weapon_grenade_launcher"))
-        return 30;
-    return 0;                                        // 电锯无后备弹药
+        return 30;    // 服务器配置 30 (grenadelauncherammo)
+    return 0;         // 电锯无后备弹药
 }
 
 int ShopAmmoRefill(int client)
@@ -2114,17 +2261,19 @@ public Action Timer_ArtAim(Handle timer, int userid)
     if (ceiling > 0.0 && ceiling < ART_CEIL_LOW && !openAbove)
         valid = false;
 
-    int color[4] = { 0, 0, 255, 255 };            // 火力支援III-饱和轰炸：蓝
+    int color[4] = { 0, 0, 255, 255 };            // 火力支援III-区域轰炸：蓝
     int radius = 150;
     if (valid)
     {
         // v1.0.1: 预览圈按火力类型用对应半径组（与 ConfirmStrike 口径一致）
-        // v1.1.0/v1.4.2/v1.4.3: kind = 1 炮击[已禁] / 2 燃烧→III / 3 胆汁雨→I / 4 榴弹雨[已禁] / 5 轰炸→II
+        // v1.1.0/v1.4.2/v1.4.3: kind = 1 炮击[已禁] / 2 燃烧→III / 3 胆汁雨→I / 4 榴弹雨[已禁] / 5 轰炸→II / 6 小牛AGM
         int kind = Art_KindOfSlot(g_iArtSlot[client]);
         if (kind == 2)
             color[0] = 255, color[1] = 255, color[2] = 0;   // 火力支援II-地狱烈火：黄
         else if (kind == 3)
             color[0] = 0, color[1] = 255, color[2] = 0;     // 火力支援I-绿色雨幕：绿
+        else if (kind == 6)
+            color[0] = 128, color[1] = 0, color[2] = 128;   // 火力支援IV-AGM导弹：紫
         // v1.4.2: kind 5（II-轰炸）落默认分支 = 蓝；kind 1/4 已禁用不可购买
         // v1.0.7/v1.4.2/v1.6.4: 光圈显示用 ring 档位 = 各火力轰炸半径 + 效果半径（v1.6.4 改）
         float ring;
@@ -2257,7 +2406,7 @@ float Art_FindCeiling(const float pos[3], bool &openAbove)
     openAbove = false;
     float from[3], to[3];
     from = pos;
-    from[2] += 60.0;
+    from[2] += 200.0;   // v1.8.19: 60→200u，防止在起伏地形中起点在地面内部导致误判
     to = from;
     to[2] += ART_CEIL_CLEAR;
 
@@ -2342,9 +2491,20 @@ float Art_FindCeiling(const float pos[3], bool &openAbove)
 // v1.0.1: II-燃烧独立半径组；v1.1.0: kind 参数——III-胆汁雨用 art3 独立组
 void Art_PickParams(int kind, float ceiling, bool openAbove, float &radius, float &height)
 {
-    ConVar cvOut  = kind == 2 ? g_cvArt2RadiusOut  : (kind == 3 ? g_cvArt3RadiusOut  : (kind == 4 ? g_cvArt4RadiusOut  : (kind == 5 ? g_cvArt5RadiusOut  : g_cvArtRadiusOut)));
-    ConVar cvMid  = kind == 2 ? g_cvArt2RadiusMid  : (kind == 3 ? g_cvArt3RadiusMid  : (kind == 4 ? g_cvArt4RadiusMid  : (kind == 5 ? g_cvArt5RadiusMid  : g_cvArtRadiusMid)));
-    ConVar cvSmall = kind == 2 ? g_cvArt2RadiusSmall : (kind == 3 ? g_cvArt3RadiusSmall : (kind == 4 ? g_cvArt4RadiusSmall : (kind == 5 ? g_cvArt5RadiusSmall : g_cvArtRadiusSmall)));
+    ConVar cvOut  = kind == 2 ? g_cvArt2RadiusOut  : (kind == 3 ? g_cvArt3RadiusOut  : (kind == 4 ? g_cvArt4RadiusOut  : (kind == 5 ? g_cvArt5RadiusOut  : (kind == 6 ? g_cvArt6RadiusOut  : g_cvArtRadiusOut))));
+    ConVar cvMid  = kind == 2 ? g_cvArt2RadiusMid  : (kind == 3 ? g_cvArt3RadiusMid  : (kind == 4 ? g_cvArt4RadiusMid  : (kind == 5 ? g_cvArt5RadiusMid  : (kind == 6 ? g_cvArt6RadiusMid  : g_cvArtRadiusMid))));
+    ConVar cvSmall = kind == 2 ? g_cvArt2RadiusSmall : (kind == 3 ? g_cvArt3RadiusSmall : (kind == 4 ? g_cvArt4RadiusSmall : (kind == 5 ? g_cvArt5RadiusSmall : (kind == 6 ? g_cvArt6RadiusSmall : g_cvArtRadiusSmall))));
+
+    // v1.8.0: V1 单发瞬爆——height 是导弹俯冲起始高度，不参与落罐逻辑
+    if (kind == 6)
+    {
+        if (ceiling <= 0.0)                radius = cvOut.FloatValue;
+        else if (ceiling >= ART_CEIL_MID)  radius = cvMid.FloatValue;
+        else if (openAbove)                radius = cvOut.FloatValue;
+        else                               radius = cvSmall.FloatValue;
+        height = g_cvArt6DiveHeight.FloatValue;
+        return;
+    }
 
     if (ceiling <= 0.0)
     {
@@ -2385,12 +2545,12 @@ void Art_PickParams(int kind, float ceiling, bool openAbove, float &radius, floa
 // v1.6.4 FIX: 用户实测"轰炸范围远大于瞄准圈"——圈只盖落点圈，没算每件爆炸物的
 // 效果半径（爆炸/火焰蔓延/胆汁溅射 ≈ 400-500u），实际轰炸覆盖 = 落点半径 + 效果
 // 半径。用户拍板改 圈 = 半径 + 450（户外：绿色雨幕 750→1200 / 地狱烈火 675→1125
-// / 饱和轰炸 562.5→1012）。
+// / 区域轰炸 562.5→1012）。
 void Art_RingParams(int kind, float ceiling, bool openAbove, float &ring)
 {
-    ConVar cvOut  = kind == 2 ? g_cvArt2RadiusOut  : (kind == 3 ? g_cvArt3RadiusOut  : (kind == 5 ? g_cvArt5RadiusOut  : g_cvArtRadiusOut));
-    ConVar cvMid  = kind == 2 ? g_cvArt2RadiusMid  : (kind == 3 ? g_cvArt3RadiusMid  : (kind == 5 ? g_cvArt5RadiusMid  : g_cvArtRadiusMid));
-    ConVar cvSmall = kind == 2 ? g_cvArt2RadiusSmall : (kind == 3 ? g_cvArt3RadiusSmall : (kind == 5 ? g_cvArt5RadiusSmall : g_cvArtRadiusSmall));
+    ConVar cvOut  = kind == 2 ? g_cvArt2RadiusOut  : (kind == 3 ? g_cvArt3RadiusOut  : (kind == 5 ? g_cvArt5RadiusOut  : (kind == 6 ? g_cvArt6RadiusOut  : g_cvArtRadiusOut)));
+    ConVar cvMid  = kind == 2 ? g_cvArt2RadiusMid  : (kind == 3 ? g_cvArt3RadiusMid  : (kind == 5 ? g_cvArt5RadiusMid  : (kind == 6 ? g_cvArt6RadiusMid  : g_cvArtRadiusMid)));
+    ConVar cvSmall = kind == 2 ? g_cvArt2RadiusSmall : (kind == 3 ? g_cvArt3RadiusSmall : (kind == 5 ? g_cvArt5RadiusSmall : (kind == 6 ? g_cvArt6RadiusSmall : g_cvArtRadiusSmall)));
 
     float r;
     if (ceiling <= 0.0)                r = cvOut.FloatValue;
@@ -2398,6 +2558,14 @@ void Art_RingParams(int kind, float ceiling, bool openAbove, float &ring)
     else if (openAbove)                r = cvOut.FloatValue;
     else if (ceiling >= ART_CEIL_LOW)  r = cvSmall.FloatValue;
     else                               r = cvSmall.FloatValue;   // 拒绝级：确认前被拦截
+
+    // v1.8.18: AGM导弹不落罐，是三层圆柱杀伤——圈只显示第一圈（核心区）
+    // 范围 = radius × 1.38（与 V1_Detonate 的 coreRadius 口径一致），不加落罐效果半径
+    if (kind == 6)
+    {
+        ring = r * 1.38;
+        return;
+    }
     ring = r + 450.0;   // v1.6.4: 落点半径 + 效果半径（用户拍板 450u）
 }
 
@@ -2432,7 +2600,9 @@ void Art_ConfirmStrike(int client, float target[3])
     g_fArtWarnHeight = height;
     g_fArtWarnDuration = duration;
     g_iArtWarnBuyer = client;
-    g_fArtWarnEnd = GetGameTime() + g_cvArtWarnTime.FloatValue;
+    // v1.8.0: V1 用自己的预警时长（默认 8s，比其它档长，给逃跑时间）
+    float warnTime = (kind == 6) ? g_cvArt6WarnTime.FloatValue : g_cvArtWarnTime.FloatValue;
+    g_fArtWarnEnd = GetGameTime() + warnTime;
     g_iArtWarnLastSec = 999;   // v1.0.8: 心跳第一 tick 播首秒（prime 已就位）
 
     // v1.0.8: PrintHintText priming（记忆 l4d2-printhinttext-priming-bug）——
@@ -2441,9 +2611,19 @@ void Art_ConfirmStrike(int client, float target[3])
 
     // 结束时刻 = 预警 + 首罐延迟 + 末秒生成 + 落地(fallT) + 落地后燃烧 + 引爆（播报"剩余 x 秒"）
     // v1.7.86: 点燃的罐子对伤害免疫且燃烧结束不自爆（实测"假火"）→ 火灭后引擎引爆
-    float fallT = SquareRoot((2.0 * height) / ART_GRAVITY);
-    float endT = g_cvArtWarnTime.FloatValue + g_cvArtDelay.FloatValue
-        + float(RoundToCeil(duration)) + fallT + g_cvArtBurn.FloatValue + 0.15;
+    float endT;
+    if (kind == 6)
+    {
+        // v1.8.0: V1 = 预警 + 俯冲时长 + 尘云滞留余量（无落罐/无燃烧阶段）
+        endT = warnTime + g_cvArt6DiveTime.FloatValue + 3.0;
+        g_iArt6MapUses++;                      // 确认发射才计数（取消/退款不算）
+    }
+    else
+    {
+        float fallT = SquareRoot((2.0 * height) / ART_GRAVITY);
+        endT = warnTime + g_cvArtDelay.FloatValue
+            + float(RoundToCeil(duration)) + fallT + g_cvArtBurn.FloatValue + 0.15;
+    }
     g_fArtNextBuyTime = GetGameTime() + endT + g_cvArtCooldown.FloatValue;
 
     // v1.0.7（用户定稿模板）: 预警播报——召唤者 + 空袭倒计时 + 注意躲避
@@ -2476,7 +2656,21 @@ public Action Timer_ArtWarn(Handle timer)
     if (remain != g_iArtWarnLastSec && remain >= 1)
     {
         g_iArtWarnLastSec = remain;
-        PrintHintTextToAll("[火力支援] 空袭将在 %d 秒后到来，注意躲避！", remain);
+        // v1.8.11: AGM导弹倒计时播报导弹发射
+        if (g_iArtWarnKind == 6)
+            PrintHintTextToAll("[AGM导弹] 导弹发射倒计时：%d 秒", remain);
+        else
+            PrintHintTextToAll("[火力支援] 空袭将在 %d 秒后到来，注意躲避！", remain);
+
+        // v1.8.12: AGM导弹倒计时剩余3秒时播放发射音效（导弹从远处飞来，3秒后到达并出现在天空）
+        if (g_iArtWarnKind == 6 && remain == 3)
+        {
+            // v1.8.13: 改用 EmitAmbientSound + 落点坐标（与爆炸音效一致的播放方式；
+            // V1_SND_LAUNCH 的 #define 在本行之后，故用字面量避免预处理顺序报错）
+            EmitAmbientSound("animation/overpass_jets.wav", g_fArtWarnTarget, 0, SNDLEVEL_RAIDSIREN, _, 1.0);
+            LogMessage("[V1] Playing launch warning sound at T-3");
+            PrintHintTextToAll("[AGM导弹] 导弹已发射，正在接近目标！");
+        }
     }
 
     if (g_iBeamLaser <= 0 || g_iBeamHalo <= 0)
@@ -2490,9 +2684,11 @@ public Action Timer_ArtWarn(Handle timer)
         color = { 255, 255, 0, 255 };      // 火力支援II-地狱烈火：黄
     else if (g_iArtWarnKind == 3)
         color = { 0, 255, 0, 255 };        // v1.1.0: 火力支援I-绿色雨幕：绿
+    else if (g_iArtWarnKind == 6)
+        color = { 128, 0, 128, 255 };      // v1.8.16: 火力支援IV-AGM导弹：紫
     // v1.4.2: kind 1/4/5 全落默认蓝（II-轰炸蓝；kind 1/4 已禁用）——用户定稿四色
     else
-        color = { 0, 0, 255, 255 };        // 火力支援III-饱和轰炸：蓝
+        color = { 0, 0, 255, 255 };        // 火力支援III-区域轰炸：蓝
     TE_SetupBeamRingPoint(ground, g_fArtWarnRing - 5.0, g_fArtWarnRing,
         g_iBeamLaser, g_iBeamHalo, 0, 10, 0.15, 3.0, 0.0, color, 0, 0);
     TE_SendToAll();
@@ -2518,6 +2714,16 @@ public Action Timer_ArtWarnEnd(Handle timer)
         g_hArtWarnTimer = null;
     }
     g_bArtWarning = false;
+
+    // v1.8.0: AGM导弹走独立路径——单发导弹俯冲，不是持续落罐
+    if (g_iArtWarnKind == 6)
+    {
+        // v1.8.13: 飞行音效已移到 V1_Launch 内绑定导弹实体，此处只显示提示
+        PrintHintTextToAll("[AGM导弹] 导弹来袭，正在俯冲！");
+        V1_Launch(g_iArtWarnBuyer, g_fArtWarnTarget, g_fArtWarnRadius);
+        return Plugin_Continue;
+    }
+
     PrintHintTextToAll("[火力支援] 空袭将在 %.0f 秒后结束，注意躲避！", g_fArtWarnDuration);
     Art_LaunchBarrage(g_iArtWarnBuyer, g_fArtWarnTarget, g_iArtWarnKind,
         g_fArtWarnRadius, g_fArtWarnHeight, g_fArtWarnDuration);
@@ -2544,23 +2750,76 @@ void Art_LaunchBarrage(int client, const float target[3], int kind,
         : ((kind == 5) ? ART5_MAX_PER_SEC : ART_CANS_MAX_PER_SEC));
 
     // v1.4.0: kind==3 每 2 秒一槽（用户定稿：每 2 秒 1-2 罐，15s ≈ 8-16 瓶）
-    for (int sec = 0; sec < seconds; sec += (kind == 3 ? 2 : 1))
+    // v1.8.5: kind==2/5 也改为每 2 秒一槽（火力2地狱烈火、火力3区域轰炸）
+    // v1.8.7: kind==5 改为每 1.5 秒一槽（区域轰炸加快频率）
+    // v1.8.8: kind==3 改为双路径（胆汁瓶 + 罐子同时掉落）
+    // v1.8.18: kind==5 改为每 2 秒一槽（实测 1.5s 太快，用户拍板降频）
+    float interval = 1.0;
+    if (kind == 2 || kind == 3)
+        interval = 2.0;
+    else if (kind == 5)
+        interval = 2.0;
+
+    int slots = RoundToCeil(duration / interval);
+    for (int i = 0; i < slots; i++)
     {
+        float baseTime = float(i) * interval;
         int cans = GetRandomInt(minPerSec, maxPerSec);
-        for (int c = 0; c < cans; c++)
+
+        // v1.8.8: kind==3 每个时间槽同时生成胆汁瓶和罐子
+        if (kind == 3)
         {
-            if (total >= ART_MAX_TOTAL) break;          // 防 cvar 误配超载
-            DataPack dp = new DataPack();
-            dp.WriteFloat(target[0]);
-            dp.WriteFloat(target[1]);
-            dp.WriteFloat(target[2]);
-            dp.WriteFloat(radius);
-            dp.WriteFloat(height);
-            dp.WriteCell(client);            // v1.7.97: 召唤者传给引爆（击杀归属=召唤者）
-            dp.WriteCell(kind);              // v1.1.0/v1.2.0: 火力类型 1=瓦斯/煤气 2=油桶/烟花 3=胆汁瓶 4=榴弹
-            CreateTimer(g_cvArtDelay.FloatValue + float(sec) + GetRandomFloat(0.0, 0.9),
-                Timer_ArtSpawnCan, dp, TIMER_FLAG_NO_MAPCHANGE);
-            total++;
+            // 胆汁瓶路径
+            for (int c = 0; c < cans; c++)
+            {
+                if (total >= ART_MAX_TOTAL) break;
+                DataPack dp = new DataPack();
+                dp.WriteFloat(target[0]);
+                dp.WriteFloat(target[1]);
+                dp.WriteFloat(target[2]);
+                dp.WriteFloat(radius);
+                dp.WriteFloat(height);
+                dp.WriteCell(client);
+                dp.WriteCell(3);              // 胆汁瓶
+                CreateTimer(g_cvArtDelay.FloatValue + baseTime + GetRandomFloat(0.0, interval - 0.1),
+                    Timer_ArtSpawnCan, dp, TIMER_FLAG_NO_MAPCHANGE);
+                total++;
+            }
+            // 罐子路径（瓦斯罐/煤气罐）
+            for (int c = 0; c < cans; c++)
+            {
+                if (total >= ART_MAX_TOTAL) break;
+                DataPack dp = new DataPack();
+                dp.WriteFloat(target[0]);
+                dp.WriteFloat(target[1]);
+                dp.WriteFloat(target[2]);
+                dp.WriteFloat(radius);
+                dp.WriteFloat(height);
+                dp.WriteCell(client);
+                dp.WriteCell(1);              // 瓦斯罐/煤气罐
+                CreateTimer(g_cvArtDelay.FloatValue + baseTime + GetRandomFloat(0.0, interval - 0.1),
+                    Timer_ArtSpawnCan, dp, TIMER_FLAG_NO_MAPCHANGE);
+                total++;
+            }
+        }
+        else
+        {
+            // 其他火力支援保持原逻辑
+            for (int c = 0; c < cans; c++)
+            {
+                if (total >= ART_MAX_TOTAL) break;
+                DataPack dp = new DataPack();
+                dp.WriteFloat(target[0]);
+                dp.WriteFloat(target[1]);
+                dp.WriteFloat(target[2]);
+                dp.WriteFloat(radius);
+                dp.WriteFloat(height);
+                dp.WriteCell(client);
+                dp.WriteCell(kind);
+                CreateTimer(g_cvArtDelay.FloatValue + baseTime + GetRandomFloat(0.0, interval - 0.1),
+                    Timer_ArtSpawnCan, dp, TIMER_FLAG_NO_MAPCHANGE);
+                total++;
+            }
         }
         if (total >= ART_MAX_TOTAL) break;
     }
@@ -2821,6 +3080,8 @@ int Art_KindOfSlot(int slot)
         return 4;
     if (StrEqual(g_ShopTable[slot].classname, "artillery5"))
         return 5;
+    if (StrEqual(g_ShopTable[slot].classname, "artillery6"))
+        return 6;                                   // v1.8.0: IV-AGM导弹
     if (StrEqual(g_ShopTable[slot].classname, "artillery"))
         return 1;
     return 0;
@@ -3344,4 +3605,627 @@ void Art_CleanupAll()
         }
         g_hArtCans.Clear();
     }
+}
+
+/* ==========================================================================
+ * v1.8.0  火力支援IV-AGM导弹（artillery6）
+ * ==========================================================================
+ * 仿 BF5 V1 小队增援：单发导弹从天俯冲 → 落点一次瞬爆清场。
+ *
+ * 与 I/II/III 的机制差异：那三档是"持续 N 秒内不断落罐"（Art_LaunchBarrage
+ * 按秒排队生成实体），V1 是"一发一爆"，所以完全不进 Art_LaunchBarrage，
+ * 预警结束直接走 V1_Launch。
+ *
+ * 素材全部原版，零客户端分发（实测确认，见记忆 l4d2-c1m2-missile-asset）：
+ *   模型 models/missiles/f18_agm65maverick.mdl（c1m2 武器店老板打的那发导弹）
+ *        ⚠ 无 .phy 碰撞模型 → 不能用 prop_physics 自由坠落，必须
+ *          prop_dynamic + 每 tick TeleportEntity 手推轨迹（对 V1 反而更好，
+ *          需要的是固定角度可控俯冲，不是物理抛物线）
+ *   粒子 gen_rockblast_posZ（向上尘柱）+ gas_explosion_main（大尺度爆开）
+ *        + missile_hit_explosionshockwave（地面冲击波环）
+ *        + gen_dest_risingsmoke（上升烟云，浮尘滞留）
+ *        ⚠ 必须 AddToStringTable("ParticleEffectNames") 注册，否则 idx=-1 不生成
+ *        ⚠ 不用带火球的 missile_hit1_f / tanker_fireball / gen_dest_fireball
+ *          （那些是油罐车着火效果，会留火焰残留；V1 只要浮尘烟云）
+ *   音效 animation/Tanker_Explosion.wav（爆炸）
+ *        animation/overpass_jets.wav（俯冲呼啸）
+ *        ⚠ 两个音效分属飞行/落地两阶段，落地前 StopSound 掐掉飞行音轨，
+ *          否则两条音轨叠着响（听着像播了多次）
+ *
+ * 伤害归属铁律（沿用 artillery 全系）：inflictor = 召唤者，击杀记在买家头上。
+ * ========================================================================== */
+
+#define V1_MDL          "models/missiles/f18_agm65maverick.mdl"
+#define V1_SND_LAUNCH   "animation/overpass_jets.wav"         // v1.8.13: 发射音效（T-3秒，远处发射）
+#define V1_SND_FLY      "ambient/atmosphere/terrain_rumble1.wav"  // v1.8.13: 飞行音效（T-0秒，俯冲低频轰鸣）
+#define V1_SND_BOOM     "animation/Tanker_Explosion.wav"      // 爆炸音效
+#define V1_STEPS        100       // 俯冲插值步数（步长 = dive_time / STEPS）
+#define V1_DIVE_OFFSET  900.0     // 水平偏移：制造斜向俯冲倾角（0 = 垂直落）
+
+char g_sV1Particles[][] = {
+    // v1.8.4: 换成 explosion_silo 干净版（7 个完好子系统，剔除缺材质的 _d/_g）
+    "explosion_huge_e",
+    "explosion_huge_b",
+    "explosion_huge_c",
+    "explosion_huge_h",
+    "explosion_huge_flames",
+    "explosion_huge_burning_chunks",
+    "explosion_huge_smoking_chunks"
+};
+
+// 把粒子系统名注册进 ParticleEffectNames stringtable。
+// 地图只预载自己用到的粒子，其余名字不在表里 → info_particle_system 静默不生成。
+// 这些 pcf 全在全局 particles_manifest.txt，客户端启动即加载，所以只需加名字。
+int V1_PrecacheParticle(const char[] name)
+{
+    int tbl = FindStringTable("ParticleEffectNames");
+    if (tbl == INVALID_STRING_TABLE)
+        return -1;
+
+    int count = GetStringTableNumStrings(tbl);
+    char buf[128];
+    for (int i = 0; i < count; i++)
+    {
+        ReadStringTable(tbl, i, buf, sizeof(buf));
+        if (StrEqual(buf, name, false))
+            return i;
+    }
+
+    bool save = LockStringTables(false);
+    AddToStringTable(tbl, name);
+    LockStringTables(save);
+
+    count = GetStringTableNumStrings(tbl);
+    for (int i = 0; i < count; i++)
+    {
+        ReadStringTable(tbl, i, buf, sizeof(buf));
+        if (StrEqual(buf, name, false))
+            return i;
+    }
+    return -1;
+}
+
+void V1_PrecacheAssets()
+{
+    g_bArt6AssetOk = false;
+
+    g_iArt6MdlIdx = PrecacheModel(V1_MDL, true);
+    bool sndOk = PrecacheSound(V1_SND_LAUNCH, true) && PrecacheSound(V1_SND_FLY, true) && PrecacheSound(V1_SND_BOOM, true);
+
+    int okParticles = 0;
+    for (int i = 0; i < sizeof(g_sV1Particles); i++)
+        if (V1_PrecacheParticle(g_sV1Particles[i]) >= 0)
+            okParticles++;
+
+    g_bArt6AssetOk = (g_iArt6MdlIdx > 0 && sndOk && okParticles > 0);
+
+    if (!g_bArt6AssetOk)
+        LogError("[V1] asset precache incomplete: mdl=%d snd=%d particles=%d/%d — AGM导弹可能异常",
+            g_iArt6MdlIdx, sndOk, okParticles, sizeof(g_sV1Particles));
+    else
+        LogMessage("[V1] assets ready: mdl idx=%d particles=%d/%d",
+            g_iArt6MdlIdx, okParticles, sizeof(g_sV1Particles));
+}
+
+void V1_SpawnParticle(const float pos[3], const char[] name)
+{
+    int ent = CreateEntityByName("info_particle_system");
+    if (ent <= 0)
+        return;
+    DispatchKeyValue(ent, "effect_name", name);
+    DispatchKeyValue(ent, "start_active", "1");
+    TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
+    DispatchSpawn(ent);
+    ActivateEntity(ent);
+    AcceptEntityInput(ent, "Start");
+    // v1.8.18: 粒子清理时间 8s → 6s（火焰残留不要太久）
+    CreateTimer(6.0, Timer_V1KillEnt, EntIndexToEntRef(ent), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_V1KillEnt(Handle timer, any ref)
+{
+    int ent = EntRefToEntIndex(ref);
+    if (ent > 0 && IsValidEntity(ent))
+        AcceptEntityInput(ent, "Kill");
+    return Plugin_Stop;
+}
+
+// v1.8.11: 发射：导弹在落点上方 dive_height、水平偏移 V1_DIVE_OFFSET 处生成，
+// 朝落点插值俯冲。落地 → V1_Detonate。
+// 飞行音效在倒计时阶段已播放，这里不再重复。
+void V1_Launch(int client, const float target[3], float radius)
+{
+    float start[3];
+    start = target;
+    start[0] += V1_DIVE_OFFSET;
+    start[2] += g_cvArt6DiveHeight.FloatValue;
+
+    int ent = CreateEntityByName("prop_dynamic_override");
+    if (ent <= 0)
+    {
+        // 生成失败也要炸——玩家已付费，特效不能吞
+        LogError("[V1] prop_dynamic_override spawn failed, detonating directly");
+        V1_Detonate(client, target, radius);
+        return;
+    }
+
+    DispatchKeyValue(ent, "model", V1_MDL);
+    DispatchKeyValue(ent, "solid", "0");
+    DispatchKeyValue(ent, "disableshadows", "1");
+    DispatchSpawn(ent);
+
+    float dir[3], ang[3];
+    SubtractVectors(target, start, dir);
+    NormalizeVector(dir, dir);
+    GetVectorAngles(dir, ang);
+    TeleportEntity(ent, start, ang, NULL_VECTOR);
+
+    // v1.8.14: 爆炸音效延迟 1.2 秒播放（Tanker_Explosion.wav 前 0.4 秒是呼啸，
+    // 飞行 1.6 秒 - 音效呼啸 0.4 秒 = 延迟 1.2 秒，让音效爆炸声对准导弹落地）
+    DataPack dpSound;
+    CreateDataTimer(1.2, Timer_V1PlaySound, dpSound, TIMER_FLAG_NO_MAPCHANGE);
+    dpSound.WriteFloat(target[0]);
+    dpSound.WriteFloat(target[1]);
+    dpSound.WriteFloat(target[2]);
+
+    float step = g_cvArt6DiveTime.FloatValue / float(V1_STEPS);
+    if (step < 0.01) step = 0.01;
+
+    DataPack dp;
+    CreateDataTimer(step, Timer_V1Dive, dp, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+    dp.WriteCell(EntIndexToEntRef(ent));
+    dp.WriteFloat(start[0]);  dp.WriteFloat(start[1]);  dp.WriteFloat(start[2]);
+    dp.WriteFloat(target[0]); dp.WriteFloat(target[1]); dp.WriteFloat(target[2]);
+    dp.WriteFloat(GetGameTime());              // 起飞时刻——进度按实耗时算，不累加
+    dp.WriteFloat(radius);
+    dp.WriteCell(client > 0 && IsClientInGame(client) ? GetClientUserId(client) : 0);
+
+    LogMessage("[V1] launched buyer=%d target=(%.0f %.0f %.0f) r=%.0f dive=%.1fs",
+        client, target[0], target[1], target[2], radius, g_cvArt6DiveTime.FloatValue);
+}
+
+// v1.8.14: 延迟播放爆炸音效（Tanker_Explosion.wav 前 0.4 秒是呼啸，爆炸声对准落地）
+public Action Timer_V1PlaySound(Handle timer, DataPack dp)
+{
+    dp.Reset();
+    float pos[3];
+    pos[0] = dp.ReadFloat();
+    pos[1] = dp.ReadFloat();
+    pos[2] = dp.ReadFloat();
+    EmitAmbientSound(V1_SND_BOOM, pos, 0, SNDLEVEL_RAIDSIREN, _, 1.0);
+    return Plugin_Stop;
+}
+
+public Action Timer_V1Dive(Handle timer, DataPack dp)
+{
+    dp.Reset();
+    int ref = dp.ReadCell();
+    float s[3], g[3];
+    s[0] = dp.ReadFloat(); s[1] = dp.ReadFloat(); s[2] = dp.ReadFloat();
+    g[0] = dp.ReadFloat(); g[1] = dp.ReadFloat(); g[2] = dp.ReadFloat();
+    float t0     = dp.ReadFloat();
+    float radius = dp.ReadFloat();
+    int userid   = dp.ReadCell();
+
+    int ent = EntRefToEntIndex(ref);
+    if (ent <= 0 || !IsValidEntity(ent))
+    {
+        // 导弹实体半路被清（回合结束清理等）：玩家已付费，照旧在落点起爆
+        StopSound(0, SNDCHAN_STATIC, V1_SND_FLY);
+        V1_Detonate(GetClientOfUserId(userid), g, radius);
+        return Plugin_Stop;
+    }
+
+    float total = g_cvArt6DiveTime.FloatValue;
+    if (total < 0.1) total = 0.1;
+    float prog = (GetGameTime() - t0) / total;
+    if (prog >= 1.0)
+    {
+        // 落地：先掐飞行音轨再爆，否则两条音轨叠着响
+        StopSound(0, SNDCHAN_STATIC, V1_SND_FLY);
+        for (int c = 1; c <= MaxClients; c++)
+            if (IsClientInGame(c) && !IsFakeClient(c))
+                StopSound(c, SNDCHAN_STATIC, V1_SND_FLY);
+
+        AcceptEntityInput(ent, "Kill");
+        V1_Detonate(GetClientOfUserId(userid), g, radius);
+        return Plugin_Stop;
+    }
+
+    if (prog < 0.0) prog = 0.0;
+
+    // v1.8.10: ease-in（匀加速 prog²）——俯冲越接近地面越快，符合导弹下落物理。
+    // 不用 smoothstep(3t²-2t³)：它在末段减速，5s 长动画下会明显"飘"着落地。
+    float smoothProg = prog * prog;
+
+    float pos[3];
+    for (int i = 0; i < 3; i++)
+        pos[i] = s[i] + (g[i] - s[i]) * smoothProg;
+
+    // 计算朝向角度，让导弹始终指向目标
+    float dir[3], ang[3];
+    SubtractVectors(g, pos, dir);
+    NormalizeVector(dir, dir);
+    GetVectorAngles(dir, ang);
+
+    TeleportEntity(ent, pos, ang, NULL_VECTOR);
+    return Plugin_Continue;
+}
+
+/* --------------------------------------------------------------------------
+ * v1.8.1 特效铺开
+ * --------------------------------------------------------------------------
+ * 为什么要环形补放：单个粒子系统的尺寸（发射器半径、粒子初速、生命期、
+ * 尺寸曲线）全部烘死在 pcf 的 operator 参数里。服务端只能决定"放不放、放
+ * 在哪"，改不了"放多大"——L4D2 的 info_particle_system 没有 scale 键值，
+ * m_flModelScale 对粒子无效（实测确认）。所以要让爆炸看着铺满杀伤半径，
+ * 只能在落点周围多点同时起爆。
+ *
+ * ⚠ 边界（本项目实测踩过，客户端直接闪退）：每个 info_particle_system 占
+ * 一个 edict（引擎上限 2048），客户端还要同帧渲染全部实例。曾用
+ * 半径 1200 / 4 环 / 每环 12 点 × 6 个粒子 = 294 实例一帧生成 → 客户端崩。
+ * 因此：① 硬性封顶 V1_FX_MAX_PARTICLES；② 逐环延迟摊帧。
+ * -------------------------------------------------------------------------- */
+
+#define V1_FX_MAX_PARTICLES  60      // 一次爆炸最多粒子实例数（实测安全线）
+
+// 把粒子点吸附到地面，避免悬空起爆（尘柱要从地面往上长才对）
+void V1_SnapToGround(float pos[3])
+{
+    float end[3];
+    end = pos;
+    end[2] -= 600.0;
+    Handle tr = TR_TraceRayFilterEx(pos, end, MASK_SOLID, RayType_EndPoint, V1_TraceFilterNoPlayers);
+    if (TR_DidHit(tr))
+    {
+        float hit[3];
+        TR_GetEndPosition(hit, tr);
+        pos[2] = hit[2] + 8.0;
+    }
+    delete tr;
+}
+
+public bool V1_TraceFilterNoPlayers(int entity, int mask)
+{
+    return entity > MaxClients;
+}
+
+void V1_BlastFx(const float target[3], float radius)
+{
+    int nParticles = sizeof(g_sV1Particles);
+    int rings   = g_cvArt6FxRings.IntValue;
+    int perRing = g_cvArt6FxPerRing.IntValue;
+    float spread = g_cvArt6FxSpread.FloatValue;
+    float wave   = g_cvArt6FxWave.FloatValue;
+
+    // 中心先炸
+    int budget = V1_FX_MAX_PARTICLES;
+    for (int i = 0; i < nParticles && budget > 0; i++, budget--)
+        V1_SpawnParticle(target, g_sV1Particles[i]);
+
+    if (rings <= 0 || budget <= 0)
+        return;
+
+    // 预算不够就砍环数，宁可少放也不能崩客户端
+    int perRingCost = perRing * nParticles;
+    if (perRingCost < 1) perRingCost = 1;
+    int affordable = budget / perRingCost;
+    if (rings > affordable) rings = affordable;
+    if (rings <= 0)
+        return;
+
+    float outer = radius * spread;
+    for (int r = 1; r <= rings; r++)
+    {
+        float ringR = outer * (float(r) / float(rings));
+        // 每环旋转半个扇区，点位交错开，看着更像连片爆开而不是同心圆
+        float phase = (r % 2 == 0) ? (180.0 / float(perRing)) : 0.0;
+
+        DataPack dp;
+        CreateDataTimer(wave * float(r - 1) + 0.01, Timer_V1FxRing, dp, TIMER_FLAG_NO_MAPCHANGE);
+        dp.WriteFloat(target[0]); dp.WriteFloat(target[1]); dp.WriteFloat(target[2]);
+        dp.WriteFloat(ringR);
+        dp.WriteFloat(phase);
+        dp.WriteCell(perRing);
+    }
+}
+
+public Action Timer_V1FxRing(Handle timer, DataPack dp)
+{
+    dp.Reset();
+    float c[3];
+    c[0] = dp.ReadFloat(); c[1] = dp.ReadFloat(); c[2] = dp.ReadFloat();
+    float ringR = dp.ReadFloat();
+    float phase = dp.ReadFloat();
+    int perRing = dp.ReadCell();
+
+    for (int i = 0; i < perRing; i++)
+    {
+        float ang = DegToRad(phase + 360.0 * float(i) / float(perRing));
+        float pos[3];
+        pos[0] = c[0] + Cosine(ang) * ringR;
+        pos[1] = c[1] + Sine(ang)   * ringR;
+        pos[2] = c[2] + 16.0;
+        V1_SnapToGround(pos);
+        for (int p = 0; p < sizeof(g_sV1Particles); p++)
+            V1_SpawnParticle(pos, g_sV1Particles[p]);
+    }
+    return Plugin_Stop;
+}
+
+// v1.8.15: 屏幕震动函数（用 Shake 用户消息）
+void V1_ShakeClient(int client, float amplitude, float frequency, float duration)
+{
+    Handle msg = StartMessageOne("Shake", client, USERMSG_RELIABLE);
+    if (msg == null)
+        return;
+    BfWriteByte(msg, 0);              // shake command (0 = SHAKE_START)
+    BfWriteFloat(msg, amplitude);     // shake magnitude/amplitude
+    BfWriteFloat(msg, frequency);     // shake noise frequency
+    BfWriteFloat(msg, duration);      // shake duration
+    EndMessage();
+}
+
+// v1.8.17: 核心圈内掉落物品被冲击波吹飞——径向推开 + 上抛，距圆心越近力越大。
+// weapon_* / prop_physics 等实体多为 VPhysics 驱动，普通 m_vecVelocity + TeleportEntity
+// 对静止物理体常无效，故优先用 VPhysics native（TeleportEntity 兜底非物理体）。
+void V1_PushItem(int ent, const float pos[3], const float target[3], float coreRadius)
+{
+    float dir[3];
+    SubtractVectors(pos, target, dir);
+    float dist = GetVectorLength(dir);
+    if (dist < 1.0)
+    {
+        // 正落点：给一个随机水平方向，避免除零
+        dir[0] = GetRandomFloat(-1.0, 1.0);
+        dir[1] = GetRandomFloat(-1.0, 1.0);
+        dir[2] = 0.0;
+        dist = 1.0;
+    }
+    dir[2] += 120.0;                  // 向上分量，制造抛飞感
+    NormalizeVector(dir, dir);
+
+    // 距圆心越近推力越大（0 边缘 → 1 圆心）
+    float scale = 1.0 - (dist / coreRadius);
+    if (scale < 0.15) scale = 0.15;   // 最低保底，边缘也要飞起来
+    float force = 900.0 * scale;      // 物品用固定基础力（比幸存者推力更夸张）
+
+    ScaleVector(dir, force);
+
+    // 叠加到现有速度上后整体赋回——掉落武器/投掷物走网络速度，TeleportEntity 生效；
+    // prop_physics 需先唤醒物理体（AcceptEntityInput Wake）再给速度
+    float vel[3];
+    GetEntPropVector(ent, Prop_Data, "m_vecVelocity", vel);
+    AddVectors(vel, dir, vel);
+
+    char cls[64];
+    GetEntityClassname(ent, cls, sizeof(cls));
+    if (StrContains(cls, "prop_physics") == 0)
+        AcceptEntityInput(ent, "Wake");
+
+    TeleportEntity(ent, NULL_VECTOR, NULL_VECTOR, vel);
+}
+
+// 瞬爆：特效 + 音效 + 半径杀伤。
+// 归属铁律：attacker/inflictor = 召唤者（买家），击杀计入其战绩。
+void V1_Detonate(int client, const float target[3], float radius)
+{
+    V1_BlastFx(target, radius);
+
+    // v1.8.14: 爆炸音效已提前到 V1_Launch（导弹出现时）播放，此处不再播放，避免重复
+
+    // v1.8.16: 三层分区伤害系统（圆柱形，高度 ±1500u）
+    // 0-radius*1.38(核心区): 幸存者原分圈伤害逻辑，特感/僵尸秒杀
+    // radius*1.38-2000u(冲击波区): 幸存者震屏无伤，僵尸/特感500伤，只有Charger/Witch/Tank能活
+    // 2000-3000u(余波区): 幸存者无影响，僵尸100伤秒杀，特感轻伤
+    float coreRadius = radius * 1.38;              // 核心区扩大 38%（1.2 × 1.15）
+    float shockwaveRadius = 2000.0;               // 冲击波区外边界
+    float aftershockRadius = 3000.0;              // 余波区外边界
+
+    // v1.8.15: 屏幕震动——用 Shake 用户消息（原 World Decal 是贴花特效，
+    // m_Amplitude/m_Frequency/m_Duration 字段不存在，震动从未生效）
+    float shakeAmp  = g_cvArt6ShakeAmp.FloatValue;
+    float shakeFreq = g_cvArt6ShakeFreq.FloatValue;
+    float shakeDur  = g_cvArt6ShakeDur.FloatValue;
+    if (shakeAmp > 0.0)
+    {
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (!IsClientInGame(i) || IsFakeClient(i))
+                continue;
+            if (GetClientTeam(i) != 2)  // 只震幸存者
+                continue;
+            float pos[3];
+            GetClientAbsOrigin(i, pos);
+            // 圆柱形范围内震屏（水平距离 + 垂直高度差，与伤害判定一致）
+            float dx = pos[0] - target[0], dy = pos[1] - target[1];
+            float hdist = SquareRoot(dx * dx + dy * dy);
+            float vdiff = FloatAbs(pos[2] - target[2]);
+            if (hdist <= aftershockRadius && vdiff <= 1500.0)
+                V1_ShakeClient(i, shakeAmp, shakeFreq, shakeDur);
+        }
+    }
+
+    // 召唤者失效（断线/换图）时退回 worldspawn 作归属，伤害仍生效
+    int attacker = (client > 0 && IsClientInGame(client)) ? client : 0;
+
+    int killedCommon = 0, killedSI = 0, killedSurv = 0;
+    bool bFriendly = g_cvArt6Friendly.BoolValue;
+    float core2 = coreRadius * coreRadius;
+    float shockwave2 = shockwaveRadius * shockwaveRadius;
+    float aftershock2 = aftershockRadius * aftershockRadius;
+
+    int maxEnts = GetMaxEntities();
+    for (int ent = 1; ent <= maxEnts; ent++)
+    {
+        if (!IsValidEntity(ent) || !IsValidEdict(ent))
+            continue;
+
+        char cls[64];
+        if (!GetEntityClassname(ent, cls, sizeof(cls)))
+            continue;
+
+        bool bCommon = StrEqual(cls, "infected");
+        bool bWitch  = StrEqual(cls, "witch");
+        bool bPlayer = (ent >= 1 && ent <= MaxClients);
+
+        // v1.8.17: 掉落物品/投掷物/物理道具判定（核心圈内吹飞）
+        bool bItem = (StrContains(cls, "weapon_") == 0 ||
+                     StrContains(cls, "_projectile") != -1 ||
+                     StrEqual(cls, "prop_physics") ||
+                     StrEqual(cls, "prop_physics_override"));
+
+        if (!bCommon && !bWitch && !bPlayer && !bItem)
+            continue;
+
+        // v1.8.15: 圆柱形判定——水平距离（X/Y平面）+ 独立的垂直高度范围
+        // 避免高低差大的地形导致垂直距离吃掉半径预算
+        float pos[3];
+        GetEntPropVector(ent, Prop_Send, "m_vecOrigin", pos);
+
+        // 垂直高度判定：±1500 单位范围
+        float heightDiff = FloatAbs(pos[2] - target[2]);
+        if (heightDiff > 1500.0)
+            continue;  // 超出垂直范围
+
+        // 水平距离判定（只用 X/Y，忽略 Z）
+        float dx = pos[0] - target[0];
+        float dy = pos[1] - target[1];
+        float dist2 = dx * dx + dy * dy;  // 水平距离平方
+
+        if (dist2 > aftershock2)
+            continue;  // 超出余波区
+
+        // 判断所在区域
+        bool inCore = (dist2 <= core2);                          // 0-radius*1.38 核心区
+        bool inShockwave = !inCore && (dist2 <= shockwave2);     // 核心区-2000u 冲击波区
+        bool inAftershock = !inCore && !inShockwave;             // 2000-3000u 余波区
+
+        if (bItem)
+        {
+            // v1.8.17: 掉落物品——核心圈内被冲击波吹飞（径向 + 上抛），不造成伤害
+            if (inCore)
+                V1_PushItem(ent, pos, target, coreRadius);
+            continue;
+        }
+        if (bCommon)
+        {
+            // 小僵尸：核心区和冲击波区秒杀，余波区100伤秒杀
+            if (inCore || inShockwave)
+                SDKHooks_TakeDamage(ent, attacker, attacker, 10000.0, DMG_BLAST);
+            else
+                SDKHooks_TakeDamage(ent, attacker, attacker, 100.0, DMG_BLAST);
+            killedCommon++;
+            continue;
+        }
+        if (bWitch)
+        {
+            // v1.8.18: Witch 分层伤害（用户定稿）：核心区秒杀，冲击波区1200，余波区800
+            if (inCore)
+                SDKHooks_TakeDamage(ent, attacker, attacker, 10000.0, DMG_GENERIC);
+            else if (inShockwave)
+                SDKHooks_TakeDamage(ent, attacker, attacker, 1200.0, DMG_GENERIC);
+            else
+                SDKHooks_TakeDamage(ent, attacker, attacker, 800.0, DMG_GENERIC);
+            killedSI++;
+            continue;
+        }
+
+        // 玩家：需在游戏内且存活
+        if (!IsClientInGame(ent) || !IsPlayerAlive(ent))
+            continue;
+
+        int team = GetClientTeam(ent);
+        if (team == 3)          // 特感
+        {
+            int zClass = GetEntProp(ent, Prop_Send, "m_zombieClass");
+
+            if (inCore)
+            {
+                // 核心区：秒杀所有特感
+                SDKHooks_TakeDamage(ent, attacker, attacker, 900000.0, DMG_BLAST);
+            }
+            else if (inShockwave)
+            {
+                // v1.8.18: Tank（zClass==8）冲击波区10000伤，其他特感500伤
+                if (zClass == 8)
+                    SDKHooks_TakeDamage(ent, attacker, attacker, 10000.0, DMG_BLAST);
+                else
+                    SDKHooks_TakeDamage(ent, attacker, attacker, 500.0, DMG_BLAST);
+            }
+            else
+            {
+                // v1.8.18: Tank 余波区6000伤，其他特感100伤
+                if (zClass == 8)
+                    SDKHooks_TakeDamage(ent, attacker, attacker, 6000.0, DMG_BLAST);
+                else
+                    SDKHooks_TakeDamage(ent, attacker, attacker, 100.0, DMG_BLAST);
+            }
+            killedSI++;
+        }
+        else if (team == 2)     // 幸存者
+        {
+            if (inCore)
+            {
+                // 核心区：80u内圈秒杀，外圈线性衰减
+                if (!bFriendly)
+                    continue;
+
+                float dist = SquareRoot(dist2);
+                float innerR  = 80.0;  // v1.8.7: 硬编码80u秒杀区
+                float dmgIn   = g_cvArt6SurvDmgIn.FloatValue;
+                float dmgOut  = g_cvArt6SurvDmgOut.FloatValue;
+
+                float damage;
+                if (dist <= innerR)
+                {
+                    // 内圈：秒杀倒地
+                    damage = 10000.0;
+                }
+                else
+                {
+                    // 外圈：线性衰减 dmgIn → dmgOut
+                    float t = (dist - innerR) / (coreRadius - innerR);
+                    if (t < 0.0) t = 0.0;
+                    if (t > 1.0) t = 1.0;
+                    damage = dmgIn + (dmgOut - dmgIn) * t;
+                }
+
+                SDKHooks_TakeDamage(ent, attacker, attacker, damage, DMG_BLAST);
+                if (damage >= 1000.0) killedSurv++;
+
+                // v1.8.3: 物理推力——径向推开（距离越近推力越大）
+                float pushForce = g_cvArt6PushForce.FloatValue;
+                if (pushForce > 0.0 && dist > 1.0)
+                {
+                    float dir[3];
+                    SubtractVectors(pos, target, dir);
+                    dir[2] += 100.0;  // 向上分量，制造抛飞感
+                    NormalizeVector(dir, dir);
+
+                    // 推力随距离衰减（近距离推力更强）
+                    float scale = 1.0 - (dist / coreRadius);
+                    if (scale < 0.0) scale = 0.0;
+                    float force = pushForce * scale;
+
+                    ScaleVector(dir, force);
+                    float vel[3];
+                    GetEntPropVector(ent, Prop_Data, "m_vecVelocity", vel);
+                    AddVectors(vel, dir, vel);
+                    TeleportEntity(ent, NULL_VECTOR, NULL_VECTOR, vel);
+                }
+            }
+            // 冲击波区/余波区：幸存者无伤害（只有震屏效果）
+        }
+    }
+
+    if (attacker > 0)
+        PrintToChatAll("\x04[AGM导弹]\x01 \x05%N\x01 的导弹命中！清除 \x03%d\x01 只小僵尸、\x03%d\x01 只特感",
+            attacker, killedCommon, killedSI);
+    else
+        PrintToChatAll("\x04[AGM导弹]\x01 导弹命中！清除 \x03%d\x01 只小僵尸、\x03%d\x01 只特感",
+            killedCommon, killedSI);
+
+    LogMessage("[V1] detonate at (%.0f %.0f %.0f) r=%.0f common=%d si=%d surv=%d attacker=%d",
+        target[0], target[1], target[2], radius, killedCommon, killedSI, killedSurv, attacker);
 }
