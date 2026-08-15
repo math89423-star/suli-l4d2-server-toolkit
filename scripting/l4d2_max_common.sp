@@ -46,6 +46,11 @@ float g_fOverThresholdSince;  // game time when count first exceeded threshold
 float g_fLastDeleteTime;      // game time of last deletion
 bool  g_bInCleanup;           // currently in cleanup (deleting) mode
 
+// v1.4 — pause support (AGM strike等外部插件暂停小僵尸刷新)
+bool   g_bPaused;             // 暂停中：z_common_limit 压 0 + director_no_mobs 1
+Handle g_hPauseTimer;         // 暂停到期计时器
+ConVar g_hNoMobs;             // game cvar director_no_mobs
+
 public Plugin myinfo =
 {
     name        = "L4D2 Max Common",
@@ -54,6 +59,59 @@ public Plugin myinfo =
     version     = PLUGIN_VERSION,
     url         = ""
 };
+
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
+{
+    // v1.4: 暴露 native — 外部插件（火力支援 AGM）可暂停小僵尸刷新
+    CreateNative("MC_PauseCommon", Native_PauseCommon);
+    RegPluginLibrary("l4d2_max_common");
+    return APLRes_Success;
+}
+
+// v1.4 native: MC_PauseCommon(float seconds)
+// 暂停小僵尸刷新 N 秒：z_common_limit 压 0 + director_no_mobs 1，到期恢复动态控制。
+// seconds<=0 立即取消暂停。暂停期间 Timer_CheckCommons 跳过动态更新，保持限制为 0。
+int Native_PauseCommon(Handle plugin, int numParams)
+{
+    float seconds = GetNativeCell(1);
+
+    if (seconds <= 0.0)
+    {
+        MC_EndPause();
+        return 0;
+    }
+
+    g_bPaused = true;
+    if (g_hCommonLimit != null)
+        g_hCommonLimit.IntValue = 0;
+    if (g_hNoMobs != null)
+        g_hNoMobs.IntValue = 1;
+
+    delete g_hPauseTimer;
+    g_hPauseTimer = CreateTimer(seconds, Timer_EndPause, _, TIMER_FLAG_NO_MAPCHANGE);
+    LogMessage("[MaxCommon] paused common spawning for %.1f seconds (z_common_limit 0, director_no_mobs 1)", seconds);
+    return 0;
+}
+
+Action Timer_EndPause(Handle timer)
+{
+    g_hPauseTimer = null;
+    MC_EndPause();
+    return Plugin_Stop;
+}
+
+// 恢复正常：清暂停标志 + 恢复 director_no_mobs 0（z_common_limit 由下个 tick 动态重算）
+void MC_EndPause()
+{
+    if (!g_bPaused)
+        return;
+    g_bPaused = false;
+    delete g_hPauseTimer;
+    if (g_hNoMobs != null)
+        g_hNoMobs.IntValue = 0;
+    UpdateCommonLimit();   // 立即恢复动态限制值（不等下个 tick）
+    LogMessage("[MaxCommon] pause expired, resuming dynamic common limit");
+}
 
 public void OnPluginStart()
 {
@@ -80,6 +138,10 @@ public void OnPluginStart()
     g_hCommonLimit = FindConVar("z_common_limit");
     if (g_hCommonLimit == null)
         LogError("[MaxCommon] z_common_limit convar not found!");
+
+    g_hNoMobs = FindConVar("director_no_mobs");   // v1.4: 暂停期间禁止 mob 波
+    if (g_hNoMobs == null)
+        LogError("[MaxCommon] director_no_mobs convar not found!");
 
     RegAdminCmd("sm_common_limit", Cmd_CommonLimit, ADMFLAG_KICK,
         "Show current common infected count and limit");
@@ -151,6 +213,10 @@ stock void UpdateCommonLimit()
 Action Timer_CheckCommons(Handle timer)
 {
     if (!g_hEnabled.BoolValue || g_hCommonLimit == null)
+        return Plugin_Continue;
+
+    // v1.4: 暂停期间跳过动态更新（保持 z_common_limit 0 + director_no_mobs 1）
+    if (g_bPaused)
         return Plugin_Continue;
 
     // Update dynamic limit every tick (player count may have changed)

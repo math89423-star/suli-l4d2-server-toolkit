@@ -379,8 +379,8 @@ public void OnPluginStart() {
 	g_cBatchWindow =				CreateConVar("ss_batch_window",			"35.0",						"波内批次总释放窗口(秒), 批间隔=窗口/批数 钳制[5,10]", _, true, 5.0, true, 60.0);
 	// v2.0.0 波间三态（压力/收尾/冷静）: 收尾期场上存活 ≤ 波次×40% 或
 	// ss_rest_force 硬上限 → 冷静期零特感压力（缓冲节点）→ 下一波
-	g_cRestMin =					CreateConVar("ss_rest_min",				"20.0",						"冷静期最小时长(秒, 零特感缓冲窗口)", _, true, 1.0, true, 60.0);
-	g_cRestMax =					CreateConVar("ss_rest_max",				"30.0",						"冷静期最大时长(秒)", _, true, 1.0, true, 60.0);
+	g_cRestMin =					CreateConVar("ss_rest_min",				"25.0",						"冷静期最小时长(秒, 零特感缓冲窗口)", _, true, 1.0, true, 60.0);
+	g_cRestMax =					CreateConVar("ss_rest_max",				"35.0",						"冷静期最大时长(秒)", _, true, 1.0, true, 60.0);
 	g_cRestForce =					CreateConVar("ss_rest_force",			"120.0",					"收尾期强制冷静硬上限(秒, 自波次开始计, 防留特/僵局)", _, true, 10.0, true, 600.0);
 
 	g_cSpawnRange =					FindConVar("z_spawn_range");
@@ -1456,9 +1456,9 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 		bi = 10.0;
 	g_fBatchInterval = bi;
 
-	// v2.0.0 收尾期清剿阈值: 场上存活 ≤ max(2, floor(本波刷新量×0.4)) 进冷静期
-	// （4人8特 → ≤3 = "不足4只"; 检测存活防留特, 处决机制 25s 自然清场）
-	g_iClearThreshold = spawnSize * 4 / 10;
+	// v2.4.0 收尾期清剿阈值: 场上存活 ≤ max(2, floor(本波刷新量×0.3)) 进冷静期
+	// （非Tank波必须剿灭70%才进冷静期；4人8特 → ≤2 = "不足3只"）
+	g_iClearThreshold = spawnSize * 3 / 10;
 	if (g_iClearThreshold < 2)
 		g_iClearThreshold = 2;
 	if (!g_bFinaleStarted && aLen >= 3 && (flow - lastFlow) >= g_fDirSplitSpread) {

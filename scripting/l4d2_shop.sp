@@ -269,7 +269,9 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.8.23"
+#define PLUGIN_VERSION "1.8.24"
+// v1.8.24: AGM导弹爆炸后暂停全部特感/小僵尸刷新（默认 20s，si_hud_art6_pause_spawn）——
+//          特感走 specialspawner SS_PauseSpawning，小僵尸走 l4d2_max_common MC_PauseCommon
 // v1.8.23: 购买任意物品后自动关闭商店（不再重开同分类）；打开后无操作 6 秒自动关闭
 
 // ============================================================================
@@ -284,6 +286,13 @@
 native int SH_GetWallet(int client);
 native int SH_AddWallet(int client, int amount);
 // v1.7.0: 复活币 natives（Get/AddReviveCoins/GetCoinMax/ReviveClient）已随 si_hud v1.12.0 移除
+
+// v1.8.24: specialspawner 暂停刷新 native（AGM 爆炸后暂停特感刷新）——可选绑定，
+// specialspawner 未加载时静默跳过（MarkNativeAsOptional 见 OnPluginStart）
+native void SS_PauseSpawning(float seconds);
+
+// v1.8.24: l4d2_max_common 暂停刷新 native（AGM 爆炸后暂停小僵尸刷新）——可选绑定
+native void MC_PauseCommon(float seconds);
 
 ConVar g_cvSIHudEnable;      // si_hud 总开关（FindConVar 读；null 视为开启）
 
@@ -348,6 +357,8 @@ ConVar g_cvArt6ShakeDur;    // 震动持续秒数
 ConVar g_cvArt6PushForce;   // 推力强度（0=关闭）
 ConVar g_cvArt6MaxPerMap;   // 每图全服限购次数（0=不限）
 ConVar g_cvArt6WarnTime;    // 预警秒数（覆盖通用 warn）
+// v1.8.24: AGM 爆炸后暂停刷新时长（特感 + 小僵尸），给玩家喘息时间
+ConVar g_cvArt6PauseSpawn;  // 暂停刷新秒数（0=不暂停）
 // v1.8.1: 特效铺开——单个粒子的尺寸烘死在 pcf 里，服务端改不了（info_particle_system
 // 在 L4D2 没有 scale 键值，m_flModelScale 对粒子无效）。要让爆炸看起来覆盖到杀伤
 // 半径那么大，唯一办法是在落点周围环形补放同一套粒子。
@@ -568,6 +579,18 @@ public Plugin myinfo =
 };
 
 // ============================================================================
+// AskPluginLoad2 — 可选 native 标记（specialspawner 未加载时缺失不挡本插件）
+// ============================================================================
+
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
+{
+    // v1.8.24: SS_PauseSpawning / MC_PauseCommon 可选——对应插件未加载则跳过 AGM 暂停刷新
+    MarkNativeAsOptional("SS_PauseSpawning");
+    MarkNativeAsOptional("MC_PauseCommon");
+    return APLRes_Success;
+}
+
+// ============================================================================
 // OnPluginStart
 // ============================================================================
 
@@ -773,6 +796,11 @@ public void OnPluginStart()
         FCVAR_NOTIFY, true, 0.0, true, 1.0);
     g_cvArt6WarnTime = CreateConVar("si_hud_art6_warn", "8.0",
         "Warning seconds before V1 dives (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 1.0, true, 30.0);
+    // v1.8.24: AGM 爆炸后暂停全部特感/小僵尸刷新的秒数（用户定稿 20s）——给幸存者
+    // 喘息时间。特感走 specialspawner SS_PauseSpawning native；小僵尸走 director cvar。
+    g_cvArt6PauseSpawn = CreateConVar("si_hud_art6_pause_spawn", "20.0",
+        "Seconds to pause all special/common infected spawning after V1 detonates (0 = no pause).",
+        FCVAR_NOTIFY, true, 0.0, true, 60.0);
 
     g_cvArtHeightMin = CreateConVar("si_hud_art_height_min", "1800.0",
         "Min drop height (units) for open areas.", FCVAR_NOTIFY, true, 400.0, true, 8000.0);
@@ -4535,4 +4563,31 @@ void V1_Detonate(int client, const float target[3], float radius)
 
     LogMessage("[V1] detonate at (%.0f %.0f %.0f) r=%.0f common=%d si=%d surv=%d attacker=%d",
         target[0], target[1], target[2], radius, killedCommon, killedSI, killedSurv, attacker);
+
+    // v1.8.24: AGM 爆炸后暂停特感和小僵尸刷新（用户定稿 20s）——给幸存者喘息时间。
+    // 特感走 specialspawner SS_PauseSpawning；小僵尸走 l4d2_max_common MC_PauseCommon
+    // （不直接改 z_common_limit——max_common 每秒重算会立刻覆盖回去，暂停失效）。
+    // 两个 native 都是可选绑定：对应插件未加载则静默跳过（AGM 清场功能不受影响）。
+    float pauseSeconds = g_cvArt6PauseSpawn.FloatValue;
+    if (pauseSeconds > 0.0)
+    {
+        bool paused = false;
+
+        if (FindPluginByFile("specialspawner.smx") != INVALID_HANDLE)
+        {
+            SS_PauseSpawning(pauseSeconds);
+            LogMessage("[V1] paused special infected spawning for %.1f seconds", pauseSeconds);
+            paused = true;
+        }
+
+        if (FindPluginByFile("l4d2_max_common.smx") != INVALID_HANDLE)
+        {
+            MC_PauseCommon(pauseSeconds);
+            LogMessage("[V1] paused common infected spawning for %.1f seconds", pauseSeconds);
+            paused = true;
+        }
+
+        if (paused)
+            PrintToChatAll("\x04[AGM导弹]\x01 强大的冲击波暂时阻止了感染者的增援（\x03%.0f\x01 秒）", pauseSeconds);
+    }
 }
