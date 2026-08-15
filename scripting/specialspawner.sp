@@ -265,7 +265,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "2.3.0",
+	version = "2.4.0",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -1673,6 +1673,13 @@ void SpawnSliced(int from, int to) {
 Action tmrBatchContinue(Handle timer) {
 	g_hBatchTimer = null;
 
+	// v2.4.0 刷新暂停防御: 外部插件暂停期间延迟批次释放
+	if (g_bSpawningPaused) {
+		LogMessage("[SS] 防御: 刷新暂停期间延迟批次释放，5 秒后重试");
+		g_hBatchTimer = CreateTimer(5.0, tmrBatchContinue, _, TIMER_FLAG_NO_MAPCHANGE);
+		return Plugin_Continue;
+	}
+
 	if (g_Phase != PHASE_PRESSURE) {
 		LogMessage("[SS] 防御: %s 期间忽略幽灵批次 timer", sPhaseNames[g_Phase]);
 		return Plugin_Continue;
@@ -1898,6 +1905,14 @@ bool TRFilter_SkipPlayers(int entity, int contentsMask, any data) {
 
 Action tmrRetrySpawn(Handle timer, bool retry) {
 	g_hRetryTimer = null;
+
+	// v2.4.0 刷新暂停防御: 外部插件暂停期间延迟重试
+	if (g_bSpawningPaused) {
+		LogMessage("[SS] 防御: 刷新暂停期间延迟重试波，5 秒后重试");
+		g_hRetryTimer = CreateTimer(5.0, tmrRetrySpawn, retry);
+		return Plugin_Continue;
+	}
+
 	// v2.0.0 波间三态: 仅压力期/收尾期补波（冷静期/闲置期不补——冷静期后由
 	// rest 结束的 timer 负责下一波）
 	if (g_Phase != PHASE_PRESSURE && g_Phase != PHASE_CLEARING)
