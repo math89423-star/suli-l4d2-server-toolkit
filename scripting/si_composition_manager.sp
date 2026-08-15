@@ -33,7 +33,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.5.0"
+#define PLUGIN_VERSION "2.6.0"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -115,9 +115,6 @@ int    g_iClassLimit[SCM_CLASS_COUNT + 1];       // Hard caps from ss_*_limit
 float  g_fLastSpawnedTime[SCM_CLASS_COUNT + 1];  // Timestamp of last spawn per class
 
 Handle g_hModeTimer = INVALID_HANDLE;
-
-// Wave announcement state
-float  g_fLastWaveAnnounce = 0.0;                // GameTime of last wave chat message
 
 // ============================================================================
 // Pressure tier integration (v2.5.0 — tactical filtering)
@@ -428,7 +425,6 @@ void ResetTracking()
         g_iAliveByClass[i] = 0;
         g_fLastSpawnedTime[i] = 0.0;
     }
-    g_fLastWaveAnnounce = 0.0;
     PinSpawnTiming();   // set random interval for the first wave
     AdjustSpawnSize();  // set spawn_size for current survivor count
 }
@@ -651,9 +647,9 @@ public Action L4D_OnSpawnSpecial(int &zombieClass, const float vecPos[3], const 
 
     // v2.0.1: 波次检测/播报提前到 class 覆盖之前——PickClass 返回 -1（各类
     // 计数触顶）时旧代码走 fallback 分支静默吞掉播报，玩家只见波来不见
-    // [SI波次] 播报（2026-08-05 实测"第二波来袭不播报"）。波次检测只看
-    // 冷却时间，与 class 选择无关，提前调用无副作用。
-    DetectAndAnnounceWave();
+    // [SI波次] 播报（2026-08-05 实测"第二波来袭不播报"）。
+    // v2.4.0: 移除自主波次检测（基于冷却时间），改为监听 specialspawner
+    // SS_OnWaveStart forward，完全对齐 specialspawner 状态机。
 
     int chosen = PickClass();
     if (chosen >= ZC_SMOKER && chosen <= ZC_CHARGER) {
@@ -673,23 +669,23 @@ public Action L4D_OnSpawnSpecial(int &zombieClass, const float vecPos[3], const 
 }
 
 // ============================================================================
-// Wave detection: if cooldown expired, this spawn starts a new wave
+// v2.4.0 specialspawner forward 监听：完全对齐波次状态机
 // ============================================================================
-void DetectAndAnnounceWave()
+
+// 波次开始（PHASE_PRESSURE）——specialspawner 真正开始刷怪时播报
+public void SS_OnWaveStart(bool started)
 {
-    float now = GetGameTime();
-    float minInterval = (g_cvModeIntervalMin != null) ? g_cvModeIntervalMin.FloatValue : 35.0;
-    float cooldown = minInterval * 0.5;  // half of interval range min (v5.1: 自身 cvar)
-    if (cooldown < 15.0) cooldown = 15.0;
-
-    if (now - g_fLastWaveAnnounce > cooldown) {
-        g_fLastWaveAnnounce = now;
-
-        // Pin min=max to a new random interval → specialspawner picks exactly this
-        PinSpawnTiming();
-
+    // 只在真正刷出特感时播报（started=false 是零波，不播报）
+    if (started) {
         AnnounceWave();
     }
+}
+
+// 进入冷静期（PHASE_REST）——为下一波钉定间隔
+public void SS_OnWaveRest(float totalCountdown)
+{
+    // Pin min=max to a new random interval → specialspawner 下一波用这个间隔
+    PinSpawnTiming();
 }
 
 void AnnounceWave()

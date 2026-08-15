@@ -87,6 +87,11 @@ Handle
 	g_hClearTimer,				// v2.0.0 收尾期 2s 轮询 timer
 	g_hRestTimer;				// v2.0.0 冷静期倒计时 timer
 
+// v2.2.0 波次生命周期 forward（外部插件监听）
+GlobalForward
+	g_fwdOnWaveRest,			// 进入冷静期（清缴结束，下波倒计时开始）
+	g_fwdOnWaveStart;			// 波次开始（压力期，特感刷新）
+
 ArrayList
 	g_hBatchQueue;				// v1.7.0 本波类型队列（跨批持有，批间存活）
 
@@ -230,11 +235,18 @@ bool
 	// v1.7.0 分批状态
 	g_bBatchSegs,				// 本波是否启用三段定向
 	g_bBatchRetry,				// 本波是否 retry 波（整波零成功时 1s 后重试）
-	g_bBatchFind;				// 本波是否 rusher（跑图）
+	g_bBatchFind,				// 本波是否 rusher（跑图）
+	// v2.2.0 清缴挂起标志（外部插件控制，Tank 波等场景强制等待条件满足）
+	g_bClearingHeld,
+	// v2.4.0 刷新暂停标志（外部插件控制，火力支援 AGM 等场景临时暂停刷新）
+	g_bSpawningPaused;
 
 // v2.0.0 波间三态: 当前相位（初始 = IDLE）
 WavePhase
 	g_Phase;
+
+// v2.4.0 刷新暂停计时器句柄
+Handle g_hPauseTimer;
 
 // v1.7.0 参照者/flow 数组（全局持有——分批跨 timer 续刷需要存活）
 int
@@ -253,12 +265,54 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "2.1.0",
+	version = "2.3.0",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
 	g_bLateLoad = late;
+	// v2.2.0 暴露 native: 外部插件可挂起清缴（Tank 波要求 Tank 死亡才结束清缴）
+	CreateNative("SS_HoldClearing", Native_HoldClearing);
+	// v2.4.0 暴露 native: 外部插件可暂停刷新（火力支援 AGM 等清场技能）
+	CreateNative("SS_PauseSpawning", Native_PauseSpawning);
+	RegPluginLibrary("specialspawner");
 	return APLRes_Success;
+}
+
+// v2.2.0 native: SS_HoldClearing(bool hold)
+// hold=true: 收尾期不进 REST（无视特感数/120s硬上限），直到调用方置 false
+// 用途: Tank 波期间强制清缴条件 = Tank 死亡（由 tank_wave_mutator 控制）
+int Native_HoldClearing(Handle plugin, int numParams) {
+	g_bClearingHeld = GetNativeCell(1) != 0;
+	LogMessage("[SS] Clearing hold %s (external)", g_bClearingHeld ? "SET" : "RELEASED");
+	return 0;
+}
+
+// v2.4.0 native: SS_PauseSpawning(float seconds)
+// 暂停特感刷新 N 秒（外部插件调用，如火力支援 AGM 爆炸清场）
+// seconds: 暂停秒数（调用时重置计时器，最后一次调用生效）
+// 用途: 火力支援 AGM 导弹爆炸后暂停刷新 20 秒，给玩家喘息时间
+int Native_PauseSpawning(Handle plugin, int numParams) {
+	float seconds = GetNativeCell(1);
+	if (seconds <= 0.0) {
+		g_bSpawningPaused = false;
+		delete g_hPauseTimer;
+		LogMessage("[SS] Spawning pause CLEARED (external)");
+		return 0;
+	}
+
+	g_bSpawningPaused = true;
+	delete g_hPauseTimer;
+	g_hPauseTimer = CreateTimer(seconds, Timer_UnpauseSpawning, _, TIMER_FLAG_NO_MAPCHANGE);
+	LogMessage("[SS] Spawning PAUSED for %.1f seconds (external)", seconds);
+	return 0;
+}
+
+// v2.4.0 计时器回调：暂停时间到，恢复刷新
+Action Timer_UnpauseSpawning(Handle timer) {
+	g_hPauseTimer = null;
+	g_bSpawningPaused = false;
+	LogMessage("[SS] Spawning pause EXPIRED, resuming normal spawn");
+	return Plugin_Stop;
 }
 
 public void OnPluginStart() {
@@ -325,8 +379,8 @@ public void OnPluginStart() {
 	g_cBatchWindow =				CreateConVar("ss_batch_window",			"35.0",						"波内批次总释放窗口(秒), 批间隔=窗口/批数 钳制[5,10]", _, true, 5.0, true, 60.0);
 	// v2.0.0 波间三态（压力/收尾/冷静）: 收尾期场上存活 ≤ 波次×40% 或
 	// ss_rest_force 硬上限 → 冷静期零特感压力（缓冲节点）→ 下一波
-	g_cRestMin =					CreateConVar("ss_rest_min",				"12.0",						"冷静期最小时长(秒, 零特感缓冲窗口)", _, true, 1.0, true, 60.0);
-	g_cRestMax =					CreateConVar("ss_rest_max",				"18.0",						"冷静期最大时长(秒)", _, true, 1.0, true, 60.0);
+	g_cRestMin =					CreateConVar("ss_rest_min",				"20.0",						"冷静期最小时长(秒, 零特感缓冲窗口)", _, true, 1.0, true, 60.0);
+	g_cRestMax =					CreateConVar("ss_rest_max",				"30.0",						"冷静期最大时长(秒)", _, true, 1.0, true, 60.0);
 	g_cRestForce =					CreateConVar("ss_rest_force",			"120.0",					"收尾期强制冷静硬上限(秒, 自波次开始计, 防留特/僵局)", _, true, 10.0, true, 600.0);
 
 	g_cSpawnRange =					FindConVar("z_spawn_range");
@@ -376,6 +430,10 @@ public void OnPluginStart() {
 	RegAdminCmd("sm_resetspawn",	cmdResetSpawn,	ADMFLAG_RCON, "处死所有特感并重新开始生成计时");
 	RegAdminCmd("sm_forcetimer",	cmdForceTimer,	ADMFLAG_RCON, "开始生成计时");
 	RegAdminCmd("sm_type",			cmdType,		ADMFLAG_ROOT, "随机轮换模式");
+
+	// v2.2.0 创建波次生命周期 forward（外部插件监听）
+	g_fwdOnWaveRest = new GlobalForward("SS_OnWaveRest", ET_Ignore, Param_Float);
+	g_fwdOnWaveStart = new GlobalForward("SS_OnWaveStart", ET_Ignore, Param_Cell);
 
 	HookEntityOutput("trigger_finale", "FinaleStart", OnFinaleStart);
 
@@ -1188,6 +1246,13 @@ Action tmrSpawnSpecial(Handle timer) {
 	g_hSpawnTimer = null;
 	delete g_hRetryTimer;
 
+	// v2.4.0 刷新暂停防御: 外部插件暂停期间延迟刷新（如 AGM 爆炸清场）
+	if (g_bSpawningPaused) {
+		LogMessage("[SS] 防御: 刷新暂停期间延迟波次，5 秒后重试");
+		g_hSpawnTimer = CreateTimer(5.0, tmrSpawnSpecial);
+		return Plugin_Continue;
+	}
+
 	// v2.0.1 冷静期契约防御: REST 期间绝不允许排波。历史 bug（tmrClearCheck
 	// REPEAT timer 回调自删双重释放）导致 SM 句柄表污染，出现 REST 期间幽灵
 	// 波 timer 提前触发（波 B 在冷静期第 12s 刷出、无播报，玩家实测"第二波
@@ -1204,6 +1269,11 @@ Action tmrSpawnSpecial(Handle timer) {
 	int totalSI = GetTotalSI();
 	// v2.1.0 FIX: 新波次开始应传 false（非 retry），才能触发 OnWaveStarted 通知
 	bool started = ExecuteSpawnQueue(totalSI, false);
+
+	// v2.2.0 触发 WaveStart forward（started=是否真的刷出特感，供外部插件同步波次）
+	Call_StartForward(g_fwdOnWaveStart);
+	Call_PushCell(started);
+	Call_Finish();
 
 	// v2.0.0: 零波（上限满/全倒/无站立生还者）直接进收尾期轮询, 链条不断
 	if (!started)
@@ -1696,6 +1766,11 @@ Action tmrClearCheck(Handle timer) {
 		return Plugin_Stop;
 	}
 
+	// v2.2.0 清缴挂起检查：外部插件（Tank 波等）要求强制等待，跳过常规判定
+	if (g_bClearingHeld) {
+		return Plugin_Continue;	// 继续轮询，直到外部释放挂起
+	}
+
 	if (GetTotalSI() <= g_iClearThreshold || GetEngineTime() - g_fPhaseEnterTime >= g_cRestForce.FloatValue) {
 		g_hClearTimer = null;
 		EnterRest();
@@ -1727,12 +1802,18 @@ void EnterRest() {
 	g_hRestTimer = CreateTimer(rest, tmrRestEnd);
 	LogMessage("[SS] phase: CLEARING -> REST (%.1fs, tier T%d)", rest, g_iCurrentPressureTier);
 
+	// v2.2.0 触发 REST forward（传入总倒计时秒数，供外部插件预警）
+	float totalCountdown = rest + GetPostRestInterval();
+	Call_StartForward(g_fwdOnWaveRest);
+	Call_PushFloat(totalCountdown);
+	Call_Finish();
+
 	// v2.1.0 通知 pressure_tracker 波次结束
 	if (g_bPressureTrackerExists) {
 		NotifyPressureWaveCleared();
 	}
 
-	int total = RoundToNearest(rest + GetPostRestInterval());
+	int total = RoundToNearest(totalCountdown);
 	PrintToChatAll("\x04[特感]\x01 波次清剿完毕，\x05%d\x01 秒后下一波", total);
 }
 
@@ -1766,6 +1847,7 @@ Action tmrRestEnd(Handle timer) {
 // 中止并重置波次生命周期（admin 命令 / 换图 / 卸载复用; 不碰自杀 timer）
 void ResetLifecycle() {
 	g_Phase = PHASE_IDLE;
+	g_bClearingHeld = false;	// v2.2.0 释放清缴挂起（防换图/reload 残留）
 	KillClearTimer();
 	if (g_hRestTimer != null && IsValidHandle(g_hRestTimer))
 		delete g_hRestTimer;

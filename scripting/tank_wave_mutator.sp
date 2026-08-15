@@ -1,5 +1,7 @@
 // tank_wave_mutator.sp
-// Tank 波次突变系统：10% 随机突变 + 连续5波无倒地强制 Tank + Tank 波后6波冷静期
+// Tank 波次突变系统：10% 随机突变 + 连续5波无倒地强制双Tank + 连续11波无Tank强制单Tank + Tank波后3波冷静期
+// v2.2.0: Tank 波强制清缴条件 = Tank 死亡（挂起 specialspawner 清缴判定）
+// v2.3.0: 新增11波无Tank保底（第12波必刷单Tank，冷静期波不计数）+ 冷静期 9→3 波
 #pragma semicolon 1
 #pragma newdecls required
 
@@ -7,23 +9,30 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "1.0.1"
+#define PLUGIN_VERSION "2.3.0"
 
 // 配置常量
-#define MUTATION_CHANCE 1.00        // [临时测试100%] 正式值应为 0.10
-#define FORCE_TANK_WAVES 5          // 连续5波无倒地触发强制Tank
-#define TANK_COOLDOWN_WAVES 6       // Tank波后冷静期（4 × 1.5）
-#define SI_COUNT_THRESHOLD_LOW 2    // 波间特感数下限
-#define SI_COUNT_THRESHOLD_HIGH 4   // 新波次特感数上限
+#define MUTATION_CHANCE 0.10        // 10% 突变概率
+#define FORCE_TANK_WAVES 5          // 连续5波无倒地触发强制双Tank
+#define FORCE_TANK_NO_SPAWN 11      // 连续11波无Tank触发保底单Tank（第12波必刷）
+#define TANK_COOLDOWN_WAVES 3       // Tank波后冷静期（9→3）
+#define MAX_TRACKED_TANKS 4         // 最多跟踪的 Tank 数量
+
+// specialspawner native 声明
+native void SS_HoldClearing(bool hold);
 
 // 全局变量
 int g_iWaveCounter = 0;             // 总波次计数
 int g_iNoDownWaves = 0;             // 连续无倒地波次
+int g_iNoTankWaves = 0;             // 连续无Tank波次（冷静期不累加）
 int g_iTankCooldown = 0;            // Tank波后冷静期剩余
-int g_iLastSICount = 0;             // 上次特感数量
-bool g_bWaveActive = false;         // 当前是否在波次中
+bool g_bNextWaveIsTank = false;     // 下一波是否为Tank波（预警标志）
+int g_iNextTankCount = 0;           // 下一波Tank数量（1=突变, 2=强制）
 
-Handle g_hMonitorTimer = null;      // 监听定时器
+// Tank 波跟踪
+int g_iTanks[MAX_TRACKED_TANKS];    // 当前 Tank 波生成的 Tank client 索引
+int g_iTankCount = 0;               // 当前活跃 Tank 数量
+Handle g_hTankMonitor = null;       // Tank 状态监控定时器
 
 public Plugin myinfo = {
     name = "Tank Wave Mutator",
@@ -37,24 +46,17 @@ public void OnPluginStart() {
     // 监听倒地和死亡事件
     HookEvent("player_incapacitated", Event_PlayerDown);
     HookEvent("player_death", Event_PlayerDeath);
-    HookEvent("tank_spawn", Event_TankSpawn);
 
     // 换图重置
     HookEvent("round_start", Event_RoundStart);
-    HookEvent("round_end", Event_RoundEnd);
-
-    // 启动监听定时器
-    g_hMonitorTimer = CreateTimer(1.0, Timer_MonitorWaves, _, TIMER_REPEAT);
 
     LogMessage("[Tank Mutator] Plugin loaded. Mutation: %.0f%%, Force: %d waves, Cooldown: %d waves",
                MUTATION_CHANCE * 100.0, FORCE_TANK_WAVES, TANK_COOLDOWN_WAVES);
 }
 
 public void OnPluginEnd() {
-    if (g_hMonitorTimer != null) {
-        KillTimer(g_hMonitorTimer);
-        g_hMonitorTimer = null;
-    }
+    // 卸载时释放清缴挂起
+    ReleaseClearingHold();
 }
 
 // ============ 事件处理 ============
@@ -63,15 +65,13 @@ void Event_RoundStart(Event event, const char[] name, bool dontBroadcast) {
     // 换图重置所有状态
     g_iWaveCounter = 0;
     g_iNoDownWaves = 0;
+    g_iNoTankWaves = 0;
     g_iTankCooldown = 0;
-    g_iLastSICount = 0;
-    g_bWaveActive = false;
+    g_bNextWaveIsTank = false;
+    g_iNextTankCount = 0;
+    ClearTankTracking();
+    ReleaseClearingHold();
     LogMessage("[Tank Mutator] Round start, all counters reset");
-}
-
-void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast) {
-    // 回合结束暂停监听
-    g_bWaveActive = false;
 }
 
 void Event_PlayerDown(Event event, const char[] name, bool dontBroadcast) {
@@ -85,58 +85,58 @@ void Event_PlayerDown(Event event, const char[] name, bool dontBroadcast) {
 
 void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
     int client = GetClientOfUserId(event.GetInt("userid"));
-    if (client > 0 && IsClientInGame(client) && GetClientTeam(client) == 2) {
+    if (client <= 0 || !IsClientInGame(client)) return;
+
+    if (GetClientTeam(client) == 2) {
         // 生还者死亡，重置连续无倒地计数
         g_iNoDownWaves = 0;
         LogMessage("[Tank Mutator] Survivor death, reset no-down counter");
+    } else if (GetClientTeam(client) == 3 && IsTank(client)) {
+        // Tank 死亡，检查是否在跟踪列表中
+        CheckTankDeath(client);
     }
 }
 
-void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast) {
-    int client = GetClientOfUserId(event.GetInt("userid"));
-    LogMessage("[Tank Mutator] Tank spawned (client: %d)", client);
-}
+// ============ specialspawner forward 监听 ============
 
-// ============ 波次监听核心 ============
+public void SS_OnWaveRest(float totalCountdown) {
+    // 波次清缴结束，进入 REST 冷静期，totalCountdown = REST时长 + 下波间隔
+    // 此时判定下一波是否为 Tank 波，如果是则提前预警
 
-Action Timer_MonitorWaves(Handle timer) {
-    int currentSICount = CountSpecialInfected();
-
-    // 检测新波次开始：特感数从 ≤2 增加到 ≥4
-    if (g_iLastSICount <= SI_COUNT_THRESHOLD_LOW && currentSICount >= SI_COUNT_THRESHOLD_HIGH) {
-        if (!g_bWaveActive) {
-            OnNewWave();
-            g_bWaveActive = true;
-        }
+    // 首波保护：第一波必定不是 Tank
+    if (g_iWaveCounter == 0) {
+        g_bNextWaveIsTank = false;
+        LogMessage("[Tank Mutator] Wave #1 upcoming, first wave protection");
+        return;
     }
 
-    // 检测波次结束：特感数降至 ≤2
-    if (currentSICount <= SI_COUNT_THRESHOLD_LOW && g_bWaveActive) {
-        g_bWaveActive = false;
+    // Tank波后冷静期：不刷Tank，冻结无倒地/无Tank计数（打完Tank后的波次不算在内）
+    if (g_iTankCooldown > 0) {
+        g_iTankCooldown--;
+        g_bNextWaveIsTank = false;
+        g_iNextTankCount = 0;
+        LogMessage("[Tank Mutator] Next wave: normal (cooldown %d left, counters frozen)", g_iTankCooldown);
+        return;
     }
 
-    g_iLastSICount = currentSICount;
-    return Plugin_Continue;
-}
+    // 结算刚打完的这一波（非冷静期普通波）：先累加计数，再判定下一波
+    // 无倒地计数在 player_incapacitated/player_death 中被清零，此处递增=本波全程无倒地
+    g_iNoDownWaves++;
+    g_iNoTankWaves++;
 
-void OnNewWave() {
-    g_iWaveCounter++;
-    LogMessage("[Tank Mutator] Wave #%d detected (SI count: %d)", g_iWaveCounter, g_iLastSICount);
-
-    // 判定是否触发Tank波
     bool shouldSpawnTank = false;
+    bool doubleTank = false;
     char reason[128];
 
-    if (g_iTankCooldown > 0) {
-        // 冷静期中，递减计数，不累加无倒地计数，不触发Tank
-        g_iTankCooldown--;
-        Format(reason, sizeof(reason), "Cooldown (%d waves remaining)", g_iTankCooldown);
-        LogMessage("[Tank Mutator] In cooldown period: %d waves left", g_iTankCooldown);
-        // 注意：冷静期内 g_iNoDownWaves 不累加（跳过 else 分支）
-    } else if (g_iNoDownWaves >= FORCE_TANK_WAVES) {
-        // 强制Tank波（连续5波无倒地）
+    if (g_iNoDownWaves >= FORCE_TANK_WAVES) {
+        // 强制双Tank波（连续N波无倒地）
         shouldSpawnTank = true;
-        Format(reason, sizeof(reason), "Forced (no downs for %d waves)", g_iNoDownWaves);
+        doubleTank = true;
+        Format(reason, sizeof(reason), "Forced double (no downs for %d waves)", g_iNoDownWaves);
+    } else if (g_iNoTankWaves >= FORCE_TANK_NO_SPAWN) {
+        // 保底单Tank波（连续N波无Tank，第N+1波必刷）
+        shouldSpawnTank = true;
+        Format(reason, sizeof(reason), "Guaranteed (no tank for %d waves)", g_iNoTankWaves);
     } else {
         // 10% 随机突变
         float roll = GetURandomFloat();
@@ -146,73 +146,194 @@ void OnNewWave() {
         } else {
             Format(reason, sizeof(reason), "No mutation (rolled %.1f%%)", roll * 100.0);
         }
-
-        // 非冷静期的普通波次，累加无倒地计数
-        g_iNoDownWaves++;
     }
 
     if (shouldSpawnTank) {
-        LogMessage("[Tank Mutator] TANK WAVE triggered! Reason: %s", reason);
+        g_bNextWaveIsTank = true;
+        int countdown = RoundToNearest(totalCountdown);
 
-        // 特殊播报（仅一行，全局聊天区）
-        PrintToChatAll("\x04☠ TANK 波次来袭！\x01");
+        if (doubleTank) {
+            g_iNextTankCount = 2;
+            LogMessage("[Tank Mutator] DOUBLE TANK WAVE predicted! Reason: %s", reason);
+            PrintToChatAll("\x04☠ 警告：下一波将刷新 \x03双倍 TANK\x01！");
+            PrintCenterTextAll("☠ 警告：下一波双倍 TANK 来袭！%d 秒后", countdown);
+        } else {
+            g_iNextTankCount = 1;
+            LogMessage("[Tank Mutator] TANK WAVE predicted! Reason: %s", reason);
+            PrintToChatAll("\x04☠ 警告：下一波将刷新 TANK！\x01");
+            PrintCenterTextAll("☠ 警告：下一波 TANK 来袭！%d 秒后", countdown);
+        }
 
-        // 延迟生成Tank（避免与specialspawner冲突）
-        CreateTimer(1.5, Timer_SpawnTank, _, TIMER_FLAG_NO_MAPCHANGE);
+        PrintToChatAll("\x04[Tank Mutator]\x01 做好准备，还有 \x05%d\x01 秒", countdown);
 
-        // 重置无倒地计数，进入冷静期
-        g_iNoDownWaves = 0;
+        // Tank 波后进入 N 波冷静期，计数器归零
         g_iTankCooldown = TANK_COOLDOWN_WAVES;
+        g_iNoDownWaves = 0;
+        g_iNoTankWaves = 0;
     } else {
-        // 日志记录（不播报）
-        LogMessage("[Tank Mutator] Normal wave. No-down streak: %d/%d. %s",
-                   g_iNoDownWaves, FORCE_TANK_WAVES, reason);
+        // 普通波：计数已在上方累加
+        g_bNextWaveIsTank = false;
+        g_iNextTankCount = 0;
+        LogMessage("[Tank Mutator] Next wave: normal. No-down: %d/%d, No-tank: %d/%d. %s",
+                   g_iNoDownWaves, FORCE_TANK_WAVES, g_iNoTankWaves, FORCE_TANK_NO_SPAWN, reason);
     }
 }
 
-Action Timer_SpawnTank(Handle timer) {
-    // 找一个存活的幸存者作为参考点
-    int client = GetAnyAliveSurvivor();
-    if (client <= 0) {
-        LogMessage("[Tank Mutator] Tank spawn failed: no alive survivor found");
-        return Plugin_Stop;
+public void SS_OnWaveStart(bool started) {
+    // 波次开始（PHASE_PRESSURE），started = 是否真的刷出了特感
+    g_iWaveCounter++;
+
+    if (!started) {
+        // 零波（上限满/全倒等），specialspawner 直接进收尾期
+        LogMessage("[Tank Mutator] Wave #%d: zero wave (no SI spawned)", g_iWaveCounter);
+        return;
     }
 
-    // 使用 left4dhooks 寻找合适的 Tank 生成位置（zombieClass 8 = Tank）
-    float spawnPos[3], spawnAng[3] = {0.0, 0.0, 0.0};
-    if (!L4D_GetRandomPZSpawnPosition(client, 8, 10, spawnPos)) {
-        LogMessage("[Tank Mutator] Tank spawn failed: no valid spawn position found");
-        return Plugin_Stop;
+    LogMessage("[Tank Mutator] Wave #%d started", g_iWaveCounter);
+
+    // 如果这波预判为 Tank 波，现在生成 Tank
+    if (g_bNextWaveIsTank) {
+        // 立即挂起清缴（Tank 波期间强制等 Tank 死）
+        SetClearingHold(true);
+
+        // 延迟1.5秒生成（等 specialspawner 批次完成），传入 Tank 数量
+        DataPack pack;
+        CreateDataTimer(1.5, Timer_SpawnTank, pack, TIMER_FLAG_NO_MAPCHANGE);
+        pack.WriteCell(g_iNextTankCount);
+        g_bNextWaveIsTank = false;  // 消费标志位
+        g_iNextTankCount = 0;
+    }
+}
+
+Action Timer_SpawnTank(Handle timer, DataPack pack) {
+    pack.Reset();
+    int tankCount = pack.ReadCell();
+    if (tankCount < 1) tankCount = 1;
+
+    // 清空旧跟踪
+    ClearTankTracking();
+
+    int spawned = 0;
+    for (int n = 0; n < tankCount && spawned < MAX_TRACKED_TANKS; n++) {
+        // 每只 Tank 独立找参考幸存者和生成点
+        int client = GetAnyAliveSurvivor();
+        if (client <= 0) {
+            LogMessage("[Tank Mutator] Tank spawn failed: no alive survivor found");
+            break;
+        }
+
+        // 使用 left4dhooks 寻找合适的 Tank 生成位置（zombieClass 8 = Tank）
+        float spawnPos[3], spawnAng[3] = {0.0, 0.0, 0.0};
+        if (!L4D_GetRandomPZSpawnPosition(client, 8, 10, spawnPos)) {
+            LogMessage("[Tank Mutator] Tank #%d spawn failed: no valid spawn position", n + 1);
+            continue;
+        }
+
+        // 直接生成 Tank
+        int tank = L4D2_SpawnTank(spawnPos, spawnAng);
+        if (tank > 0 && IsClientInGame(tank)) {
+            g_iTanks[spawned] = tank;
+            spawned++;
+            LogMessage("[Tank Mutator] Tank #%d spawned at (%.1f, %.1f, %.1f), client: %d",
+                       n + 1, spawnPos[0], spawnPos[1], spawnPos[2], tank);
+        } else {
+            LogMessage("[Tank Mutator] Tank #%d spawn failed: invalid entity", n + 1);
+        }
     }
 
-    // 直接生成 Tank
-    int tank = L4D2_SpawnTank(spawnPos, spawnAng);
-    if (tank > 0 && IsClientInGame(tank)) {
-        LogMessage("[Tank Mutator] Tank spawned successfully at position (%.1f, %.1f, %.1f), entity: %d",
-                   spawnPos[0], spawnPos[1], spawnPos[2], tank);
+    g_iTankCount = spawned;
+    LogMessage("[Tank Mutator] Spawn complete: %d/%d tanks tracked", spawned, tankCount);
+
+    if (spawned == 0) {
+        // 没生成任何 Tank，立即释放挂起
+        LogMessage("[Tank Mutator] No tanks spawned, releasing clearing hold immediately");
+        ReleaseClearingHold();
     } else {
-        LogMessage("[Tank Mutator] Tank spawn failed: L4D2_SpawnTank returned invalid entity");
+        // 启动监控定时器（每 2 秒检查 Tank 状态）
+        if (g_hTankMonitor != null) {
+            KillTimer(g_hTankMonitor);
+        }
+        g_hTankMonitor = CreateTimer(2.0, Timer_MonitorTanks, _, TIMER_REPEAT);
     }
 
     return Plugin_Stop;
 }
 
-// ============ 工具函数 ============
+// ============ Tank 跟踪管理 ============
 
-int CountSpecialInfected() {
-    int count = 0;
-    for (int i = 1; i <= MaxClients; i++) {
-        if (IsClientInGame(i) && GetClientTeam(i) == 3) {
-            int class = GetEntProp(i, Prop_Send, "m_zombieClass");
-            // 1=Smoker, 2=Boomer, 3=Hunter, 4=Spitter, 5=Jockey, 6=Charger
-            // Tank (8) 不计入普通特感波次
-            if (class >= 1 && class <= 6) {
-                count++;
+void ClearTankTracking() {
+    for (int i = 0; i < MAX_TRACKED_TANKS; i++) {
+        g_iTanks[i] = 0;
+    }
+    g_iTankCount = 0;
+    if (g_hTankMonitor != null) {
+        KillTimer(g_hTankMonitor);
+        g_hTankMonitor = null;
+    }
+}
+
+void CheckTankDeath(int client) {
+    bool wasTracked = false;
+    for (int i = 0; i < MAX_TRACKED_TANKS; i++) {
+        if (g_iTanks[i] == client) {
+            g_iTanks[i] = 0;
+            wasTracked = true;
+            LogMessage("[Tank Mutator] Tracked tank %d died", client);
+            break;
+        }
+    }
+
+    if (wasTracked) {
+        // 重新统计存活 Tank
+        CheckAllTanksStatus();
+    }
+}
+
+Action Timer_MonitorTanks(Handle timer) {
+    CheckAllTanksStatus();
+    return Plugin_Continue;
+}
+
+void CheckAllTanksStatus() {
+    int alive = 0;
+    for (int i = 0; i < MAX_TRACKED_TANKS; i++) {
+        if (g_iTanks[i] > 0) {
+            // 检查该 Tank 是否仍然有效且存活
+            if (IsClientInGame(g_iTanks[i]) && IsPlayerAlive(g_iTanks[i]) && IsTank(g_iTanks[i])) {
+                alive++;
+            } else {
+                // Tank 已失效或死亡
+                if (g_iTanks[i] != 0) {
+                    LogMessage("[Tank Mutator] Tank client %d no longer valid", g_iTanks[i]);
+                }
+                g_iTanks[i] = 0;
             }
         }
     }
-    return count;
+
+    // 所有 Tank 都死了，释放清缴挂起
+    if (alive == 0 && g_iTankCount > 0) {
+        LogMessage("[Tank Mutator] All tanks eliminated, releasing clearing hold");
+        ReleaseClearingHold();
+        ClearTankTracking();
+    }
 }
+
+// ============ specialspawner native 调用 ============
+
+void SetClearingHold(bool hold) {
+    if (GetFeatureStatus(FeatureType_Native, "SS_HoldClearing") != FeatureStatus_Available) {
+        LogMessage("[Tank Mutator] WARNING: SS_HoldClearing native not available");
+        return;
+    }
+    SS_HoldClearing(hold);
+}
+
+void ReleaseClearingHold() {
+    SetClearingHold(false);
+}
+
+// ============ 工具函数 ============
 
 // 返回任意一个存活的幸存者 client index，找不到返回 -1
 int GetAnyAliveSurvivor() {
@@ -222,4 +343,15 @@ int GetAnyAliveSurvivor() {
         }
     }
     return -1;
+}
+
+bool IsTank(int client) {
+    if (client <= 0 || client > MaxClients || !IsClientInGame(client)) {
+        return false;
+    }
+    if (GetClientTeam(client) != 3) {
+        return false;
+    }
+    int class = GetEntProp(client, Prop_Send, "m_zombieClass");
+    return class == 8;  // 8 = Tank
 }
