@@ -1,6 +1,6 @@
 #include <sourcemod>
 
-#define PLUGIN_VERSION "1.2"
+#define PLUGIN_VERSION "1.3"
 
 public Plugin myinfo =
 {
@@ -28,7 +28,7 @@ public Action Timer_Welcome(Handle timer, int userid)
     if (client == 0 || !IsClientInGame(client))
         return Plugin_Stop;
 
-    PrintToChat(client, "\x04[粟藜L4D2] \x0124人困难多特战役服 · 60tick · 6特 · 45-60s波次");
+    PrintToChat(client, "\x04[粟藜L4D2] \x0124人困难多特战役服 · 60tick · 2.5特/人 · 40-55s波次");
     PrintToChat(client, "\x05直连 \x03connect 81.71.101.135:27015");
     PrintToChat(client, "\x05输入 \x04!motd\x05 查看完整服务器公告");
     PrintToChat(client, "\x01QQ群: \x05873133645  · Steam组: \x05suli-l4d2-server");
