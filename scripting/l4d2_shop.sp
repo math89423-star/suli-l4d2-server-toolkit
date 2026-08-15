@@ -269,7 +269,8 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.8.22"
+#define PLUGIN_VERSION "1.8.23"
+// v1.8.23: 购买任意物品后自动关闭商店（不再重开同分类）；打开后无操作 6 秒自动关闭
 
 // ============================================================================
 // SH_ public API（l4d2_si_hud >= v1.9.0 导出；契约见 include/l4d2_si_hud.inc）
@@ -514,6 +515,7 @@ int       g_iShopCat[MAXPLAYERS + 1];           // 当前打开的商品分类�
 // （解决：①打开后换武器弹药价过期 ②打开后获得积分余额冻结）。L4D2 菜单
 // 是数字键选择式，重绘无缝；用内容签名门控只在数据真变时重绘，避免闪烁。
 Handle    g_hShopRefreshTimer[MAXPLAYERS + 1]; // 刷新心跳（0.5s；菜单关闭即停）
+Handle    g_hShopIdleTimer[MAXPLAYERS + 1];    // 无操作自动关闭计时器（6秒）
 int       g_iShopView[MAXPLAYERS + 1];          // 当前视图 0=无 1=分类选择页 2=商品列表页
 int       g_iShopSigWallet[MAXPLAYERS + 1];     // 上次重绘时的钱包（签名）
 int       g_iShopSigAmmo[MAXPLAYERS + 1];       // 上次重绘时的弹药补充动态价（签名，-1=当前分类无此商品）
@@ -982,6 +984,11 @@ public void OnClientDisconnect(int client)
     {
         KillTimer(g_hShopRefreshTimer[client]);
         g_hShopRefreshTimer[client] = null;
+    }
+    if (g_hShopIdleTimer[client] != null)   // 断线清理无操作计时器
+    {
+        KillTimer(g_hShopIdleTimer[client]);
+        g_hShopIdleTimer[client] = null;
     }
     // v1.7.31b fix: 限购计数断线清零（否则下个进服玩家继承"已购满"）
     for (int j = 0; j < SHOP_SLOTS; j++)
@@ -1771,7 +1778,7 @@ void OpenShopMenu(int client)
     menu.AddItem("3", "其他");        // v1.4.6: 第 6 类（cat 值 3）
     menu.ExitButton = true;
     g_hShopMenu[client] = menu;
-    menu.Display(client, 20);
+    menu.Display(client, 8);   // 8s 引擎超时兜底（无操作计时器 6s 先触发；Cancel 失效也能自然关）
 
     // v1.8.22: 刷新状态记录 + 启动/保持心跳（ensure 模式：只在不存在时创建，
     // 绝不在重绘路径 KillTimer——本函数会被 Timer_ShopRefresh 回调，若杀自身
@@ -1887,7 +1894,7 @@ void ShopCategoryMenu(int client, int cat)
     menu.ExitBackButton = true;
     menu.ExitButton = true;
     g_hShopMenu[client] = menu;
-    menu.Display(client, 20);
+    menu.Display(client, 8);   // 8s 引擎超时兜底（无操作计时器 6s 先触发；Cancel 失效也能自然关）
 
     // v1.8.22: 刷新状态记录 + 启动/保持心跳（已有计时器时不重启，延续即可）
     g_iShopView[client] = 2;                    // 商品列表页
@@ -1896,6 +1903,40 @@ void ShopCategoryMenu(int client, int cat)
     if (g_hShopRefreshTimer[client] == null)
         g_hShopRefreshTimer[client] = CreateTimer(0.5, Timer_ShopRefresh, GetClientUserId(client),
             TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// 重置 6 秒无操作自动关闭计时器（只在真实用户操作点调用，重绘路径不调）
+void ShopResetIdleTimer(int client)
+{
+    if (g_hShopIdleTimer[client] != null)
+    {
+        KillTimer(g_hShopIdleTimer[client]);
+        g_hShopIdleTimer[client] = null;
+    }
+    g_hShopIdleTimer[client] = CreateTimer(6.0, Timer_ShopIdle, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// 无操作 6 秒 → 关闭商店菜单
+public Action Timer_ShopIdle(Handle timer, int userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client > 0)
+        g_hShopIdleTimer[client] = null;   // one-shot：句柄自动失效
+    if (client <= 0 || !IsClientInGame(client))
+        return Plugin_Stop;
+    if (g_hShopMenu[client] != null)
+    {
+        // 主动取消菜单（menu.Cancel() 比 CancelClientMenu 更可靠）+ 停止刷新心跳
+        Menu menu = view_as<Menu>(g_hShopMenu[client]);
+        menu.Cancel();   // 触发 MenuAction_Cancel → End，End 分支清理句柄/心跳
+        g_iShopView[client] = 0;
+        if (g_hShopRefreshTimer[client] != null)
+        {
+            KillTimer(g_hShopRefreshTimer[client]);
+            g_hShopRefreshTimer[client] = null;
+        }
+    }
+    return Plugin_Stop;
 }
 
 // v1.8.22: 商店菜单刷新心跳（0.5s）——检测钱包/弹药价格变化，内容变时重绘菜单
@@ -1956,6 +1997,7 @@ public int ShopCatMenuHandler(Menu menu, MenuAction action, int client, int item
         char info[4];
         menu.GetItem(item, info, sizeof(info));
         ShopCategoryMenu(client, StringToInt(info));
+        ShopResetIdleTimer(client);   // 用户操作 → 重置无操作计时器
     }
     else if (action == MenuAction_Cancel || action == MenuAction_End)
     {
@@ -1967,6 +2009,11 @@ public int ShopCatMenuHandler(Menu menu, MenuAction action, int client, int item
             {
                 KillTimer(g_hShopRefreshTimer[client]);
                 g_hShopRefreshTimer[client] = null;
+            }
+            if (g_hShopIdleTimer[client] != null)   // 菜单关闭 → 停止无操作计时器
+            {
+                KillTimer(g_hShopIdleTimer[client]);
+                g_hShopIdleTimer[client] = null;
             }
         }
         if (action == MenuAction_End)   // 只删一次（Cancel 后必跟 End）
@@ -1998,8 +2045,20 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
         }
 
         ShopBuy(client, slot);
-        if (IsClientInGame(client) && !g_bArtAiming[client])   // 火炮瞄准中不重开菜单（避免遮挡瞄准视野）
-            ShopCategoryMenu(client, g_iShopCat[client]);   // 刷新余额/状态（留在当前分类）
+        // 购买后关闭菜单：停止刷新心跳+清状态，让菜单自然超时关闭（Select 返回
+        // 后不重新显示 → 菜单关闭触发 MenuAction_End → End 分支删除菜单对象）
+        g_iShopView[client] = 0;   // 清状态标志 → 刷新心跳下次 tick 自动停止
+        if (g_hShopRefreshTimer[client] != null)
+        {
+            KillTimer(g_hShopRefreshTimer[client]);
+            g_hShopRefreshTimer[client] = null;
+        }
+        if (g_hShopIdleTimer[client] != null)
+        {
+            KillTimer(g_hShopIdleTimer[client]);
+            g_hShopIdleTimer[client] = null;
+        }
+        // 注意：不手动 delete menu，让 MenuAction_End 统一清理避免双重释放
     }
     else if (action == MenuAction_Cancel || action == MenuAction_End)
     {
@@ -2007,6 +2066,7 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
         if (action == MenuAction_Cancel && item == MenuCancel_ExitBack && client >= 1)
         {
             OpenShopMenu(client);
+            ShopResetIdleTimer(client);   // 用户操作 → 重置无操作计时器
             return 0;
         }
         if (client >= 1 && g_hShopMenu[client] == menu)   // 只清自己（旧菜单 End 不覆盖新菜单句柄）
@@ -2017,6 +2077,11 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
             {
                 KillTimer(g_hShopRefreshTimer[client]);
                 g_hShopRefreshTimer[client] = null;
+            }
+            if (g_hShopIdleTimer[client] != null)   // 菜单关闭 → 停止无操作计时器
+            {
+                KillTimer(g_hShopIdleTimer[client]);
+                g_hShopIdleTimer[client] = null;
             }
         }
         if (action == MenuAction_End)   // 只删一次（Cancel 后必跟 End）
@@ -2125,6 +2190,7 @@ public Action Cmd_Shop(int client, int args)
         return Plugin_Handled;
     }
     OpenShopMenu(client);
+    ShopResetIdleTimer(client);   // 初次打开商店 → 启动 3 秒无操作计时器
     return Plugin_Handled;
 }
 
