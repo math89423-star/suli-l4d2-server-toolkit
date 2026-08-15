@@ -1045,7 +1045,8 @@ public void OnPluginStart()
 
     // v1.9.3 (user): 过关奖励 — 每小关进安全门结束每人 +N 积分
     //（替代 l4d2_survivor_transition 的过关回满血，该插件已禁用；0=关闭）
-    g_cvMapEndReward = CreateConVar("si_hud_mapend_reward", "2000",
+    // v1.13.2: 默认 2000 → 1500
+    g_cvMapEndReward = CreateConVar("si_hud_mapend_reward", "1500",
         "Map-end reward: score granted to every survivor on map_transition (0 = off).", FCVAR_NOTIFY, true, 0.0, true, 99999.0);
 
     // v1.13.0 (user): 可用积分上限 — 跨图永久保留不再清零，仅钳制到该值（0=无上限）
