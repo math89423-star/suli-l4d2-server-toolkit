@@ -1959,7 +1959,7 @@ void NotifyPressureWaveCleared() {
 void GetRestRangeByTier(int tier, float &restMin, float &restMax) {
 	switch (tier) {
 		case 1: { restMin = 18.0; restMax = 24.0; }
-		case 2: { restMin = 12.0; restMax = 18.0; }
+		case 2: { restMin = 12.0; restMax = 15.0; }
 		case 3: { restMin = 10.0; restMax = 14.0; }
 		case 4: { restMin = 8.0;  restMax = 12.0; }
 		case 5: { restMin = 6.0;  restMax = 10.0; }
