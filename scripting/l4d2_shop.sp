@@ -269,7 +269,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.8.0"
+#define PLUGIN_VERSION "1.8.22"
 
 // ============================================================================
 // SH_ public API（l4d2_si_hud >= v1.9.0 导出；契约见 include/l4d2_si_hud.inc）
@@ -510,6 +510,13 @@ Handle    g_hWallhackSyncTimer;                 // 补光心跳（0.5s，无购�
 ArrayList g_hWitchList;                         // 当前 Witch 实体索引（自家独立维护；si_hud 另有伤害 hook 用的列表）
 Handle    g_hShopMenu[MAXPLAYERS + 1];          // 当前打开的商店菜单
 int       g_iShopCat[MAXPLAYERS + 1];           // 当前打开的商品分类（购买后重开同分类刷新）
+// v1.8.22: 商店菜单实时刷新——钱包/弹药价格随时变化时自动重绘打开的菜单
+// （解决：①打开后换武器弹药价过期 ②打开后获得积分余额冻结）。L4D2 菜单
+// 是数字键选择式，重绘无缝；用内容签名门控只在数据真变时重绘，避免闪烁。
+Handle    g_hShopRefreshTimer[MAXPLAYERS + 1]; // 刷新心跳（0.5s；菜单关闭即停）
+int       g_iShopView[MAXPLAYERS + 1];          // 当前视图 0=无 1=分类选择页 2=商品列表页
+int       g_iShopSigWallet[MAXPLAYERS + 1];     // 上次重绘时的钱包（签名）
+int       g_iShopSigAmmo[MAXPLAYERS + 1];       // 上次重绘时的弹药补充动态价（签名，-1=当前分类无此商品）
 
 // 火炮支援 I/II/III（!shop 特殊商品）——瞄准指示 + 罐/瓶雨轰炸
 bool      g_bArtAiming[MAXPLAYERS + 1];       // 瞄准指示中
@@ -969,6 +976,13 @@ public void OnClientDisconnect(int client)
     ArtEndDesignate(client, true);          // 断线取消火炮瞄准（退款须在 si_hud 存档前，见加载顺序说明）
     WallhackEnd(client, true);             // 断线清理透视（克隆/计时器）
     g_hShopMenu[client] = null;            // 断线菜单句柄失效
+    // v1.8.22: 断线清理商店刷新心跳
+    g_iShopView[client] = 0;
+    if (g_hShopRefreshTimer[client] != null)
+    {
+        KillTimer(g_hShopRefreshTimer[client]);
+        g_hShopRefreshTimer[client] = null;
+    }
     // v1.7.31b fix: 限购计数断线清零（否则下个进服玩家继承"已购满"）
     for (int j = 0; j < SHOP_SLOTS; j++)
         g_iShopBought[client][j] = 0;
@@ -1330,6 +1344,30 @@ void ShopBuy(int client, int slot)
     }
 
     int price = g_ShopTable[slot].price;
+    // v1.8.21: 弹药补充按主武器枪种动态定价（SMG 3500 / AR 5000 / 单喷 5500 /
+    // 连喷 6500 / 连狙 7000 / 栓狙 8500）——覆盖表定价，后续扣款/校验全用动态价
+    char ammoTag[16];
+    if (StrEqual(g_ShopTable[slot].classname, "ammo_refill"))
+    {
+        price = AmmoRefill_GetPrice(client, ammoTag, sizeof(ammoTag));
+        // v1.8.21: M60 和榴弹发射器不可补充弹药（用户拍板）——扣款前拦截
+        int weapon = GetPlayerWeaponSlot(client, 0);
+        if (weapon > 0 && IsValidEntity(weapon))
+        {
+            char cls[32];
+            GetEntityClassname(weapon, cls, sizeof(cls));
+            if (StrEqual(cls, "weapon_rifle_m60"))
+            {
+                PrintToChat(client, "\x04[商店]\x01 \x05M60 轻机枪\x01 不可补充弹药（打空即弃）");
+                return;
+            }
+            if (StrEqual(cls, "weapon_grenade_launcher"))
+            {
+                PrintToChat(client, "\x04[商店]\x01 \x05榴弹发射器\x01 不可补充弹药");
+                return;
+            }
+        }
+    }
     if (SH_GetWallet(client) < price)
     {
         PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 需要 \x03%d\x01 当前积分，你只有 \x03%d\x01",
@@ -1406,8 +1444,8 @@ void ShopBuy(int client, int slot)
             PrintToChat(client, "\x04[商店]\x01 购买失败（未持有可用武器），积分已退回");
             return;
         }
-        PrintToChat(client, "\x04[商店]\x01 已购买 \x05弹药补充\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），弹匣与后备弹药已补满",
-            price, SH_GetWallet(client));
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05弹药补充\x01[\x05%s\x01]（-\x03%d\x01 可用积分，剩余 \x03%d\x01），弹匣与后备弹药已补满",
+            ammoTag, price, SH_GetWallet(client));
         return;
     }
 
@@ -1610,6 +1648,75 @@ int Ammo_ReserveMax(const char[] cls)
     return 0;         // 电锯无后备弹药
 }
 
+// v1.8.21: 弹药补充动态定价（按主武器枪种）——用户拍板：SMG耗弹快威力小应该便宜，
+// 狙击/喷子弹药珍贵应该贵。基准 AR 5000，SMG 3500 / 单喷 5500 / 连喷 6500 /
+// 连狙 7000 / 栓狙 8500。返回 {price, weaponTag}：price=积分价格，weaponTag=枪种
+// 标签（菜单显示用，如"SMG"/"AR"/"单喷"）。无主武器或未知武器 → 返回表定价 4500。
+int AmmoRefill_GetPrice(int client, char[] weaponTag, int maxLen)
+{
+    strcopy(weaponTag, maxLen, "未知");
+    int weapon = GetPlayerWeaponSlot(client, 0);   // slot 0 = 主武器
+    if (weapon <= 0 || !IsValidEntity(weapon))
+        return 4500;   // 无主武器 → 回退表定价（极少见：只持手枪）
+
+    char cls[32];
+    GetEntityClassname(weapon, cls, sizeof(cls));
+
+    // SMG 系（3 把冲锋枪）
+    if (StrEqual(cls, "weapon_smg") || StrEqual(cls, "weapon_smg_silenced")
+        || StrEqual(cls, "weapon_smg_mp5"))
+    {
+        strcopy(weaponTag, maxLen, "SMG");
+        return 3500;
+    }
+
+    // AR 系（4 把步枪 + M60）
+    if (StrEqual(cls, "weapon_rifle") || StrEqual(cls, "weapon_rifle_sg552")
+        || StrEqual(cls, "weapon_rifle_ak47") || StrEqual(cls, "weapon_rifle_desert")
+        || StrEqual(cls, "weapon_rifle_m60"))
+    {
+        strcopy(weaponTag, maxLen, "AR");
+        return 5000;
+    }
+
+    // 单喷（2 把泵动霰弹枪）
+    if (StrEqual(cls, "weapon_pumpshotgun") || StrEqual(cls, "weapon_shotgun_chrome"))
+    {
+        strcopy(weaponTag, maxLen, "单喷");
+        return 5500;
+    }
+
+    // 连喷（2 把自动霰弹枪）
+    if (StrEqual(cls, "weapon_autoshotgun") || StrEqual(cls, "weapon_shotgun_spas"))
+    {
+        strcopy(weaponTag, maxLen, "连喷");
+        return 6500;
+    }
+
+    // 连狙（半自动狙击步枪）
+    if (StrEqual(cls, "weapon_sniper_military"))
+    {
+        strcopy(weaponTag, maxLen, "连狙");
+        return 7000;
+    }
+
+    // 栓狙（3 把栓动狙击步枪）
+    if (StrEqual(cls, "weapon_hunting_rifle") || StrEqual(cls, "weapon_sniper_scout")
+        || StrEqual(cls, "weapon_sniper_awp"))
+    {
+        strcopy(weaponTag, maxLen, "栓狙");
+        return 8500;
+    }
+
+    // 榴弹发射器 / 电锯 / 其他特殊武器 → 表定价
+    if (StrEqual(cls, "weapon_grenade_launcher"))
+        strcopy(weaponTag, maxLen, "榴弹");
+    else if (StrEqual(cls, "weapon_chainsaw"))
+        strcopy(weaponTag, maxLen, "电锯");
+
+    return 4500;   // 未知武器回退表定价
+}
+
 int ShopAmmoRefill(int client)
 {
     int filled = 0;
@@ -1651,11 +1758,11 @@ int ShopAmmoRefill(int client)
 
 void OpenShopMenu(int client)
 {
+    int wallet = SH_GetWallet(client);
     Menu menu = new Menu(ShopCatMenuHandler);
     // v1.7.32c FIX: title 必须单行 — L4D2 VguiMenu 标题不支持 \n，
     // 多行标题 → 整个菜单不渲染（用户实测 !buy 无反应，!csm 的 Panel 单行正常）
-    menu.SetTitle("商店: 可用积分 %d",
-        SH_GetWallet(client));
+    menu.SetTitle("商店: 可用积分 %d", wallet);
     menu.AddItem("0", "武器类");
     menu.AddItem("1", "道具类");
     menu.AddItem("2", "补给品");    // v1.4.6: 原"医疗类"改名（含医疗+弹药升级包）
@@ -1665,6 +1772,16 @@ void OpenShopMenu(int client)
     menu.ExitButton = true;
     g_hShopMenu[client] = menu;
     menu.Display(client, 20);
+
+    // v1.8.22: 刷新状态记录 + 启动/保持心跳（ensure 模式：只在不存在时创建，
+    // 绝不在重绘路径 KillTimer——本函数会被 Timer_ShopRefresh 回调，若杀自身
+    // 句柄=TIMER_REPEAT 双重释放崩溃）
+    g_iShopView[client] = 1;            // 分类选择页
+    g_iShopSigWallet[client] = wallet;
+    g_iShopSigAmmo[client] = -1;        // 分类页无弹药商品
+    if (g_hShopRefreshTimer[client] == null)
+        g_hShopRefreshTimer[client] = CreateTimer(0.5, Timer_ShopRefresh, GetClientUserId(client),
+            TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
 void ShopCategoryMenu(int client, int cat)
@@ -1678,9 +1795,12 @@ void ShopCategoryMenu(int client, int cat)
         catNames[cat], SH_GetWallet(client));
     menu.SetTitle(title);
 
-    char info[4];
+    char info[12];   // v1.8.22: 扩大——弹药补充 info 编码 "槽位|价格"（如 "24|8500"）
     char line[96];
+    int ammoSig = -1;   // v1.8.22: 本次弹药补充动态价（签名；本分类无此商品则 -1）
     // v1.8.1: 商品按价格升序展示（用户需求）——收集分类内槽位下标，插入排序
+    // v1.8.21: cat=3（其他）不排序，保持原表顺序（透视第一行+弹药补充第二行固定，
+    // 弹药动态价格不影响顺序）
     int slots[SHOP_SLOTS];
     int count = 0;
     for (int i = 0; i < SHOP_SLOTS; i++)
@@ -1688,46 +1808,76 @@ void ShopCategoryMenu(int client, int cat)
         if (g_ShopTable[i].cat == cat)
             slots[count++] = i;
     }
-    for (int a = 1; a < count; a++)
+    if (cat != 3)   // cat=3（其他）跳过价格排序
     {
-        int key = slots[a];
-        int j = a - 1;
-        while (j >= 0 && g_ShopTable[slots[j]].price > g_ShopTable[key].price)
+        for (int a = 1; a < count; a++)
         {
-            slots[j + 1] = slots[j];
-            j--;
+            int key = slots[a];
+            int j = a - 1;
+            while (j >= 0 && g_ShopTable[slots[j]].price > g_ShopTable[key].price)
+            {
+                slots[j + 1] = slots[j];
+                j--;
+            }
+            slots[j + 1] = key;
         }
-        slots[j + 1] = key;
     }
     for (int k = 0; k < count; k++)
     {
         int i = slots[k];
         int price = g_ShopTable[i].price;
         int limit = g_ShopTable[i].limit;
-        if (i == WALLHACK_SLOT && g_bWallhack[client])
+        // v1.8.21: 弹药补充按当前主武器枪种动态定价——菜单显示实际价+枪种标签
+        char itemName[64];
+        strcopy(itemName, sizeof(itemName), g_ShopTable[i].name);
+        bool ammoBlocked = false;    // v1.8.21: M60/榴弹持有时弹药补充不可用
+        if (StrEqual(g_ShopTable[i].classname, "ammo_refill"))
+        {
+            char ammoTag[16];
+            price = AmmoRefill_GetPrice(client, ammoTag, sizeof(ammoTag));
+            ammoSig = price;   // v1.8.22: 记录动态价签名
+            Format(itemName, sizeof(itemName), "%s[%s]", g_ShopTable[i].name, ammoTag);
+            int w = GetPlayerWeaponSlot(client, 0);
+            if (w > 0 && IsValidEntity(w))
+            {
+                char wcls[32];
+                GetEntityClassname(w, wcls, sizeof(wcls));
+                if (StrEqual(wcls, "weapon_rifle_m60") || StrEqual(wcls, "weapon_grenade_launcher"))
+                    ammoBlocked = true;
+            }
+        }
+        if (ammoBlocked)
+        {
+            Format(line, sizeof(line), "%s [该武器不可补弹]", itemName);
+        }
+        else if (i == WALLHACK_SLOT && g_bWallhack[client])
         {
             // v1.0.10: 生效期间不可重复购买 → 标签去掉"可续费"
-            Format(line, sizeof(line), "%s (%d分) [透视生效中]", g_ShopTable[i].name, price);
+            Format(line, sizeof(line), "%s (%d分) [透视生效中]", itemName, price);
         }
         else if (limit <= 0)
         {
             if (SH_GetWallet(client) < price)
-                Format(line, sizeof(line), "%s (%d分) [积分不足]", g_ShopTable[i].name, price);
+                Format(line, sizeof(line), "%s (%d分) [积分不足]", itemName, price);
             else
-                Format(line, sizeof(line), "%s (%d分) [无限购]", g_ShopTable[i].name, price);
+                Format(line, sizeof(line), "%s (%d分) [无限购]", itemName, price);
         }
         else
         {
             int left = limit - g_iShopBought[client][i];
             if (left <= 0)
-                Format(line, sizeof(line), "%s (%d分) [已购满]", g_ShopTable[i].name, price);
+                Format(line, sizeof(line), "%s (%d分) [已购满]", itemName, price);
             else if (SH_GetWallet(client) < price)
-                Format(line, sizeof(line), "%s (%d分) [积分不足]", g_ShopTable[i].name, price);
+                Format(line, sizeof(line), "%s (%d分) [积分不足]", itemName, price);
             else
-                Format(line, sizeof(line), "%s (%d分) [可购 x%d]", g_ShopTable[i].name, price, left);
+                Format(line, sizeof(line), "%s (%d分) [可购 x%d]", itemName, price, left);
         }
 
-        IntToString(i, info, sizeof(info));
+        // v1.8.22: 弹药补充——info 字段编码 "槽位|菜单构建时价格"，用于购买时检测价格变化
+        if (StrEqual(g_ShopTable[i].classname, "ammo_refill"))
+            Format(info, sizeof(info), "%d|%d", i, price);
+        else
+            IntToString(i, info, sizeof(info));
         menu.AddItem(info, line);
     }
     // v1.7.75: 用 SM 原生按钮——ExitBackButton=8 返回上一页（社区插件同款，
@@ -1738,6 +1888,63 @@ void ShopCategoryMenu(int client, int cat)
     menu.ExitButton = true;
     g_hShopMenu[client] = menu;
     menu.Display(client, 20);
+
+    // v1.8.22: 刷新状态记录 + 启动/保持心跳（已有计时器时不重启，延续即可）
+    g_iShopView[client] = 2;                    // 商品列表页
+    g_iShopSigWallet[client] = SH_GetWallet(client);
+    g_iShopSigAmmo[client] = ammoSig;
+    if (g_hShopRefreshTimer[client] == null)
+        g_hShopRefreshTimer[client] = CreateTimer(0.5, Timer_ShopRefresh, GetClientUserId(client),
+            TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// v1.8.22: 商店菜单刷新心跳（0.5s）——检测钱包/弹药价格变化，内容变时重绘菜单
+public Action Timer_ShopRefresh(Handle timer, int userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client <= 0 || !IsClientInGame(client))
+    {
+        if (client > 0)
+            g_hShopRefreshTimer[client] = null;
+        return Plugin_Stop;
+    }
+    if (g_hShopMenu[client] == null || g_iShopView[client] == 0)
+    {
+        g_hShopRefreshTimer[client] = null;
+        return Plugin_Stop;   // 菜单已关闭
+    }
+
+    int wallet = SH_GetWallet(client);
+    int ammoPrice = -1;
+    if (g_iShopView[client] == 2)   // 商品列表页才检测弹药价格
+    {
+        // 检查当前分类是否有弹药补充商品（cat=3 其他类）
+        bool hasAmmo = false;
+        for (int i = 0; i < SHOP_SLOTS; i++)
+        {
+            if (g_ShopTable[i].cat == g_iShopCat[client]
+                && StrEqual(g_ShopTable[i].classname, "ammo_refill"))
+            {
+                hasAmmo = true;
+                break;
+            }
+        }
+        if (hasAmmo)
+        {
+            char tag[16];
+            ammoPrice = AmmoRefill_GetPrice(client, tag, sizeof(tag));
+        }
+    }
+
+    // 内容签名变化 → 重绘菜单
+    if (wallet != g_iShopSigWallet[client] || ammoPrice != g_iShopSigAmmo[client])
+    {
+        if (g_iShopView[client] == 1)
+            OpenShopMenu(client);   // 重绘分类页
+        else if (g_iShopView[client] == 2)
+            ShopCategoryMenu(client, g_iShopCat[client]);   // 重绘商品列表页
+    }
+    return Plugin_Continue;
 }
 
 public int ShopCatMenuHandler(Menu menu, MenuAction action, int client, int item)
@@ -1753,7 +1960,15 @@ public int ShopCatMenuHandler(Menu menu, MenuAction action, int client, int item
     else if (action == MenuAction_Cancel || action == MenuAction_End)
     {
         if (client >= 1 && g_hShopMenu[client] == menu)   // 只清自己（旧菜单 End 不覆盖新菜单句柄）
+        {
             g_hShopMenu[client] = null;
+            g_iShopView[client] = 0;   // v1.8.22: 菜单关闭清状态（停止刷新心跳）
+            if (g_hShopRefreshTimer[client] != null)
+            {
+                KillTimer(g_hShopRefreshTimer[client]);
+                g_hShopRefreshTimer[client] = null;
+            }
+        }
         if (action == MenuAction_End)   // 只删一次（Cancel 后必跟 End）
             delete menu;
     }
@@ -1765,9 +1980,24 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
     // CancelMenu 触发回调时 client/item 是 -3——同上防护
     if (action == MenuAction_Select && item >= 0 && client >= 1)
     {
-        char info[8];
+        char info[16];
         menu.GetItem(item, info, sizeof(info));
-        ShopBuy(client, StringToInt(info));
+
+        // v1.8.22: 弹药补充 info 格式 "槽位|菜单价格"——但实时刷新已让菜单价格恒为当前价，
+        // 无需检测变化，直接取槽位即可（保留编码格式供未来扩展）
+        int slot = -1;
+        if (StrContains(info, "|") != -1)
+        {
+            char parts[2][8];
+            ExplodeString(info, "|", parts, sizeof(parts), sizeof(parts[]));
+            slot = StringToInt(parts[0]);
+        }
+        else
+        {
+            slot = StringToInt(info);
+        }
+
+        ShopBuy(client, slot);
         if (IsClientInGame(client) && !g_bArtAiming[client])   // 火炮瞄准中不重开菜单（避免遮挡瞄准视野）
             ShopCategoryMenu(client, g_iShopCat[client]);   // 刷新余额/状态（留在当前分类）
     }
@@ -1780,7 +2010,15 @@ public int ShopItemMenuHandler(Menu menu, MenuAction action, int client, int ite
             return 0;
         }
         if (client >= 1 && g_hShopMenu[client] == menu)   // 只清自己（旧菜单 End 不覆盖新菜单句柄）
+        {
             g_hShopMenu[client] = null;
+            g_iShopView[client] = 0;   // v1.8.22: 菜单关闭清状态（停止刷新心跳）
+            if (g_hShopRefreshTimer[client] != null)
+            {
+                KillTimer(g_hShopRefreshTimer[client]);
+                g_hShopRefreshTimer[client] = null;
+            }
+        }
         if (action == MenuAction_End)   // 只删一次（Cancel 后必跟 End）
             delete menu;
     }
@@ -2416,7 +2654,10 @@ float Art_FindCeiling(const float pos[3], bool &openAbove)
     int hits = 0;
     float lastNormal[3] = { 0.0, 0.0, 0.0 };
     float lastHit[3];
-    while (hops < 4)
+    // v1.8.20: 穿透上限 4→16——狭窄长巷向上 trace 频繁击中两侧墙壁侧面，4 次穿透
+    // 不够到天空 → ceiling 返回低值+openAbove=false → 误拒"目标无效"；提高到 16
+    // 让狭窄地形能穿透更多侧墙最终识别出露天（用户：虽然有些炸屋顶但不应不能释放）
+    while (hops < 16)
     {
         Handle tr = TR_TraceRayFilterEx(from, to, MASK_SOLID,
             RayType_EndPoint, ShopTraceFilter, -1);

@@ -1,10 +1,17 @@
 /**
- * [L4D2] SI HUD — Unified Special Infected HP + Kill Display  v1.7.0
+ * [L4D2] SI HUD — Unified Special Infected HP + Kill Display  v1.13.1
  *
  * Replaces:
  *   - l4d2_bf_killfeedback    (was kill sounds + center text + chat; now bf does sound only)
  *   - L4D_All_Infected_HUD_HP (persistent SI HP HUD)
  *   - l4d2_si_hp_hud          (per-SI HP bar on hit)
+ *
+ * v1.13.1 (2026-08-15): 修复 AGM 导弹等超额伤害导致的积分爆炸 bug——
+ *   钳制特感/普通僵尸/Witch 伤害分到目标最大血量（AGM 对 Hunter 注入 900000
+ *   伤害时，引擎上报 dmg_health=900000 → 9 万分/只 → 几只就几十万分）。
+ *   修复三处：Event_PlayerHurt（特感 m_iMaxHealth）/ Event_InfectedHurt
+ *   （小僵尸 m_iMaxHealth）/ WitchTakeDamage（当前 m_iHealth）。
+ *   击杀分不受影响（已用 m_iMaxHealth 计算），只修正伤害分计算。
  *
  * Display channels — no conflicts:
  *   - PrintCenterText  (upper-center):        kill banner ☠ (skulls + points) + SI HP on-hit
@@ -802,7 +809,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.13.0"
+#define PLUGIN_VERSION "1.13.1"
 
 // ============================================================================
 // ConVar handles
@@ -2031,6 +2038,14 @@ public Action Event_PlayerHurt(Event event, const char[] name, bool dontBroadcas
         int dmg = event.GetInt("dmg_health");
         if (dmg > 0)
         {
+            // v1.13.1: 钳制伤害到特感最大血量——AGM 导弹等插件注入 900000 伤害秒杀时，
+            // 引擎上报的 dmg_health 可能是注入值而非实际扣血（250 血 Hunter 被上报为
+            // 90 万伤害 → 9 万分/只 → 几只就几十万分）。钳制到 m_iMaxHealth 确保伤害分
+            // 按特感实际血量计算，单次伤害最多计满血值（Hunter 250、Tank 6000+ 等）。
+            int maxHP = GetEntProp(hurtVictim, Prop_Data, "m_iMaxHealth");
+            if (maxHP > 0 && dmg > maxHP)
+                dmg = maxHP;
+
             int pts = RoundToFloor(dmg * GetDamageMult(dmgAttacker)
                 * g_cvDamageCoeff.FloatValue);
             if (pts > 0)
@@ -2231,6 +2246,16 @@ public Action Event_InfectedHurt(Event event, const char[] name, bool dontBroadc
     if (amount <= 0)
         return Plugin_Continue;
 
+    // v1.13.1: 钳制伤害到小僵尸最大血量——AGM 导弹注入 10000 伤害秒杀普通僵尸时，
+    // 引擎上报的 amount 可能是注入值而非实际扣血（50 血僵尸被上报为 1 万伤害）。
+    // 钳制到实体 m_iMaxHealth（通常 50）确保伤害分按实际血量计算。
+    if (entId >= 1 && entId < 2048 && IsValidEntity(entId))
+    {
+        int maxHP = GetEntProp(entId, Prop_Data, "m_iMaxHealth");
+        if (maxHP > 0 && amount > maxHP)
+            amount = maxHP;
+    }
+
     int pts = RoundToFloor(amount * GetDamageMult(attacker) * g_cvDamageCoeffCommon.FloatValue);
     if (pts > 0)
     {
@@ -2294,9 +2319,17 @@ public Action WitchTakeDamage(int victim, int &attacker, int &inflictor,
     // ── score (independent of the HP display gate) ──
     if (g_cvDamageEnable.BoolValue)
     {
+        // v1.13.1: 钳制伤害到 Witch 当前血量——AGM 导弹注入 10000 伤害秒杀时，
+        // 引擎实际扣血最多是当前血量（OnTakeDamage pre 阶段，m_iHealth 尚未扣减），
+        // 但 damage 参数是注入值。钳制到当前血量确保伤害分按实际血量计算。
+        float scoreDmg = damage;
+        int curHP = GetEntProp(victim, Prop_Data, "m_iHealth");
+        if (curHP > 0 && scoreDmg > float(curHP))
+            scoreDmg = float(curHP);
+
         // Same coefficient as SI (1.0 = 1:1): Witch 500 HP fully burned =
         // ~500 pts, matching her kill score.
-        int pts = RoundToFloor(damage * GetDamageMult(attacker)
+        int pts = RoundToFloor(scoreDmg * GetDamageMult(attacker)
             * g_cvDamageCoeff.FloatValue);
         if (pts > 0)
         {
