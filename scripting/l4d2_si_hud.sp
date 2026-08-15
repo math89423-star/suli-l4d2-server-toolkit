@@ -809,7 +809,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.13.1"
+#define PLUGIN_VERSION "1.13.2"
 
 // ============================================================================
 // ConVar handles
@@ -1854,16 +1854,24 @@ public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 
 // v1.7.30: 团灭重开判定——round_start 时若没有 OnMapStart（同图 restart），
 // 回滚本关积分到地图开局快照（用户："这个map团灭了，要回到map初始时积分状态"）
+// v1.13.2: 回滚后给每人补偿 2000 积分——避免消耗大量积分失败后血本无归，补偿鼓励继续尝试
 public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
     if (!g_bFreshMapStart)
     {
         RestoreScoreState();
+        // v1.13.2: 团灭补偿——回滚后给每个在场玩家 +2000 积分
+        int compensation = 2000;
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (IsClientInGame(i) && GetClientTeam(i) == 2)
+                AddWallet(i, compensation);
+        }
         // v1.10.0: 回滚当刻立即同步存档——原 v1.8.2"同图重连 20s 严格窗口"防的
         // 正是"团灭前离场 → 重开后来回恢复回滚前的钱"；窗口废除后必须在此同步，
         // 否则离场玩家重连时从旧存档恢复回滚前的钱包（60s 周期保存前的空窗）。
         ScoreSave_All();
-        PrintToChatAll("\x04[得分榜]\x01 团灭重开：本关积分已回滚到开局状态");
+        PrintToChatAll("\x04[得分榜]\x01 团灭重开：本关积分已回滚到开局状态，每人补偿 \x05%d\x01 积分", compensation);
     }
     g_bFreshMapStart = false;
     return Plugin_Continue;
