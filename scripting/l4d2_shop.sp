@@ -342,7 +342,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.10"
+#define PLUGIN_VERSION "1.11.0"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -466,6 +466,7 @@ ConVar g_cvArtAimMaxDist;
 ConVar g_cvArtDebug;
 ConVar g_cvRespawnGear;     // v1.5.1: 复活套装装备列表（逗号分隔；近战 weapon_melee|脚本名）
 ConVar g_cvRespawnHealth;   // v1.5.1: 复活套装满血值（0=不动）
+ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2连喷+4AR+2连狙随机一把）
 
 // ============================================================================
 // 常量（自 si_hud 逐字移植）
@@ -1019,11 +1020,16 @@ public void OnPluginStart()
     g_cvArtRingSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
     // v1.5.1: 复活套装（用户拍板：复活币死亡复活时发放固定装备 + 满血）
+    // v1.11.0: 主武器改为随机池（sm_shop_respawn_primary_pool）——M60 移除
     g_cvRespawnGear = CreateConVar("sm_shop_respawn_gear",
-        "weapon_rifle_m60,weapon_melee|fireaxe,weapon_pain_pills,weapon_pipe_bomb",
+        "weapon_melee|fireaxe,weapon_pain_pills,weapon_pipe_bomb",
         "Respawn gear list (comma separated; melee uses weapon_melee|<script>). Empty = disabled.", FCVAR_NOTIFY);
     g_cvRespawnHealth = CreateConVar("sm_shop_respawn_health", "100",
         "Health to set on respawn (0 = leave engine default).", FCVAR_NOTIFY, true, 0.0, true, 100.0);
+    // v1.11.0: 复活套装主武器随机池（用户拍板 2026-08-17：2连喷+4AR+2连狙 随机一把）
+    g_cvRespawnPrimaryPool = CreateConVar("sm_shop_respawn_primary_pool",
+        "weapon_autoshotgun,weapon_shotgun_spas,weapon_rifle,weapon_rifle_sg552,weapon_rifle_ak47,weapon_rifle_desert,weapon_sniper_military,weapon_hunting_rifle",
+        "Respawn gear primary random pool (comma separated; one picked at random). Empty = no primary.", FCVAR_NOTIFY);
 
     AutoExecConfig(true, "l4d2_shop");
 
@@ -1451,7 +1457,8 @@ int SpawnMelee(const char[] meleeName, float pos[3])
 // ============================================================================
 // v1.5.1: 复活套装 — 监听 si_hud v1.9.2 的 SH_OnClientRespawned 全局 forward
 // （复活币死亡复活完成、确认存活后触发；闲置/接管引擎自管不在此列）。
-// 用户拍板固定配置：M60 + 消防斧 + 止痛药 + 土质炸弹，复活满血 100。
+// 用户拍板固定配置：主武器随机池（2连喷+4AR+2连狙）+ 消防斧 + 止痛药 + 土质炸弹，复活满血 100。
+// v1.11.0: M60 移出复活套装（可补给弹药后持续作战，不再免费发放）。
 // v1.6.3: 排除 bot —— si_hud v1.9.5 起该 forward 也会为 bot 触发（bot 与
 // 玩家同由 si_hud 接管复活）。复活套装是"复活币消费"的奖励，而 bot 每图
 // 免费复活一次、复活币恒为 0 —— 发套装 = 玩家接管 bot 白嫖 M60/斧/药/雷。
@@ -1465,6 +1472,33 @@ public void SH_OnClientRespawned(int client)
         return;                                    // v1.6.3: bot 不发复活套装
     if (GetClientTeam(client) != 2 || !IsPlayerAlive(client))
         return;
+
+    // v1.11.0: 主武器从随机池抽一把（2连喷+4AR+2连狙；M60/榴弹可补给弹药后不再免费发）
+    char pool[512];
+    g_cvRespawnPrimaryPool.GetString(pool, sizeof(pool));
+    if (pool[0] != '\0')
+    {
+        char picks[8][64];
+        int count = ExplodeString(pool, ",", picks, sizeof(picks), sizeof(picks[]));
+        if (count > 0)
+        {
+            int idx = GetRandomInt(0, count - 1);
+            TrimString(picks[idx]);
+            if (picks[idx][0] != '\0')
+            {
+                int ent = GivePlayerItem(client, picks[idx]);
+                if (ent != -1)
+                {
+                    EquipPlayerWeapon(client, ent);
+                    LogMessage("[respawn-gear] %N primary RANDOM=%s ent=%d", client, picks[idx], ent);
+                }
+                else
+                {
+                    LogMessage("[respawn-gear] %N primary %s FAILED", client, picks[idx]);
+                }
+            }
+        }
+    }
 
     char gear[256];
     g_cvRespawnGear.GetString(gear, sizeof(gear));
