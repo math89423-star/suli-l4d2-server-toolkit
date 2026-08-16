@@ -27,7 +27,7 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "1.5"
+#define PLUGIN_VERSION "1.6"
 
 ConVar g_hEnabled;
 ConVar g_hLeniency;
@@ -50,6 +50,14 @@ bool  g_bInCleanup;           // currently in cleanup (deleting) mode
 bool   g_bPaused;             // 暂停中：z_common_limit 压 0 + director_no_mobs 1
 Handle g_hPauseTimer;         // 暂停到期计时器
 ConVar g_hNoMobs;             // game cvar director_no_mobs
+
+// v1.6 — 暂停结束后 mob 渐进恢复（用户拍板 2026-08-16：AGM 清场后推进路上仍有
+// mob 的根源 = 恢复瞬间 z_common_limit 满值，director 立即把场上补满）。
+// 恢复期 sm_max_common_pause_ramp 秒内 z_common_limit 从 0 线性爬升到正常值——
+// director 恢复生成但被低上限约束，推进路上 mob 稀疏，清场窗口可感。
+bool   g_bRamping;            // 恢复期进行中
+float  g_fRampStart;          // 恢复期开始时刻（engine time）
+ConVar g_hPauseRamp;          // 恢复期秒数（0 = 立即恢复旧行为）
 
 public Plugin myinfo =
 {
@@ -82,6 +90,7 @@ int Native_PauseCommon(Handle plugin, int numParams)
     }
 
     g_bPaused = true;
+    g_bRamping = false;   // v1.6: 新暂停打断恢复期
     if (g_hCommonLimit != null)
         g_hCommonLimit.IntValue = 0;
     if (g_hNoMobs != null)
@@ -100,7 +109,8 @@ Action Timer_EndPause(Handle timer)
     return Plugin_Stop;
 }
 
-// 恢复正常：清暂停标志 + 恢复 director_no_mobs 0（z_common_limit 由下个 tick 动态重算）
+// 恢复正常：清暂停标志 + 恢复 director_no_mobs 0 + 进入渐进恢复期
+// （z_common_limit 压 0 起步，由 Timer_CheckCommons 的 ramping 分支爬升）
 void MC_EndPause()
 {
     if (!g_bPaused)
@@ -109,8 +119,21 @@ void MC_EndPause()
     delete g_hPauseTimer;
     if (g_hNoMobs != null)
         g_hNoMobs.IntValue = 0;
-    UpdateCommonLimit();   // 立即恢复动态限制值（不等下个 tick）
-    LogMessage("[MaxCommon] pause expired, resuming dynamic common limit");
+
+    float ramp = (g_hPauseRamp != null) ? g_hPauseRamp.FloatValue : 0.0;
+    if (ramp > 0.0)
+    {
+        g_bRamping = true;
+        g_fRampStart = GetEngineTime();
+        if (g_hCommonLimit != null)
+            g_hCommonLimit.IntValue = 0;   // 从 0 起步，禁止瞬间补满
+        LogMessage("[MaxCommon] pause expired, RAMPING z_common_limit 0 -> normal over %.1fs", ramp);
+    }
+    else
+    {
+        UpdateCommonLimit();   // 立即恢复动态限制值（不等下个 tick）
+        LogMessage("[MaxCommon] pause expired, resuming dynamic common limit");
+    }
 }
 
 public void OnPluginStart()
@@ -126,6 +149,10 @@ public void OnPluginStart()
         "Seconds to wait before deleting after threshold exceeded");
     g_hCooldownTime = CreateConVar("sm_max_common_cooldown", "5.0",
         "Seconds of no deletions before exiting cleanup mode");
+    // v1.6: 暂停结束后的 mob 渐进恢复期（AGM 清场窗口；0 = 立即恢复）
+    g_hPauseRamp = CreateConVar("sm_max_common_pause_ramp", "30.0",
+        "Seconds to ramp z_common_limit from 0 back to normal after a pause (0 = instant restore).",
+        FCVAR_NOTIFY, true, 0.0, true, 120.0);
 
     // Dynamic player-count scaling
     g_hBaseCount      = CreateConVar("sm_max_common_base",  "30",
@@ -225,6 +252,28 @@ Action Timer_CheckCommons(Handle timer)
         else
             LogMessage("[MaxCommon] pause active but cvar handle null! limit=%d nomobs=%d",
                 g_hCommonLimit != null, g_hNoMobs != null);
+        return Plugin_Continue;
+    }
+
+    // v1.6: 恢复期——z_common_limit 从 0 线性爬升到正常值（不刷日志，只记起止）
+    if (g_bRamping)
+    {
+        float ramp = (g_hPauseRamp != null) ? g_hPauseRamp.FloatValue : 0.0;
+        float elapsed = GetEngineTime() - g_fRampStart;
+        if (ramp <= 0.0 || elapsed >= ramp)
+        {
+            g_bRamping = false;
+            UpdateCommonLimit();   // 爬升完成：恢复正常动态限制
+            LogMessage("[MaxCommon] ramp complete, z_common_limit back to normal");
+        }
+        else
+        {
+            int full = CalculateCommonLimit(CountRealPlayers());
+            int cur = RoundToNearest(float(full) * (elapsed / ramp));
+            if (cur < 0) cur = 0;
+            if (cur > full) cur = full;
+            g_hCommonLimit.IntValue = cur;
+        }
         return Plugin_Continue;
     }
 
