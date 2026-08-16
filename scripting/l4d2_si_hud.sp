@@ -809,7 +809,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.13.3"
+#define PLUGIN_VERSION "1.13.4"
 
 // ============================================================================
 // ConVar handles
@@ -1056,17 +1056,34 @@ public int Native_SH_ShowMissileBanner(Handle plugin, int numParams)
         }
     }
 
-    // 主横幅：☠☠☠ 导弹清场 击杀 N
-    char skulls[64];
-    int skullCount = totalKills;
-    if (skullCount > 20) skullCount = 20;  // 封顶 20 个骷髅
-    for (int i = 0; i < skullCount; i++)
-        StrCat(skulls, sizeof(skulls), "☠");
+    // v1.13.4: 图标按类别（用户定稿：小僵尸 † / 特感 ☠，与单体击杀横幅/结算卡
+    // 同规范——全骷髅不可读且误导）；Witch/Tank 归特感类 ☠，共用
+    // si_hud_icons_max 封顶，超出显示 +N
+    int si = siKills + witchKills + tankKills;
+    int cm = commonKills;
+    int total = si + cm;
+    int cap = g_cvIconsMax.IntValue;
+    if (cap < 1) cap = 1;
+    char icons[128];
+    int shown = 0;
+    for (int k = 0; k < si && shown < cap; k++, shown++)
+        StrCat(icons, sizeof(icons), "☠");           // BMP U+2620 — renders
+    if (cm > 0 && shown < cap)
+        StrCat(icons, sizeof(icons), " ");           // segment gap: skulls | daggers
+    for (int k = 0; k < cm && shown < cap; k++, shown++)
+        StrCat(icons, sizeof(icons), "†");           // U+2020 dagger (user choice)
+    if (total > cap)
+    {
+        char over[16];
+        Format(over, sizeof(over), " +%d", total - cap);
+        StrCat(icons, sizeof(icons), over);
+    }
 
+    // 主横幅：† 小僵尸 + ☠ 特感（图标行）+ 导弹清场 击杀 N
     if (strlen(detail) > 0)
-        Format(banner, sizeof(banner), "%s 导弹清场 击杀 %d\n%s", skulls, totalKills, detail);
+        Format(banner, sizeof(banner), "%s 导弹清场 击杀 %d\n%s", icons, totalKills, detail);
     else
-        Format(banner, sizeof(banner), "%s 导弹清场 击杀 %d", skulls, totalKills);
+        Format(banner, sizeof(banner), "%s 导弹清场 击杀 %d", icons, totalKills);
 
     // 显示横幅（覆盖之前的单体击杀横幅）
     KillHPHideTimer(client);
