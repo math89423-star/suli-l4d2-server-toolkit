@@ -4,6 +4,9 @@
 #include <sourcemod>
 #include <left4dhooks>
 
+// v1.5: si_hud 积分入账 native（可选绑定：si_hud 未加载时 GetFeatureStatus 检查跳过）
+native int SH_AddWallet(int client, int amount);
+
 // v1.3: 两处修复
 //  1) 拉倒地/挂边拉起/电击复活 只奖励救人者（被救者不加血）
 //  2) 打包者奖励失效修复：SDKHooks OnUse 对打包/递药从不触发（实测 2.2 万条 OnUse 无一条
@@ -12,8 +15,15 @@
 // v1.4: 递药检测修复 —— 用户实测递药不回血；StartUseAction 枚举不覆盖递药（无"记录递药者"
 //     日志实锤）→ 0.2s 轮询差分推导：递药瞬间给药者 health 槽 pills 实体消失，吃药者
 //     pills_used 时查 5s 内"失去药"的最近玩家 = 递药者
+// v1.5: 积分奖励 + 打包回血 bug 修复（用户 2026-08-16 定稿）——
+//   · 给队友打包：打包者 +800 积分（l4d2_rescue_heal_medkit_score，实血 +20 保留）
+//   · 救助倒地队友：救人者 +600 积分（l4d2_rescue_heal_incap_score，实血 +20 保留）
+//   · FIX bug：被打包者不再 +20 回血（v1.2 双向加血删除——用户实测"被打包者也能
+//     吃到 20 回血"为 bug；医疗包引擎自身回血不受影响）
+//   · 积分走 si_hud SH_AddWallet native（可选绑定，si_hud 未加载静默跳过）
+//   · 电击/挂边/递药维持原样（无积分）
 
-#define PLUGIN_VERSION "1.4"
+#define PLUGIN_VERSION "1.5"
 
 ConVar g_hCvarEnable;
 ConVar g_hCvarIncap;
@@ -23,6 +33,9 @@ ConVar g_hCvarDefib;
 ConVar g_hCvarPills;
 ConVar g_hCvarMax;
 ConVar g_hCvarAnnounce;
+// v1.5: 积分奖励（0=off；实血奖励保留原 cvar）
+ConVar g_hCvarIncapScore;   // 拉起倒地队友积分
+ConVar g_hCvarMedkitScore;  // 给队友打包积分
 
 // 状态镜像（0.2s 轮询），用于区分 revive_success 三种来源：挂边拉起 / 电击复活 / 救助倒地
 // L4D2 只有 revive_success 一个复活事件（无 defibrillated 事件），需靠事件前状态区分
@@ -77,6 +90,12 @@ public void OnPluginStart()
 
     g_hCvarAnnounce = CreateConVar("l4d2_rescue_heal_announce", "1",
         "0=OFF, 1=ON. Announce reward in chat.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    // v1.5: 积分奖励（用户 2026-08-16 定稿：打包 800 / 拉起倒地 600）
+    g_hCvarIncapScore = CreateConVar("l4d2_rescue_heal_incap_score", "600",
+        "Score (wallet) rewarded for reviving an incapped teammate (0=off).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    g_hCvarMedkitScore = CreateConVar("l4d2_rescue_heal_medkit_score", "800",
+        "Score (wallet) rewarded for healing a teammate with a medkit (0=off).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
 
     AutoExecConfig(true, "l4d2_rescue_heal");
 
@@ -189,6 +208,8 @@ void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
     else
     {
         Reward(rescuer, g_hCvarIncap, "救助倒地队友");
+        // v1.5: 拉起倒地积分奖励（用户定稿 600；实血 +20 保留在上方）
+        ScoreReward(rescuer, g_hCvarIncapScore, "救助倒地队友");
     }
 }
 
@@ -205,7 +226,10 @@ void Event_HealSuccess(Event event, const char[] name, bool dontBroadcast)
     if (healer == subject) return;  // 自己打包不算
 
     Reward(healer, g_hCvarMedkit, "给队友打包");
-    Reward(subject, g_hCvarMedkit, "打包", true);  // v1.2: 被打包队友也加血（用户指定）
+    // v1.5: 打包积分奖励（用户定稿 800；实血 +20 保留在上方）
+    ScoreReward(healer, g_hCvarMedkitScore, "给队友打包");
+    // v1.5 FIX: 删除 v1.2 的"被打包者 +20 回血"——用户实测为 bug
+    //（医疗包引擎自身的治疗回血不受影响，这是插件的额外奖励）
 }
 
 void Event_HealInterrupted(Event event, const char[] name, bool dontBroadcast)
@@ -351,4 +375,33 @@ void Reward(int client, ConVar cvar, const char[] what, bool toSubject = false)
         else
             PrintToChat(client, "\x04[奖励]\x01 %s，恢复 \x05+%d\x01 实血！", what, newHP - curHP);
     }
+}
+
+// v1.5: 积分奖励（用户 2026-08-16 定稿：打包 800 / 拉起倒地 600）——
+// 走 si_hud SH_AddWallet native（可选绑定：si_hud 未加载静默跳过）。
+// 与实血 Reward 独立：满血不影响积分发放。
+void ScoreReward(int client, ConVar cvar, const char[] what)
+{
+    char cvarName[64];
+    cvar.GetName(cvarName, sizeof(cvarName));
+
+    if (!g_hCvarEnable.BoolValue) return;
+    if (client < 1 || client > MaxClients || !IsClientInGame(client)) return;
+    if (IsFakeClient(client)) return;   // bot 无积分
+    if (GetClientTeam(client) != 2) return;
+
+    int amount = cvar.IntValue;
+    if (amount <= 0) { LogMessage("[RescueHeal] ScoreReward(%N) skip: %s amount=0", client, cvarName); return; }
+
+    if (GetFeatureStatus(FeatureType_Native, "SH_AddWallet") != FeatureStatus_Available)
+    {
+        LogMessage("[RescueHeal] ScoreReward(%N) skip: SH_AddWallet native unavailable", client);
+        return;
+    }
+
+    SH_AddWallet(client, amount);
+    LogMessage("[RescueHeal] ScoreReward(%N): %s +%d 积分", client, cvarName, amount);
+
+    if (g_hCvarAnnounce.BoolValue)
+        PrintToChat(client, "\x04[奖励]\x01 %s，获得 \x05+%d\x01 积分！", what, amount);
 }
