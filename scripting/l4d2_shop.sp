@@ -9,6 +9,12 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.6（2026-08-16）：**四种支援 HUD 预警全带名称（用户拍板）**——
+ * 燃烧弹（II-地狱烈火）/ 胆汁罐（I-绿色雨幕）/ 榴弹（III-区域轰炸）/
+ * 导弹（IV-AGM），格式统一"%s来袭预警 %d 秒！"；轰炸开始提示与确认
+ * 聊天播报同步带名称；新增 Art_KindWarnName 映射（kind 2/3/5/6，
+ * kind 1/4 已禁用兜底"空袭"）。
+ *
  * v1.10.5（2026-08-16）：**AGM 预警期文案带秒数（用户拍板）**——"导弹来袭预警 %d 秒！"（T-8~T-4），T-3 起切"导弹发射倒计时：3/2/1 秒！"。
  *
  * v1.10.4（2026-08-16）：**AGM 预警文案与发射音效对齐（用户拍板）**——
@@ -313,7 +319,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.5"
+#define PLUGIN_VERSION "1.10.6"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -3250,6 +3256,21 @@ void Art_RingParams(int kind, float ceiling, bool openAbove, float &ring)
     ring = r + 450.0;   // v1.6.4: 落点半径 + 效果半径（用户拍板 450u）
 }
 
+// v1.10.6: 火力支援预警名称（用户拍板：每种支援 HUD 带名字，一眼看清呼叫的
+// 是什么支援，格式模仿"导弹来袭预警"）——2-地狱烈火=燃烧弹 / 3-绿色雨幕=
+// 胆汁罐 / 5-区域轰炸=榴弹 / 6-AGM=导弹；kind 1/4 已禁用兜底"空袭"。
+void Art_KindWarnName(int kind, char[] buf, int size)
+{
+    switch (kind)
+    {
+        case 2: strcopy(buf, size, "燃烧弹");
+        case 3: strcopy(buf, size, "胆汁罐");
+        case 5: strcopy(buf, size, "榴弹");
+        case 6: strcopy(buf, size, "导弹");
+        default: strcopy(buf, size, "空袭");
+    }
+}
+
 // 确认轰炸（v1.0.6 重构）: 锁定落点 → 5s 预警（光圈全员可见 + 聊天播报）
 // → 预警结束光圈消失、开始落罐（Art_LaunchBarrage）
 // 确认轰炸（v1.0.6 重构）: 锁定落点 → 预警（光圈全员可见 + 聊天播报）
@@ -3316,8 +3337,11 @@ void Art_ConfirmStrike(int client, ArtTargetInfo info)
     g_fArtNextBuyTime = GetGameTime() + endT + g_cvArtCooldown.FloatValue;
 
     // v1.0.7（用户定稿模板）: 预警播报——召唤者 + 空袭倒计时 + 注意躲避
-    PrintToChatAll("\x04[火力支援]\x01 \x05%N\x01 已呼叫火力支援，空袭将在 \x03%.0f\x01 秒后到来，注意躲避！",
-        client, g_cvArtWarnTime.FloatValue);
+    // v1.10.6: 播报带支援名称（用户拍板"一眼看清呼叫的是什么支援"）
+    char kindName[16];
+    Art_KindWarnName(kind, kindName, sizeof(kindName));
+    PrintToChatAll("\x04[火力支援]\x01 \x05%N\x01 已呼叫\x05%s\x01火力支援，将在 \x03%.0f\x01 秒后到来，注意躲避！",
+        client, kindName, g_cvArtWarnTime.FloatValue);
     CreateTimer(endT, Timer_ArtNotifyEnd, INVALID_HANDLE, TIMER_FLAG_NO_MAPCHANGE);
 
     // v1.0.6: 预警光圈心跳（全员可见，I 蓝 / II 黄）+ 预警结束落罐
@@ -3384,25 +3408,20 @@ public Action Timer_ArtWarn(Handle timer)
         // 每秒重建倒计时；屏幕外时边缘箭头指向落点），替换 PrintHintText。
         // v1.10.4: AGM 发射音效在 T-3 才响（overpass_jets.wav）→ "导弹发射
         // 倒计时"只显示 3/2/1（与音效同步）；T-8~T-4 显示"导弹来袭预警！"
-        // （用户拍板：不该从预警一开始就显示"发射倒计时"）
-        // v1.10.5: 预警期文案也带剩余秒数（用户拍板"导弹来袭预警 %d 秒！"）
+        // v1.10.5: 预警期文案带剩余秒数（用户拍板）
+        // v1.10.6: 全部支援带名称（用户拍板：燃烧弹/胆汁罐/榴弹/导弹，
+        // 格式模仿"导弹来袭预警 %d 秒！"，一眼看清呼叫的是什么支援）
         char warnBuf[128];
-        if (g_iArtWarnKind == 6)
+        char kindName[16];
+        Art_KindWarnName(g_iArtWarnKind, kindName, sizeof(kindName));
+        if (g_iArtWarnKind == 6 && remain <= 3)
         {
-            if (remain > 3)
-            {
-                Format(warnBuf, sizeof(warnBuf), "导弹来袭预警 %d 秒！", remain);
-                Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
-            }
-            else
-            {
-                Format(warnBuf, sizeof(warnBuf), "导弹发射倒计时：%d 秒！", remain);
-                Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
-            }
+            Format(warnBuf, sizeof(warnBuf), "导弹发射倒计时：%d 秒！", remain);
+            Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
         }
         else
         {
-            Format(warnBuf, sizeof(warnBuf), "空袭将在 %d 秒后到来，注意躲避！", remain);
+            Format(warnBuf, sizeof(warnBuf), "%s来袭预警 %d 秒！", kindName, remain);
             Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
         }
 
@@ -3472,9 +3491,12 @@ public Action Timer_ArtWarnEnd(Handle timer)
     }
 
     // v1.10.0: 轰炸开始提示带 6s 超时自动消失，不长期占用 hint 单槽
+    // v1.10.6: 带支援名称（燃烧弹/胆汁罐/榴弹轰炸进行中）
     char warnBuf[128];
-    Format(warnBuf, sizeof(warnBuf), "空袭进行中！约 %.0f 秒后结束，注意躲避",
-        g_fArtWarnDuration);
+    char kindName[16];
+    Art_KindWarnName(g_iArtWarnKind, kindName, sizeof(kindName));
+    Format(warnBuf, sizeof(warnBuf), "%s轰炸进行中！约 %.0f 秒后结束，注意躲避",
+        kindName, g_fArtWarnDuration);
     Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 6);
     Art_LaunchBarrage(g_iArtWarnBuyer, g_fArtWarnTarget, g_iArtWarnKind,
         g_fArtWarnRadius, g_fArtWarnHeight, g_fArtWarnDuration);
