@@ -9,6 +9,12 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.2（2026-08-16）：**修复感叹号堆叠（用户实测）**——每秒重建 hint 时
+ * 客户端不自动关旧实例：旧感叹号不消失、新的往下挤、一屏堆叠。根因：
+ * "Serverside Hint" 模板关闭只认 instructor_server_hint_stop 且 hint_name
+ * 匹配（close 块 "string1 is"），重复 create 不会替换。修复：Art_WarnHintShow
+ * 先 L4D2_StopInstructorHint 再 create（同帧连发，无闪烁），屏幕上始终一个。
+ *
  * v1.10.1（2026-08-16）：**预警 HUD 改固定屏幕中央（用户实测修正）**——
  * v1.10.0 把 Instructor Hint 锚定在落点 info_target 上，实测背对落点时
  * 变成屏幕边缘指向箭头（不是用户要的居中提示）→ 改 flags 带 STATIC
@@ -294,7 +300,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.1"
+#define PLUGIN_VERSION "1.10.2"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -3332,8 +3338,9 @@ void Art_ConfirmStrike(int client, ArtTargetInfo info)
 //     icon_target = player local_player 分支，每玩家各自一个、屏幕中央显示；
 //     不再锚定世界落点（v1.10.0 实测问题：锚定落点 → 背对落点时会变成
 //     屏幕边缘指向箭头，用户要求"就显示在屏幕中央，同时只显示一个"）
-//   - 全服单槽"Serverside Hint"（实例类型 2 = 同类型新者覆盖旧者），所以
-//     每秒倒计时直接重建即可，无需先 stop
+//   - v1.10.2 实测修正：客户端对重复 create 不会自动关旧实例（每秒重建 →
+//     旧感叹号不消失、新的往下挤、一屏堆叠）→ 必须**先 stop 再 create**
+//     （close 块按 hint_name 匹配关闭），同帧连发无闪烁
 //   - 死亡玩家不显示（模板未置 can_open_when_dead）——聊天播报/光圈兜底
 // 失败（事件创建失败）回退聊天播报，不吞提示。
 #define ART_WARN_HINT_NAME      "l4d2_shop_art_warn"
@@ -3343,6 +3350,8 @@ void Art_ConfirmStrike(int client, ArtTargetInfo info)
 
 void Art_WarnHintShow(const char[] caption, const char[] icon, int timeout)
 {
+    // v1.10.2: 先 stop 关掉旧实例再 create——实测只 create 会堆叠
+    L4D2_StopInstructorHint(ART_WARN_HINT_NAME);
     int color[3] = { 255, 90, 90 };
     if (!L4D2_CreateInstructorHint(ART_WARN_HINT_NAME, 0, caption, color, icon, icon, "",
         0.0, 0.0, timeout, true, false, true, ART_WARN_HINT_FLAGS))
