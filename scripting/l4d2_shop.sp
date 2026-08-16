@@ -9,6 +9,12 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.10（2026-08-17）：**AGM 倒计时从 5 秒开始（用户定稿）**——发射音效
+ * 在 remain==3（预警第 5 秒）响起 = 导弹发射时刻 → "AGM导弹发射倒计时"
+ * 显示 5→1 秒（remain 8..4 映射 5..1），走完瞬间音效响起并切"AGM导弹已
+ * 发射，注意躲避！"，一直显示到爆炸（V1_Detonate 幂等 stop 消退）。
+ * 绝不出现"音效都响了还提示还有 3 秒发射"的矛盾。
+ *
  * v1.10.9（2026-08-17）：**AGM 描述收敛为两类（用户拍板）**——①确认后
  * 立即"AGM导弹发射倒计时 X 秒！"（X=8→1 全程，无"来袭预警"中间态；
  * 发射音效在 X=3 响起，X 自然走完）；②T-0 切换"AGM导弹已发射，注意
@@ -336,7 +342,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.9"
+#define PLUGIN_VERSION "1.10.10"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -3429,17 +3435,21 @@ public Action Timer_ArtWarn(Handle timer)
         // v1.10.0: 改游戏内置 Instructor Hint 预警（icon_alert ⚠️ 悬浮落点 +
         // 每秒重建倒计时；屏幕外时边缘箭头指向落点），替换 PrintHintText。
         // v1.10.6: 全部支援带名称（格式模仿"导弹来袭预警 %d 秒！"）
-        // v1.10.9: AGM 只有两类描述（用户拍板）——①确认后立即"AGM导弹发射
-        // 倒计时 X 秒！"（X=8→1 全程，音效在 X=3 响起时自然走完）；
-        // ②T-0 切换"AGM导弹已发射，注意躲避！"（见 Timer_ArtWarnEnd），
-        // 爆炸后自然消退。不再有"来袭预警"中间态。
+        // v1.10.10: AGM 发射音效在 T-3（remain==3）响起 = 导弹发射时刻 →
+        // "发射倒计时"只覆盖发射前的 5 秒（remain 8..4 → 显示 5..1），音效
+        // 响起时 X 正好走完，绝不出现"音效都响了还提示还有 3 秒发射"；
+        // 音效响起瞬间切"AGM导弹已发射，注意躲避！"（见 remain==3 分支）。
         char warnBuf[128];
         char kindName[16];
         Art_KindWarnName(g_iArtWarnKind, kindName, sizeof(kindName));
         if (g_iArtWarnKind == 6)
         {
-            Format(warnBuf, sizeof(warnBuf), "%s发射倒计时 %d 秒！", kindName, remain);
-            Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
+            int launchCount = remain - 3;   // 发射前 5 秒：8→5、7→4、6→3、5→2、4→1
+            if (launchCount >= 1)
+            {
+                Format(warnBuf, sizeof(warnBuf), "%s发射倒计时 %d 秒！", kindName, launchCount);
+                Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
+            }
         }
         else
         {
@@ -3454,7 +3464,9 @@ public Action Timer_ArtWarn(Handle timer)
             // V1_SND_LAUNCH 的 #define 在本行之后，故用字面量避免预处理顺序报错）
             EmitAmbientSound("animation/overpass_jets.wav", g_fArtWarnTarget, 0, SNDLEVEL_RAIDSIREN, _, 1.0);
             LogMessage("[V1] Playing launch warning sound at T-3");
-            // v1.10.9: 音效响起时 X 继续自然倒数（3→2→1），不做文案切换
+            // v1.10.10: 音效=发射时刻，X 已走完 → 立即切第二类描述"已发射"
+            // （红图标持续到爆炸，V1_Detonate 幂等 stop 自然消退）
+            Art_WarnHintShow("AGM导弹已发射，注意躲避！", ART_WARN_HINT_ICON_RED, 0);
         }
     }
 
@@ -3503,11 +3515,9 @@ public Action Timer_ArtWarnEnd(Handle timer)
     // v1.8.0: AGM导弹走独立路径——单发导弹俯冲，不是持续落罐
     if (g_iArtWarnKind == 6)
     {
-        // v1.10.9: T-0 切换第二类描述——"AGM导弹已发射，注意躲避！"
-        // （红色紧急图标），俯冲时长超时自动消失；爆炸时 V1_Detonate
-        // 幂等 Art_WarnHintStop 兜底（爆炸后自然消退）
-        Art_WarnHintShow("AGM导弹已发射，注意躲避！", ART_WARN_HINT_ICON_RED,
-            RoundToNearest(g_cvArt6DiveTime.FloatValue) + 1);
+        // v1.10.10: "AGM导弹已发射，注意躲避！"已在 T-3（音效响起、倒计时
+        // 走完）时切换并持续显示，此处不再重建——保持到爆炸（V1_Detonate
+        // 幂等 Art_WarnHintStop 自然消退）
         V1_Launch(g_iArtWarnBuyer, g_fArtWarnTarget, g_fArtWarnRadius);
         return Plugin_Continue;
     }
