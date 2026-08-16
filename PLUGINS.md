@@ -70,7 +70,8 @@
 | 插件 | 说明 |
 |------|------|
 | `l4d2_ammo_set.smx` | 弹药携带量自定义设置（SMG 720/AR 540/霰弹 192/猎枪 225 等） |
-| `l4d2_m60_ammo.smx` | M60 弹药量设置（450 发） |
+| `l4d2_m60_ammo.smx` | M60 弹匣量设置（sm_m60_clip 254） |
+| `l4d2_m60_nodrop.smx` | M60 空弹不丢弃（patch CRifle_M60::PrimaryAttack，0x85→0x8D 跳过丢弃分支）+ 地面 0 发 M60 拾取保护 |
 | `l4d2_shotgun_speed.smx` | 霰弹枪射速/换弹速度调整 |
 | `l4d2_weapon_attributes.smx` | 武器属性修改（伤害/射速/射程等） |
 | `WeaponHandling.smx` | 武器操作速度调整（拔枪动画/双枪射速等） |
