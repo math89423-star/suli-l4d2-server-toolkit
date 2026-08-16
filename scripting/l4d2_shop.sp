@@ -9,6 +9,12 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.4（2026-08-16）：**AGM 预警文案与发射音效对齐（用户拍板）**——
+ * 发射音效在倒计时 3 秒时才响（overpass_jets.wav），"导弹发射倒计时"
+ * 不该从预警一开始就显示（8s 时导弹根本没发射）→ T-8~T-4 显示"导弹来袭
+ * 预警！"，T-3 起才切"导弹发射倒计时：3/2/1 秒！"（与音效同步）；删除
+ * T-3 的"导弹已发射，正在接近目标！"覆盖（文案已与音效同步，无需叠加）。
+ *
  * v1.10.3（2026-08-16）：**关闭火力支援全部 PrintHintText（用户拍板）**——
  * 新 HUD（instructor hint 感叹号）接管屏幕中央后，删除瞄准阶段教学提示
  * （"[商店] 左键确认轰炸，右键取消" + priming），操作说明并入购买聊天
@@ -305,7 +311,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.3"
+#define PLUGIN_VERSION "1.10.4"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -3374,11 +3380,19 @@ public Action Timer_ArtWarn(Handle timer)
         g_iArtWarnLastSec = remain;
         // v1.10.0: 改游戏内置 Instructor Hint 预警（icon_alert ⚠️ 悬浮落点 +
         // 每秒重建倒计时；屏幕外时边缘箭头指向落点），替换 PrintHintText。
+        // v1.10.4: AGM 发射音效在 T-3 才响（overpass_jets.wav）→ "导弹发射
+        // 倒计时"只显示 3/2/1（与音效同步）；T-8~T-4 显示"导弹来袭预警！"
+        // （用户拍板：不该从预警一开始就显示"发射倒计时"）
         char warnBuf[128];
         if (g_iArtWarnKind == 6)
         {
-            Format(warnBuf, sizeof(warnBuf), "导弹发射倒计时：%d 秒！", remain);
-            Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
+            if (remain > 3)
+                Art_WarnHintShow("导弹来袭预警！", ART_WARN_HINT_ICON, 0);
+            else
+            {
+                Format(warnBuf, sizeof(warnBuf), "导弹发射倒计时：%d 秒！", remain);
+                Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
+            }
         }
         else
         {
@@ -3393,7 +3407,8 @@ public Action Timer_ArtWarn(Handle timer)
             // V1_SND_LAUNCH 的 #define 在本行之后，故用字面量避免预处理顺序报错）
             EmitAmbientSound("animation/overpass_jets.wav", g_fArtWarnTarget, 0, SNDLEVEL_RAIDSIREN, _, 1.0);
             LogMessage("[V1] Playing launch warning sound at T-3");
-            Art_WarnHintShow("导弹已发射，正在接近目标！", ART_WARN_HINT_ICON, 0);
+            // v1.10.4: 删除"导弹已发射，正在接近目标！"覆盖——T-3 起 HUD 已
+            // 切"导弹发射倒计时：3 秒！"，文案与音效同步，无需再叠加
         }
     }
 
