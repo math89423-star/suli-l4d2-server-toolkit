@@ -98,6 +98,12 @@
 //         Smoker 控制链 —— 拉中 SI_SignalAttack 开窗 + 拖向酸液
 //         Tank 开团者 —— 密集区目标分支 + 投石/bhop 开团信号
 //       部署名 AI_HardSI_bt.smx（源码 AI_HardSI.sp，编译后改名）。
+// v5.26: StuckDetour 跳跃脱困增强（2026-08-16，用户实测"特感卡地形不会跳"）——
+//       [通用] BT_StuckDetour：停滞【立即】注入跳跃窗口 0.4s（原等 3 轮才
+//         单帧跳一次，单帧被引擎吞 + 5-6s 反应 = "呆"）；绕行期间每决策帧
+//         注入 IN_JUMP（多帧跳才能翻矮墙/瓦砾/铁丝网/几何缝——boomer
+//         vomit_delay 单帧吞键同款教训）；连续 3 轮仍卡 → 长跳窗口 0.8s；
+//         脱困（有位移）自动清跳跃窗口。
 // v5.1: 站桩修复 + 诊断（2026-08-04，用户报告"特感有时候原地傻站"）——
 //       [Charger] 根 child9 BlockCharge 兜底 = 站桩 + 推后引擎 m_timestamp
 //         （引擎冲锋永久不就绪 → 站 12s → 挠一下 → 再站 12s）。改为冷却期
@@ -185,7 +191,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "5.24.0",
+    version = "5.26.0",
     url = "github.com/breezyplease"
 };
 

@@ -25,7 +25,9 @@
 #define STUCK_MOVE_THRESHOLD 20.0
 #define STUCK_DETOUR_TIME_MIN 1.5
 #define STUCK_DETOUR_TIME_MAX 2.5
-#define STUCK_JUMP_ROUNDS 3    // 连续 3 轮（~1.2s）无位移 → 跳一下翻障碍
+#define STUCK_JUMP_ROUNDS 3    // v5.26: 连续 3 轮停滞 → 升级长跳窗口（原"跳一下"单帧）
+#define STUCK_JUMP_TIME 0.4    // v5.26: 停滞即跳的短跳窗口（秒，多帧注入 IN_JUMP）
+#define STUCK_JUMP_TIME_LONG 0.8  // v5.26: 连续 3 轮仍卡 → 长跳窗口（翻更高障碍）
 
 // ============================================================================
 // v5.25: 远近分流瞄准（导航层整改核心 —— 任务书 §14 路线 A）
@@ -82,6 +84,12 @@ stock bool BT_StuckDetour(int client) {
             // 绕行到期结束
             BB_SetBool(client, "_stuck_detour", false);
         } else {
+            // v5.26: 跳跃窗口内每决策帧注入 IN_JUMP——多帧跳跃才能翻过
+            // 矮墙/瓦砾/铁丝网/几何缝（用户实测：特感卡地形不会跳）。
+            // 单帧按键会被引擎吞（boomer_vomit_delay 0.1s 风阻同款教训）。
+            float jumpUntil = BB_GetFloat(client, "_stuck_jump_until", 0.0);
+            if (jumpUntil > now)
+                BT_AddButton(client, IN_JUMP);
             // 绕行中：绝对朝向（v5.6：原版每 tick 读当前朝向再 ±90° 叠加
             // → 上一帧的偏移被再次叠加，绕行方向旋转成圈/甩头）
             float yaw = BB_GetFloat(client, "_stuck_yaw", 0.0);
@@ -133,17 +141,23 @@ stock bool BT_StuckDetour(int client) {
             BB_SetBool(client, "_stuck_left", goLeft);
             BB_SetFloat(client, "_stuck_yaw", ang[1] + (goLeft ? -90.0 : 90.0));
             BB_SetFloat(client, "_stuck_until", now + GetRandomFloat(STUCK_DETOUR_TIME_MIN, STUCK_DETOUR_TIME_MAX));
-            // v5.6: 连续 3 轮停滞 → 追加一次跳跃（几何缝/铁丝网/矮台阶靠
-            // ±90° 滑动脱不了困，跳是唯一翻障手段——Jockey 1603u 冻结现场）
+            // v5.26: 停滞【立即】注入跳跃窗口（原 v5.6 等 3 轮才跳一次单帧
+            // ——单帧被引擎吞 + 5-6s 才反应 = 玩家看到的"呆"）。每轮停滞都
+            // 跳 STUCK_JUMP_TIME(0.4s)；连续 STUCK_JUMP_ROUNDS(3) 轮仍无位移
+            // → 升级长跳窗口 0.8s（翻更高障碍），并重置轮数。
             int rounds = BB_GetInt(client, "_stuck_rounds", 0) + 1;
+            BB_SetInt(client, "_stuck_rounds", rounds);
+            float jumpTime = STUCK_JUMP_TIME;
             if (rounds >= STUCK_JUMP_ROUNDS) {
                 rounds = 0;
-                BT_AddButton(client, IN_JUMP);
+                BB_SetInt(client, "_stuck_rounds", 0);
+                jumpTime = STUCK_JUMP_TIME_LONG;
             }
-            BB_SetInt(client, "_stuck_rounds", rounds);
+            BB_SetFloat(client, "_stuck_jump_until", now + jumpTime);
         } else {
             BB_SetBool(client, "_stuck_detour", false);
             BB_SetInt(client, "_stuck_rounds", 0);
+            BB_SetFloat(client, "_stuck_jump_until", 0.0);   // v5.26: 脱困清跳跃窗口
         }
         BB_SetFloat(client, "_stuck_pos0", myPos[0]);
         BB_SetFloat(client, "_stuck_pos1", myPos[1]);
