@@ -10,7 +10,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.4.0"
+#define PLUGIN_VERSION "2.5.0"
 
 // 配置常量
 #define MUTATION_CHANCE 0.10        // 10% 突变概率
@@ -20,11 +20,13 @@
 #define MAX_TRACKED_TANKS 4         // 最多跟踪的 Tank 数量
 // v2.4.0: 就近生成 —— 突变 Tank 生成后必须在幸存者活跃模拟范围内，否则引擎
 // 不 tick 其 AI（待命站桩），且远离流程会被导演判定掉队自动清除（"被系统处死"）。
-#define TANK_SPAWN_MIN_DIST 450.0   // 最近生成距离（<此值贴脸不公平，拒绝）
+#define TANK_SPAWN_MIN_DIST 750.0   // v5.35: 最近生成距离 450→750（用户：刷新远一点，避免贴脸出生）
 #define TANK_SPAWN_SAMPLES  12      // 采样次数（取 ≥MIN 里最近的点）
 
 // specialspawner native 声明
 native void SS_HoldClearing(bool hold);
+// v2.5.0: 标记本波为 Tank 波（specialspawner 剿灭得分 ×3）
+native void SS_MarkWaveTank();
 
 // 全局变量
 int g_iWaveCounter = 0;             // 总波次计数
@@ -306,6 +308,14 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
 
     g_iTankCount = spawned;
     LogMessage("[Tank Mutator] Spawn complete: %d/%d tanks tracked", spawned, tankCount);
+
+    if (spawned > 0) {
+        // v2.5.0: 标记本波为 Tank 波（specialspawner 剿灭得分三档 ×3）
+        if (GetFeatureStatus(FeatureType_Native, "SS_MarkWaveTank") == FeatureStatus_Available) {
+            SS_MarkWaveTank();
+            LogMessage("[Tank Mutator] Wave marked as TANK wave for clear score x3");
+        }
+    }
 
     if (spawned == 0) {
         // 没生成任何 Tank，立即释放挂起

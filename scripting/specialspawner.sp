@@ -5,6 +5,10 @@
 #include <sdktools>
 #include <left4dhooks>
 
+// v2.5.0 剿灭得分: si_hud 钱包入账口（AskPluginLoad2 里 MarkNativeAsOptional——
+// si_hud 未加载时本插件仍可加载, 调用前必须 GetFeatureStatus 守卫）
+native int SH_AddWallet(int client, int amount);
+
 #define DEBUG		0
 #define BENCHMARK	0
 #if BENCHMARK
@@ -133,7 +137,13 @@ ConVar
 	g_cBatchWindow,
 	g_cRestMin,					// v2.0.0 波间三态
 	g_cRestMax,
-	g_cRestForce;
+	g_cRestForce,
+	// v2.5.0 剿灭得分（三档互斥, 波次清缴完成时全体生还者每人得分）
+	g_cClearScoreBase,
+	g_cClearScorePerfect,
+	g_cClearScoreComp,
+	g_cClearCompRatio,
+	g_cClearTankMult;
 
 float
 	g_fSpawnTimeMin,
@@ -224,7 +234,10 @@ int
 	g_iBatchSegA,				// 中段参照子集起点（前段结束处）
 	g_iBatchSegB,				// 后段参照子集起点（最后自然段起点）
 	// v2.0.0 收尾期清剿阈值: 场上存活 ≤ 该值进入冷静期（= max(2, 本波刷新量×40%)）
-	g_iClearThreshold;
+	g_iClearThreshold,
+	// v2.5.0 剿灭得分: 波次开始时生还队人数快照（含 bot）+ 波内倒地/死亡去重人数
+	g_iWaveBase,
+	g_iWaveDownDeaths;
 
 bool
 	g_bLateLoad,
@@ -239,7 +252,12 @@ bool
 	// v2.2.0 清缴挂起标志（外部插件控制，Tank 波等场景强制等待条件满足）
 	g_bClearingHeld,
 	// v2.4.0 刷新暂停标志（外部插件控制，火力支援 AGM 等场景临时暂停刷新）
-	g_bSpawningPaused;
+	g_bSpawningPaused,
+	// v2.5.0 剿灭得分: 波内统计
+	g_bWaveActive,					// 本波进行中（PRESSURE/CLEARING，波外倒地不计入）
+	g_bWaveStarted,					// 本波真的刷出特感（零波不发分）
+	g_bWaveHadTank,					// 本波是 Tank 波（tank_wave_mutator 调 SS_MarkWaveTank 置位）
+	g_bWaveDowned[MAXPLAYERS + 1];	// 波内倒地/死亡去重标记
 
 // v2.0.0 波间三态: 当前相位（初始 = IDLE）
 WavePhase
@@ -261,7 +279,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "2.4.4",
+	version = "2.5.0",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -270,6 +288,10 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	CreateNative("SS_HoldClearing", Native_HoldClearing);
 	// v2.4.0 暴露 native: 外部插件可暂停刷新（火力支援 AGM 等清场技能）
 	CreateNative("SS_PauseSpawning", Native_PauseSpawning);
+	// v2.5.0 暴露 native: tank_wave_mutator 标记本波为 Tank 波（突变 Tank 波剿灭得分 ×3）
+	CreateNative("SS_MarkWaveTank", Native_MarkWaveTank);
+	// v2.5.0 剿灭得分: si_hud 钱包 native 标记可选（si_hud 未加载时本插件照常工作）
+	MarkNativeAsOptional("SH_AddWallet");
 	RegPluginLibrary("specialspawner");
 	return APLRes_Success;
 }
@@ -280,6 +302,15 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 int Native_HoldClearing(Handle plugin, int numParams) {
 	g_bClearingHeld = GetNativeCell(1) != 0;
 	LogMessage("[SS] Clearing hold %s (external)", g_bClearingHeld ? "SET" : "RELEASED");
+	return 0;
+}
+
+// v2.5.0 native: SS_MarkWaveTank()
+// tank_wave_mutator 在突变 Tank 波成功生成 Tank 后调用，标记"本波是 Tank 波"，
+// 波次清缴结算时剿灭得分 ×ss_clear_tank_mult。仅对当前波次生效（波次开始自动清零）。
+int Native_MarkWaveTank(Handle plugin, int numParams) {
+	g_bWaveHadTank = true;
+	LogMessage("[SS] Wave marked as TANK wave (external)");
 	return 0;
 }
 
@@ -418,6 +449,15 @@ public void OnPluginStart() {
 	g_cRestMin =					CreateConVar("ss_rest_min",				"25.0",						"冷静期最小时长(秒, 零特感缓冲窗口)", _, true, 1.0, true, 60.0);
 	g_cRestMax =					CreateConVar("ss_rest_max",				"35.0",						"冷静期最大时长(秒)", _, true, 1.0, true, 60.0);
 	g_cRestForce =					CreateConVar("ss_rest_force",			"120.0",					"收尾期强制冷静硬上限(秒, 自波次开始计, 防留特/僵局)", _, true, 10.0, true, 600.0);
+	// v2.5.0 剿灭得分（用户设计 2026-08-17）: 波次清缴完成时全体生还者每人得分, 三档互斥:
+	// 完美（波内无人倒地/死亡）> 补偿（倒地/死亡 ≥ 队伍人数×ss_clear_comp_ratio）> 基础（其余）。
+	// Tank 波（tank_wave_mutator 突变, SS_MarkWaveTank）三档同乘 ss_clear_tank_mult。
+	// 播报合并进"波次清剿完毕"消息: 本波次剿灭完成，<档位>全体+X分，下一波来袭X秒。
+	g_cClearScoreBase =			CreateConVar("ss_clear_score_base",		"200",						"剿灭得分-基础档: 正常清缴波次全体每人得分(0=关闭剿灭得分)", _, true, 0.0);
+	g_cClearScorePerfect =		CreateConVar("ss_clear_score_perfect",	"350",						"剿灭得分-完美档: 波内无人倒地/死亡时全体每人得分", _, true, 0.0);
+	g_cClearScoreComp =			CreateConVar("ss_clear_score_comp",		"275",						"剿灭得分-补偿档: 波内倒地/死亡≥队伍比例时全体每人得分", _, true, 0.0);
+	g_cClearCompRatio =			CreateConVar("ss_clear_comp_ratio",		"0.30",						"剿灭补偿触发: 波内倒地/死亡去重人数 ≥ 队伍人数×本比例", _, true, 0.0, true, 1.0);
+	g_cClearTankMult =			CreateConVar("ss_clear_tank_mult",		"3.0",						"Tank 波剿灭得分倍率(三档同乘)", _, true, 1.0, true, 10.0);
 
 	g_cSpawnRange =					FindConVar("z_spawn_range");
 	g_cDiscardRange =				FindConVar("z_discard_range");
@@ -458,6 +498,8 @@ public void OnPluginStart() {
 	HookEvent("player_team",			Event_PlayerTeam);
 	HookEvent("player_spawn",			Event_PlayerSpawn);
 	HookEvent("player_death",			Event_PlayerDeath,	EventHookMode_Pre);
+	// v2.5.0 剿灭得分: 波内倒地统计（去重）
+	HookEvent("player_incapacitated",	Event_PlayerIncapacitated);
 
 	RegAdminCmd("sm_weight",		cmdSetWeight,	ADMFLAG_RCON, "设置特感生成比重");
 	RegAdminCmd("sm_limit",			cmdSetLimit,	ADMFLAG_RCON, "设置特感生成数量");
@@ -1115,7 +1157,19 @@ void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
 
 void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
 	int client = GetClientOfUserId(event.GetInt("userid"));
-	if (!client || !IsClientInGame(client) || GetClientTeam(client) != 3)
+	if (!client || !IsClientInGame(client))
+		return;
+
+	// v2.5.0 剿灭得分: 波内死亡统计（去重; 倒地后死亡由标记拦住, 不重复计数）
+	if (GetClientTeam(client) == 2) {
+		if (g_bWaveActive && !g_bWaveDowned[client]) {
+			g_bWaveDowned[client] = true;
+			g_iWaveDownDeaths++;
+		}
+		return;
+	}
+
+	if (GetClientTeam(client) != 3)
 		return;
 
 	static int class;
@@ -1125,6 +1179,20 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
 
 	if (class != 4 && IsFakeClient(client))
 		RequestFrame(NextFrame_KickBot, event.GetInt("userid"));
+}
+
+// v2.5.0 剿灭得分: 波内倒地统计（去重; 仅在波次进行中 PRESSURE/CLEARING 计入,
+// REST/IDLE 期间残留特感造成的倒地归属下一波）
+void Event_PlayerIncapacitated(Event event, const char[] name, bool dontBroadcast) {
+	if (!g_bWaveActive)
+		return;
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (client < 1 || client > MaxClients || !IsClientInGame(client) || GetClientTeam(client) != 2)
+		return;
+	if (!g_bWaveDowned[client]) {
+		g_bWaveDowned[client] = true;
+		g_iWaveDownDeaths++;
+	}
 }
 
 Action tmrTankSpawn(Handle timer, int client) {
@@ -1280,9 +1348,23 @@ Action tmrSpawnSpecial(Handle timer) {
 	g_fPhaseEnterTime = GetEngineTime();
 	g_Phase = PHASE_PRESSURE;
 
+	// v2.5.0 剿灭得分: 波次开始快照——基数=当前生还队人数（含 bot, 用户拍板）,
+	// 清零波内倒地/死亡/Tank 标志（retry 波不重进此处, 统计延续本波）
+	g_iWaveBase = 0;
+	g_iWaveDownDeaths = 0;
+	g_bWaveHadTank = false;
+	g_bWaveActive = true;
+	for (int i = 1; i <= MaxClients; i++) {
+		g_bWaveDowned[i] = false;
+		if (IsClientInGame(i) && GetClientTeam(i) == 2)
+			g_iWaveBase++;
+	}
+
 	int totalSI = GetTotalSI();
 	// v2.1.0 FIX: 新波次开始应传 false（非 retry），才能触发 OnWaveStarted 通知
 	bool started = ExecuteSpawnQueue(totalSI, false);
+	// v2.5.0 剿灭得分: 零波（上限满/全倒/无站立生还者）不发剿灭分
+	g_bWaveStarted = started;
 
 	// v2.2.0 触发 WaveStart forward（started=是否真的刷出特感，供外部插件同步波次）
 	Call_StartForward(g_fwdOnWaveStart);
@@ -1819,8 +1901,65 @@ void EnterRest() {
 		rest, GetPostRestInterval(), totalCountdown, g_fSpawnTimeMax,
 		(g_cRestMin.FloatValue + g_cRestMax.FloatValue) * 0.5);
 
+	// v2.5.0 剿灭得分结算（发钱 + 播报合并进清剿完成消息；原"波次清剿完毕"播报由
+	// SettleWaveClearScore 内部按零波/关闭时兜底输出）
+	SettleWaveClearScore(totalCountdown);
+}
+
+// v2.5.0 剿灭得分结算（用户设计 2026-08-17 拍板）:
+// 三档互斥 —— 完美（波内无人倒地/死亡）= ss_clear_score_perfect(350) /
+// 补偿（倒地/死亡去重人数 ≥ 队伍人数×ss_clear_comp_ratio）= ss_clear_score_comp(275) /
+// 基础（其余）= ss_clear_score_base(200)。Tank 波三档同乘 ss_clear_tank_mult(3)。
+// 发放对象 = 当前生还队全体（含 bot，与过关奖励同口径），每人各得对应分数。
+// 播报: [特感] 本波次剿灭完成，<档位>全体 +X 分，下一波来袭 X 秒
+// 零波（未刷出特感）或全部关闭: 不发分, 保持原"波次清剿完毕"播报。
+void SettleWaveClearScore(float totalCountdown) {
+	g_bWaveActive = false;
+
 	int total = RoundToNearest(totalCountdown);
-	PrintToChatAll("\x04[特感]\x01 波次清剿完毕，\x05%d\x01 秒后下一波", total);
+	int score = 0;
+	char tier[64];
+	char tankTag[32];
+	tankTag[0] = '\0';
+
+	if (g_bWaveStarted) {
+		if (g_iWaveDownDeaths == 0) {
+			score = g_cClearScorePerfect.IntValue;
+			strcopy(tier, sizeof(tier), "完美剿灭");
+		} else {
+			float ratio = g_iWaveBase > 0 ? float(g_iWaveDownDeaths) / float(g_iWaveBase) : 0.0;
+			if (ratio >= g_cClearCompRatio.FloatValue) {
+				score = g_cClearScoreComp.IntValue;
+				strcopy(tier, sizeof(tier), "剿灭补偿");
+			} else {
+				score = g_cClearScoreBase.IntValue;
+				strcopy(tier, sizeof(tier), "剿灭得分");
+			}
+		}
+
+		// Tank 波（tank_wave_mutator 突变, SS_MarkWaveTank）三档同乘倍率
+		if (g_bWaveHadTank && g_cClearTankMult.FloatValue > 1.0) {
+			score = RoundToNearest(float(score) * g_cClearTankMult.FloatValue);
+			strcopy(tankTag, sizeof(tankTag), "☠Tank波 ");
+		}
+	}
+
+	if (score > 0) {
+		// 入账: 全体生还者（含 bot; si_hud 未加载时静默跳过——optional native 守卫）
+		if (GetFeatureStatus(FeatureType_Native, "SH_AddWallet") == FeatureStatus_Available) {
+			for (int i = 1; i <= MaxClients; i++) {
+				if (IsClientInGame(i) && GetClientTeam(i) == 2)
+					SH_AddWallet(i, score);
+			}
+		}
+		LogMessage("[SS] Clear score: tier=%s score=%d downDeaths=%d/%d base=%d tank=%s next=%ds",
+			tier, score, g_iWaveDownDeaths, g_iWaveBase, g_bWaveHadTank ? 1 : 0, total);
+		PrintToChatAll("\x04[特感]\x01 本波次剿灭完成，\x03%s%s\x01全体 \x05+%d\x01 分，下一波来袭 \x05%d\x01 秒",
+			tankTag, tier, score, total);
+	} else {
+		// 零波或关闭: 保持原播报
+		PrintToChatAll("\x04[特感]\x01 波次清剿完毕，\x05%d\x01 秒后下一波", total);
+	}
 }
 
 // 冷静期后的下一波间隔 = 波间隔钉值 − 平均冷静时长（冷静期吃掉波间隔前段,
