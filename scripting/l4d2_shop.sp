@@ -342,7 +342,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.11.2"
+#define PLUGIN_VERSION "1.11.3"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -509,11 +509,11 @@ ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2�
 #define ART3_BREAK_PARTICLE  "boomer_explosion"
 #define ART3_CHASE_DURATION  8.0      // 吸引实体存活秒数（控场时长）
 
-#define SHOP_SLOTS      25      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）；v1.8.0: 24→25（火力支援IV-AGM导弹）——⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
+#define SHOP_SLOTS      24      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）；v1.8.0: 24→25（火力支援IV-AGM导弹）——⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
 
 #define MELEE_POOL_COUNT   12
 
-#define WALLHACK_SLOT       9      // g_ShopTable 槽位（= 透视特感）；v1.7.1: 12→11（v1.7.0 删复活币行使透视滑到 11）
+#define WALLHACK_SLOT       8      // g_ShopTable 槽位（= 透视特感）；v1.11.3: 9→8（电锯行删除使透视前移 1）
 #define WALLHACK_DURATION   180.0   // v1.8.2: 3 分钟（2026-08-03 用户改回，原 v1.8.1 定稿 300=5 分钟）
 // v1.0.10: 生效期间不可重复购买 → WALLHACK_CAP（900s 续费封顶）已删除
 
@@ -592,11 +592,10 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "电击器",      "weapon_defibrillator",             4375,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3500）
     { "医疗包",      "weapon_first_aid_kit",             3750,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3000）
     { "激光瞄准",    "weapon_upgradepack_laser_sight",   1500,  0,  0 },   // v1.7.96: 用户定稿 1500（原 3500）
-    { "电锯",        "weapon_chainsaw",                  3500,  0,  0 },   // v1.8.6: 降价 5000→3500
     // v1.7.0: "复活币 8500" 商品已删除（复活体系改为积分复活，见 si_hud v1.12.0）
     // v1.7.1: 删除后透视特感滑到槽 11，WALLHACK_SLOT 已同步改 11
     { "透视特感",    "wallhack",                         5000,  0,  3 },   // v1.8.6: 涨价 4000→5000
-    { "近战盲盒",    "melee_box",                        1000,  0,  0 },   // v1.7.96: 用户定稿 1000（原 3000）
+    { "近战盲盒",    "melee_box",                        2500,  0,  0 },   // v1.11.3: 电锯并入后涨价 1000→2500（用户拍板）
     { "烟花",        "weapon_fireworkcrate",             1200,  0,  1 },   // v1.7.96: 用户定稿 1200（原 2500）
     // v1.4.3: 按价格重排编号（用户拍板）——胆汁雨 3500 最低 = I、轰炸 5500 = II、
     // 燃烧 6500 = III（原 III-胆汁雨/I-轰炸/II-燃烧）；v1.4.5 定名：绿色雨幕/地狱烈火/地毯轰炸
@@ -1685,8 +1684,14 @@ void ShopBuy(int client, int slot)
     // v1.7.72: 近战盲盒——随机掉落一把非电锯近战武器
     if (StrEqual(g_ShopTable[slot].classname, "melee_box"))
     {
+        // v1.11.3: 电锯并入盲盒（用户拍板）——13 等份：12 把近战 + 电锯
+        int roll = GetRandomInt(0, MELEE_POOL_COUNT);
+        bool isChainsaw = (roll == MELEE_POOL_COUNT);
         char picked[32];
-        strcopy(picked, sizeof(picked), g_MeleePool[GetRandomInt(0, MELEE_POOL_COUNT - 1)]);
+        if (isChainsaw)
+            strcopy(picked, sizeof(picked), "weapon_chainsaw");
+        else
+            strcopy(picked, sizeof(picked), g_MeleePool[roll]);
 
         float pos[3], ang[3], fwd[3];
         GetClientEyePosition(client, pos);
@@ -1696,7 +1701,20 @@ void ShopBuy(int client, int slot)
         pos[1] += fwd[1] * 70.0;
         pos[2] -= 20.0;
 
-        int ent = SpawnMelee(picked, pos);
+        int ent;
+        if (isChainsaw)
+        {
+            ent = CreateEntityByName("weapon_chainsaw");
+            if (ent != -1)
+            {
+                DispatchSpawn(ent);
+                TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
+            }
+        }
+        else
+        {
+            ent = SpawnMelee(picked, pos);
+        }
         if (ent <= 0)
         {
             SH_AddWallet(client, price);
@@ -1705,7 +1723,7 @@ void ShopBuy(int client, int slot)
             return;
         }
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05近战盲盒\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：开出 \x05%s\x01",
-            price, SH_GetWallet(client), picked);
+            price, SH_GetWallet(client), isChainsaw ? "电锯" : picked);
         return;
     }
 
