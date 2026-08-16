@@ -30,6 +30,13 @@
 //     历史贴脸案例 dist=298/502/561；用户："必须距离生还者队伍足够远"）
 //   · 第二只失败 → 只刷第一只（单 Tank 波），不违背"足够远"
 //   · 采样 12→20 降低失败率；LOS 检查防跨层/隔墙（玩家看不到 = 白刷）
+// v2.6.4: 前后刷新 fallback（用户拍板 2026-08-16，tew2_1stem 20:45 实测 0/2 全灭）——
+//   · 起因：20:45 室内段 20 次采样无 ≥800u+LOS 候选（specialspawner 同刻
+//     10/10 invis-fb），双 Tank 预告后一只没刷（v2.6.3 严格执行的代价）
+//   · 三角形优先不变；无合格点 → fallback：第一只刷队伍【前方】、第二只刷
+//     【后方】（全队平均朝向/中心，用户："做一个fallback，就是前后刷新"）
+//   · 距离 600→500→400 逐级缩短 + 向下 trace 找地面（防卡墙/落地）；无 LOS 要求
+//   · 仍找不到地面点才放弃该只（日志区分 fallback 成功/失败原因）
 #pragma semicolon 1
 #pragma newdecls required
 
@@ -37,7 +44,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.6.3"
+#define PLUGIN_VERSION "2.6.4"
 
 // 配置常量
 #define MUTATION_CHANCE 0.10        // 10% 突变概率
@@ -52,6 +59,8 @@
 // v2.6.3: 三角形刷新（用户定稿）——两只与玩家构成三角形，夹角 60°-120°
 #define TANK_SPAWN_ANGLE_MIN 60.0   // 夹角下限（60° 保证两只间距 ≥800u 不互卡）
 #define TANK_SPAWN_ANGLE_MAX 120.0  // 夹角上限（防侧翼包夹）
+// v2.6.4: 前后刷新 fallback（用户定稿）——三角形无解时第一只前方、第二只后方
+#define TANK_FALLBACK_DIST 600.0    // 前后基准距离（逐级 -100 缩短，防卡墙）
 // v2.6.0: 卡住看护（用户定稿）——位置长时间几乎不动 → 重定位
 #define TANK_STUCK_MOVE   40.0      // 单次检查（2s）移动 < 此值视为"没动"
 #define TANK_STUCK_CHECKS 4         // 连续 4 次没动（8s）→ 判定卡住 → 重定位
@@ -350,6 +359,24 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
         if (bestDist < 0.0) {
             LogMessage("[Tank Mutator] Tank #%d spawn failed: no candidate ≥%.0fu with LOS%s (足够远约束)",
                        n + 1, TANK_SPAWN_MIN_DIST, hasBuddy ? " + triangle angle" : "");
+            // v2.6.4: 前后刷新 fallback（用户拍板）——三角形无解时第一只刷队伍
+            // 前方、第二只刷后方（全队平均朝向/中心），距离逐级缩短 + 地面点
+            if (SpawnTankFallback(n, spawnPos)) {
+                int tank = L4D2_SpawnTank(spawnPos, spawnAng);
+                if (tank > 0 && IsClientInGame(tank)) {
+                    g_iTanks[spawned] = tank;
+                    GetClientAbsOrigin(tank, g_fTankLastPos[spawned]);
+                    g_iTankStuckChecks[spawned] = 0;
+                    spawned++;
+                    LogMessage("[Tank Mutator] Tank #%d FALLBACK spawned (%s) at (%.1f, %.1f, %.1f), client: %d",
+                               n + 1, (n % 2 == 0) ? "front" : "back",
+                               spawnPos[0], spawnPos[1], spawnPos[2], tank);
+                } else {
+                    LogMessage("[Tank Mutator] Tank #%d fallback spawn failed: invalid entity", n + 1);
+                }
+            } else {
+                LogMessage("[Tank Mutator] Tank #%d fallback failed: no ground point front/back", n + 1);
+            }
             continue;
         }
 
@@ -594,6 +621,84 @@ void RelocateStuckTank(int tank) {
 // 射线过滤器：忽略玩家实体（幸存者/特感），只把世界几何当阻挡
 public bool TraceFilter_World(int entity, int contentsMask, any data) {
     return (entity >= 1 && entity <= MaxClients);
+}
+
+// ============ v2.6.4 前后刷新 fallback ============
+
+// 全队存活幸存者平均位置（队伍中心）
+bool GetTeamCenter(float center[3]) {
+    center[0] = center[1] = center[2] = 0.0;
+    int n = 0;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsClientInGame(i) || GetClientTeam(i) != 2 || !IsPlayerAlive(i)) continue;
+        float pos[3];
+        GetClientAbsOrigin(i, pos);
+        center[0] += pos[0]; center[1] += pos[1]; center[2] += pos[2];
+        n++;
+    }
+    if (n == 0) return false;
+    center[0] /= n; center[1] /= n; center[2] /= n;
+    return true;
+}
+
+// 全队存活幸存者平均朝向（水平面单位向量）；幸存者两两对向时平均值抵消 → false
+bool GetTeamForward(float fwd[3]) {
+    float sx = 0.0, sy = 0.0;
+    int n = 0;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsClientInGame(i) || GetClientTeam(i) != 2 || !IsPlayerAlive(i)) continue;
+        float ang[3], f[3];
+        GetClientEyeAngles(i, ang);
+        GetAngleVectors(ang, f, NULL_VECTOR, NULL_VECTOR);
+        sx += f[0]; sy += f[1];
+        n++;
+    }
+    if (n == 0) return false;
+    float len = SquareRoot(sx * sx + sy * sy);
+    if (len < 0.001) return false;
+    fwd[0] = sx / len; fwd[1] = sy / len; fwd[2] = 0.0;
+    return true;
+}
+
+// 前后刷新生成点：第 n 只（0=前方 / 1=后方，交替）相对队伍中心 ± 朝向。
+// 距离 TANK_FALLBACK_DIST 逐级 -100 缩短，向下 trace 找地面（防卡墙/悬空）。
+// 返回是否找到生成点（找不到时 spawnPos 不变）。
+bool SpawnTankFallback(int n, float spawnPos[3]) {
+    float center[3];
+    if (!GetTeamCenter(center)) return false;
+
+    float fwd[3];
+    if (!GetTeamForward(fwd)) {
+        // 全队平均朝向失效（对向/异常）→ 退化为参考幸存者朝向
+        int survivor = GetAnyAliveSurvivor();
+        if (survivor <= 0) return false;
+        float ang[3];
+        GetClientEyeAngles(survivor, ang);
+        GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+        fwd[2] = 0.0;
+        float len = SquareRoot(fwd[0] * fwd[0] + fwd[1] * fwd[1]);
+        if (len < 0.001) return false;
+        fwd[0] /= len; fwd[1] /= len;
+    }
+
+    float dir = (n % 2 == 0) ? 1.0 : -1.0;   // 第一只前方、第二只后方
+
+    for (int i = 0; i < 3; i++) {
+        float dist = (TANK_FALLBACK_DIST - i * 100.0) * dir;
+        float start[3];
+        start[0] = center[0] + fwd[0] * dist;
+        start[1] = center[1] + fwd[1] * dist;
+        start[2] = center[2] + 80.0;   // 抬高向下 trace 找地面
+
+        float end[3];
+        end[0] = start[0]; end[1] = start[1]; end[2] = start[2] - 3000.0;
+        TR_TraceRayFilter(start, end, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
+        if (TR_GetFraction() > 0.0 && TR_GetFraction() < 1.0) {
+            TR_GetEndPosition(spawnPos);
+            return true;
+        }
+    }
+    return false;
 }
 
 // ============ specialspawner native 调用 ============
