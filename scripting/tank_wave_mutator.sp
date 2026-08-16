@@ -22,6 +22,14 @@
 //   · 重定位：优先依附另一只存活 Tank（200u 偏移传过去，两只重新"放一起"）；
 //     单 Tank 卡住 LOS 无解时 → 随机方向 700u 地面点（不再传送玩家正前方
 //     500u 糊脸——用户否决该方案）
+// v2.6.3: 三角形刷新 + 至少 800u（用户定稿 2026-08-16，取代"放一起"/"一前一后"）——
+//   · 两只 Tank 与玩家构成【三角形】：每只距玩家 ≥800u（"至少保持800u距离"），
+//     两只相对玩家夹角 60°-120°（水平面）——60° 下限保证两只间距 ≥800u
+//     物理不接触不互卡；120° 上限防侧翼包夹（仍同侧推进不夹击）
+//   · 严格执行距离：无 ≥800u+LOS 候选就【不刷】（删除全部贴脸 fallback——
+//     历史贴脸案例 dist=298/502/561；用户："必须距离生还者队伍足够远"）
+//   · 第二只失败 → 只刷第一只（单 Tank 波），不违背"足够远"
+//   · 采样 12→20 降低失败率；LOS 检查防跨层/隔墙（玩家看不到 = 白刷）
 #pragma semicolon 1
 #pragma newdecls required
 
@@ -29,7 +37,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.6.2"
+#define PLUGIN_VERSION "2.6.3"
 
 // 配置常量
 #define MUTATION_CHANCE 0.10        // 10% 突变概率
@@ -39,10 +47,11 @@
 #define MAX_TRACKED_TANKS 4         // 最多跟踪的 Tank 数量
 // v2.4.0: 就近生成 —— 突变 Tank 生成后必须在幸存者活跃模拟范围内，否则引擎
 // 不 tick 其 AI（待命站桩），且远离流程会被导演判定掉队自动清除（"被系统处死"）。
-#define TANK_SPAWN_MIN_DIST 750.0   // v5.35: 最近生成距离 450→750（用户：刷新远一点，避免贴脸出生）
-#define TANK_SPAWN_SAMPLES  12      // 采样次数（取 ≥MIN 里最近的点）
-// v2.6.2: 双Tank"放一起"（用户定稿）——第二只锚定第一只，微偏移上限
-#define TANK_SPAWN_BUDDY_OFFSET 150.0  // 第二只相对第一只的水平偏移（4 方向）
+#define TANK_SPAWN_MIN_DIST 800.0   // v2.6.3: 750→800（用户："至少保持800u距离"）
+#define TANK_SPAWN_SAMPLES  20      // 采样次数（v2.6.3: 12→20，严格 ≥MIN 后提高命中率）
+// v2.6.3: 三角形刷新（用户定稿）——两只与玩家构成三角形，夹角 60°-120°
+#define TANK_SPAWN_ANGLE_MIN 60.0   // 夹角下限（60° 保证两只间距 ≥800u 不互卡）
+#define TANK_SPAWN_ANGLE_MAX 120.0  // 夹角上限（防侧翼包夹）
 // v2.6.0: 卡住看护（用户定稿）——位置长时间几乎不动 → 重定位
 #define TANK_STUCK_MOVE   40.0      // 单次检查（2s）移动 < 此值视为"没动"
 #define TANK_STUCK_CHECKS 4         // 连续 4 次没动（8s）→ 判定卡住 → 重定位
@@ -284,84 +293,67 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
         GetClientEyePosition(client, eye);
 
         float spawnPos[3], spawnAng[3] = {0.0, 0.0, 0.0};
+        float bestPos[3];
+        float bestDist = -1.0;
+        int validCount = 0;
 
-        // v2.6.2: 第二只 Tank 与第一只"放一起"（用户定稿）——锚定第一只位置，
-        // 4 方向 150u 微偏移（同 Z 同层防跨层），LOS 通过者优先；全失败同点
-        // 生成（引擎物理自动推开）。天然同侧推进不包夹、玩家一次看到两只。
+        // v2.6.3: 三角形刷新（用户定稿）——两只 Tank 与玩家构成三角形：
+        // 每只 ≥800u + LOS（玩家可见）+ 两只相对玩家水平夹角 60°-120°。
+        // 严格执行距离：无合格点 → 不刷（绝不贴脸 fallback——用户："必须
+        // 距离生还者队伍足够远"；历史贴脸案例 dist=298/502/561）。
         bool hasBuddy = (spawned > 0 && g_iTanks[0] > 0 && IsClientInGame(g_iTanks[0]));
-        if (hasBuddy) {
-            float anchor[3];
-            GetClientAbsOrigin(g_iTanks[0], anchor);
-            float offsets[4][2] = { {TANK_SPAWN_BUDDY_OFFSET, 0.0},
-                                    {-TANK_SPAWN_BUDDY_OFFSET, 0.0},
-                                    {0.0, TANK_SPAWN_BUDDY_OFFSET},
-                                    {0.0, -TANK_SPAWN_BUDDY_OFFSET} };
-            bool placed = false;
-            for (int o = 0; o < 4; o++) {
-                float cand[3];
-                cand[0] = anchor[0] + offsets[o][0];
-                cand[1] = anchor[1] + offsets[o][1];
-                cand[2] = anchor[2];
-                TR_TraceRayFilter(cand, eye, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
-                if (TR_GetFraction() >= 0.95) {
-                    spawnPos[0] = cand[0]; spawnPos[1] = cand[1]; spawnPos[2] = cand[2];
-                    placed = true;
-                    break;
-                }
-            }
-            if (!placed) {
-                // 4 方向全被挡 → 同点生成（"放一起"字面实现）
-                spawnPos[0] = anchor[0]; spawnPos[1] = anchor[1]; spawnPos[2] = anchor[2];
-                LogMessage("[Tank Mutator] Tank #%d: same-spot spawn next to Tank #%d (no LOS offset)",
-                           n + 1, g_iTanks[0]);
-            }
-        } else {
-            // 第一只（或单 Tank）：≥MIN + LOS 取最近；无解 → 最远兜底
-            // （v2.6.1 四级候选在此简化为两级：首只无互斥/夹角概念）
-            float bestPos[3];
-            float bestDist = -1.0;
-            float farPos[3];
-            float farDist = -1.0;
-            int validCount = 0;
+        float buddyPos[3];
+        if (hasBuddy)
+            GetClientAbsOrigin(g_iTanks[0], buddyPos);
 
-            for (int attempt = 0; attempt < TANK_SPAWN_SAMPLES; attempt++) {
-                float candidate[3];
-                if (L4D_GetRandomPZSpawnPosition(client, 8, 5, candidate)) {
-                    float dist = GetVectorDistance(refPos, candidate);
-                    validCount++;
+        // 夹角阈值：cos60°=0.5（太挤） / cos120°=-0.5（快包夹）
+        float maxCos = Cosine(TANK_SPAWN_ANGLE_MIN * 0.01745329252);
+        float minCos = Cosine(TANK_SPAWN_ANGLE_MAX * 0.01745329252);
 
-                    // LOS：防跨层/隔墙生成（只算世界几何，忽略玩家实体）
-                    TR_TraceRayFilter(candidate, eye, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
-                    bool los = (TR_GetFraction() >= 0.95);
-
-                    if (dist >= TANK_SPAWN_MIN_DIST && los) {
-                        if (bestDist < 0.0 || dist < bestDist) {
-                            bestDist = dist;
-                            bestPos[0] = candidate[0]; bestPos[1] = candidate[1]; bestPos[2] = candidate[2];
-                        }
-                    }
-                    // far 兜底：所有候选取最远（分离倾向）
-                    if (dist > farDist) {
-                        farDist = dist;
-                        farPos[0] = candidate[0]; farPos[1] = candidate[1]; farPos[2] = candidate[2];
-                    }
-                }
-            }
-
-            if (validCount == 0) {
-                LogMessage("[Tank Mutator] Tank #%d spawn failed: no valid spawn position after %d attempts",
-                           n + 1, TANK_SPAWN_SAMPLES);
+        for (int attempt = 0; attempt < TANK_SPAWN_SAMPLES; attempt++) {
+            float candidate[3];
+            if (!L4D_GetRandomPZSpawnPosition(client, 8, 5, candidate))
                 continue;
+            float dist = GetVectorDistance(refPos, candidate);
+            validCount++;
+
+            // 严格距离：≥800u（用户："至少保持800u距离"）
+            if (dist < TANK_SPAWN_MIN_DIST)
+                continue;
+
+            // LOS：玩家可见（防跨层/隔墙——只算世界几何，忽略玩家实体）
+            TR_TraceRayFilter(candidate, eye, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
+            if (TR_GetFraction() < 0.95)
+                continue;
+
+            // 三角形夹角：两只相对玩家 60°-120°（水平面；同侧推进不包夹）
+            if (hasBuddy) {
+                float d1x = buddyPos[0] - refPos[0];
+                float d1y = buddyPos[1] - refPos[1];
+                float d2x = candidate[0] - refPos[0];
+                float d2y = candidate[1] - refPos[1];
+                float len1 = SquareRoot(d1x * d1x + d1y * d1y);
+                float len2 = SquareRoot(d2x * d2x + d2y * d2y);
+                if (len1 > 1.0 && len2 > 1.0) {
+                    float cosA = (d1x * d2x + d1y * d2y) / (len1 * len2);
+                    if (cosA > maxCos || cosA < minCos)
+                        continue;   // 夹角 <60°（两只太挤）或 >120°（接近包夹）
+                }
             }
 
-            if (bestDist >= 0.0) {
-                spawnPos[0] = bestPos[0]; spawnPos[1] = bestPos[1]; spawnPos[2] = bestPos[2];
-            } else {
-                spawnPos[0] = farPos[0]; spawnPos[1] = farPos[1]; spawnPos[2] = farPos[2];
-                LogMessage("[Tank Mutator] Tank #%d: fallback far candidate dist=%.0f (no LOS/≥MIN candidate)",
-                           n + 1, farDist);
+            if (bestDist < 0.0 || dist < bestDist) {
+                bestDist = dist;
+                bestPos[0] = candidate[0]; bestPos[1] = candidate[1]; bestPos[2] = candidate[2];
             }
         }
+
+        if (bestDist < 0.0) {
+            LogMessage("[Tank Mutator] Tank #%d spawn failed: no candidate ≥%.0fu with LOS%s (足够远约束)",
+                       n + 1, TANK_SPAWN_MIN_DIST, hasBuddy ? " + triangle angle" : "");
+            continue;
+        }
+
+        spawnPos[0] = bestPos[0]; spawnPos[1] = bestPos[1]; spawnPos[2] = bestPos[2];
 
         // 直接生成 Tank
         int tank = L4D2_SpawnTank(spawnPos, spawnAng);
@@ -371,8 +363,8 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
             GetClientAbsOrigin(tank, g_fTankLastPos[spawned]);
             g_iTankStuckChecks[spawned] = 0;
             spawned++;
-            LogMessage("[Tank Mutator] Tank #%d spawned at (%.1f, %.1f, %.1f), client: %d",
-                       n + 1, spawnPos[0], spawnPos[1], spawnPos[2], tank);
+            LogMessage("[Tank Mutator] Tank #%d spawned at (%.1f, %.1f, %.1f), dist=%.0f, client: %d",
+                       n + 1, spawnPos[0], spawnPos[1], spawnPos[2], bestDist, tank);
         } else {
             LogMessage("[Tank Mutator] Tank #%d spawn failed: invalid entity", n + 1);
         }
