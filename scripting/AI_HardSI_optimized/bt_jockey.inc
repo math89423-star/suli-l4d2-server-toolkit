@@ -76,11 +76,13 @@ BT_Status JockeyAct_HarasserRide(int client) {
             BT_AddButton(client, IN_MOVERIGHT);
         }
 
-        // === 机会性骑乘（降低频率）===
+        // === 机会性骑乘（v5.26: 用户"骚扰者也不是一定不攻击"→ 更积极：
+        // 冷却 10s→5s、距离 450→520；骚扰游走本身有 CND_HarasserReleased
+        // 的 5s 硬超时兜底 → 游走 ≤5s 必转全力进攻）===
         float lastHarassLeap = BB_GetFloat(client, "_jockey_harass_last_leap", 0.0);
-        bool canHarassLeap = (now - lastHarassLeap > 10.0);  // 10秒冷却
+        bool canHarassLeap = (now - lastHarassLeap > 5.0);  // v5.26: 10s→5s
 
-        if (canHarassLeap && distance <= 450.0 && (GetEntityFlags(client) & FL_ONGROUND)) {
+        if (canHarassLeap && distance <= 520.0 && (GetEntityFlags(client) & FL_ONGROUND)) {
             // 检测玩家前方是否安全（无悬崖/酸液）
             bool isSafe = true;
             float tAng[3], forwardVec[3], checkPos[3];

@@ -469,7 +469,10 @@ BT_Status TankAct_AimRock(int client) {
         int target = BB_GetInt(client, "target", -1);
         if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
             float tPos[3], tVel[3], lead[3], tankPos[3], dir[3], ang[3];
-            GetClientAbsOrigin(target, tPos);
+            // v5.30: 瞄准点改用眼睛高度（原 GetClientAbsOrigin = 脚底 → 石头
+            // 抛物线落点偏低/低抛，命中率差）。眼睛高度 ≈ 脚底+60u，
+            // 石头弧线落点落在目标身体上而非地面。
+            GetClientEyePosition(target, tPos);
             GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
             GetClientAbsOrigin(client, tankPos);
             float dist = GetVectorDistance(tankPos, tPos);
@@ -492,6 +495,55 @@ BT_Status TankAct_AimRock(int client) {
         }
     }
     return BT_SUCCESS;
+}
+
+// ============================================================================
+// v5.26: 投石确认状态机（P1-1 —— 审查发现"按 IN_ATTACK2 = 假成功"）
+// 原 rockCluster Cooldown(5.0) 在按键时刻武装：投石动画 ~1s 期间引擎冷却内
+// 提前按键被吞 → 实际投石频率约砍半。本动作按 ATTACK2 → TRYING →
+// L4D_TankRock_OnRelease（真实释放事件，文件尾钩子置 _tank_rock_confirmed）
+// → CONFIRMED（arm 外层 Cooldown(5.0)）；2s 未确认 → 退避重试（不锁冷却）。
+// 只改本文件：标记由既有的 L4D_TankRock_OnRelease 钩子置位（新增一行）。
+// ============================================================================
+#define TANK_ROCK_TRY_TIMEOUT 2.0
+#define TANK_ROCK_BACKOFF 0.6
+
+BT_Status TankAct_TryThrowRock(int client) {
+    float now = GetGameTime();
+
+    // 退避中：不按 IN_ATTACK2（防每 tick 重探/白按），FAILURE → 落其它分支
+    if (SI_AbilityBackoffActive(client, "_tank_rock")) {
+        return BT_FAILURE;
+    }
+
+    // 真实确认：L4D_TankRock_OnRelease 已触发（石头真正投出）→ 清标记、
+    // CONFIRMED + SUCCESS → 外层 rockCluster Cooldown(5.0) arm（唯一冷却源）
+    if (BB_GetFloat(client, "_tank_rock_confirmed", 0.0) > 0.0) {
+        BB_SetFloat(client, "_tank_rock_confirmed", 0.0);
+        SI_AbilityMarkConfirmed(client, "_tank_rock", now);
+        SI_AbilitySetState(client, "_tank_rock", ABILITY_CONFIRMED);
+        return BT_SUCCESS;
+    }
+
+    // 进入/续行尝试：非 TRYING 或上次尝试过期（被抢占残留）→ 重置尝试起点
+    float tryAt = SI_AbilityGetTryAt(client, "_tank_rock");
+    if (SI_AbilityGetState(client, "_tank_rock") != ABILITY_TRYING ||
+        now - tryAt > TANK_ROCK_TRY_TIMEOUT) {
+        tryAt = now;
+        SI_AbilityMarkTry(client, "_tank_rock", tryAt);
+        SI_AbilitySetState(client, "_tank_rock", ABILITY_TRYING);
+    }
+
+    // 持续按住 ATTACK2（视角由前置 TankAct_AimRock 已对准提前点）
+    BT_AddButton(client, IN_ATTACK2);
+
+    // 超时未确认 = 引擎拒绝/吞键（几何/冷却）→ 短退避，不锁 5s 冷却
+    if (now - tryAt > TANK_ROCK_TRY_TIMEOUT) {
+        SI_AbilityBackoff(client, "_tank_rock", now, GetRandomFloat(0.4, 0.8));
+        return BT_FAILURE;
+    }
+
+    return BT_RUNNING;
 }
 
 // ============================================================================
@@ -522,7 +574,14 @@ BT_Status TankCond_CoordPunchReady(int client) {
     // 直测 pin 距离 —— 不能用 CND_IsInRange（它量最近生还者，pin 在 400u
     // 而另一个生还者 200u 时会误触发打空气）
     if (GetVectorDistance(tPos, sPos) > 300.0) return BT_FAILURE;
-    return (GetEntProp(client, Prop_Send, "m_hasVisibleThreats") > 0) ? BT_SUCCESS : BT_FAILURE;
+    // v5.26: 替换已证伪的 m_hasVisibleThreats（P1-2 —— BT 接管视角/按键下
+    // 引擎标志失真，协同"窗口出拳必杀"静默失效）→ 直测 pin 视线（trace）。
+    float eye[3], pinEye[3];
+    GetClientEyePosition(client, eye);
+    GetClientEyePosition(pin, pinEye);
+    TR_TraceRayFilter(eye, pinEye, MASK_PLAYERSOLID, RayType_EndPoint, LOS_TraceFilter, client);
+    if (TR_DidHit() && TR_GetEntityIndex() != pin) return BT_FAILURE;
+    return BT_SUCCESS;
 }
 
 BT_Status TankAct_CoordPunch(int client) {
@@ -617,7 +676,7 @@ stock int BT_CreateTankTree() {
         BT_CreateCondition(TankCond_RockEligible),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateAction(TankAct_AimRock),      // v4.1: 预判瞄准
-        BT_CreateAction(ACT_Attack2),          // throw rock
+        BT_CreateAction(TankAct_TryThrowRock), // v5.26: 确认状态机（真实释放才 arm 冷却）
         BT_CreateAction(ACT_SignalAttack)      // v5.0: 投石压制 = 开团信号（队友跟进）
     );
     // Strategy 1: Direct charge — rush up and punch (instakill threat)
@@ -659,7 +718,7 @@ stock int BT_CreateTankTree() {
         BT_CreateCondition(TankCond_RockEligible),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateAction(TankAct_AimRock),      // v4.1: 预判瞄准（fallback 路径同样接管）
-        BT_CreateAction(ACT_Attack2),
+        BT_CreateAction(TankAct_TryThrowRock), // v5.26: 确认状态机
         BT_CreateAction(ACT_SignalAttack)      // v5.0: 投石开团信号
     );
     int bhopSeq = BT_CreateSequence(2,
@@ -823,13 +882,18 @@ public Action:Tank_OnPlayerHurt(Handle:event, const String:name[], bool:dontBroa
 // AI 可能漂视角；且引擎 vVel 含 Tank 自身速度（bhop 时 +400~500u/s）。
 // 本层用释放瞬间的 vecPos / 真实 |vecVel| 重算提前量 —— 两层误差自修正。
 // 附带收益：原版 AI 的 bot 投石也被校正（同门控，不区分 BT 是否在场）。
-public Action:L4D_TankRock_OnRelease(int tank, int rock, float vecPos[3], float vecAng[3], float vecVel[3], float vecRot[3]) {
+ public Action:L4D_TankRock_OnRelease(int tank, int rock, float vecPos[3], float vecAng[3], float vecVel[3], float vecRot[3]) {
     if (tank < 1 || !IsBotTank(tank)) return Plugin_Continue;
+    // v5.26: 真实投石确认标记 —— 引擎真实释放石头的事件（按 IN_ATTACK2 ≠
+    // 投出，动画 ~1s 期间按键可能被引擎吞/对墙白按）。TankAct_TryThrowRock
+    // 消费本标记：收到才 CONFIRMED（arm rockCluster Cooldown(5.0)）。
+    BB_SetFloat(tank, "_tank_rock_confirmed", GetGameTime());
     if (g_hCvarTankRockPredict_cached == null || !GetConVarBool(g_hCvarTankRockPredict_cached)) return Plugin_Continue;
     int target = BB_GetInt(tank, "target", -1);
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return Plugin_Continue;
     float tPos[3], tVel[3], lead[3], dir[3];
-    GetClientAbsOrigin(target, tPos);
+    // v5.30: 同 AimRock —— 瞄准眼睛高度（原脚底 → 低抛命中差）
+    GetClientEyePosition(target, tPos);
     GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
     float speed = GetVectorLength(vecVel);
     if (speed < 1.0) return Plugin_Continue;

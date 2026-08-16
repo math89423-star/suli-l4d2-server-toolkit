@@ -157,21 +157,25 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
         // 按压即 roll 会被引擎拒绝的失败尝试污染（没吐出来也定死吐后行为）。
     }
 
-    float tPos[3], tVel[3];
+    float tPos[3], tVel[3], sPos[3];
     GetClientAbsOrigin(target, tPos);
     GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
     float speed = GetVectorLength(tVel);
+    GetClientAbsOrigin(client, sPos);
     float aimPos[3];
     if (speed > 50.0) {
-        // 预测位置 = 当前 + 速度 × 0.8s（只预测水平，保持地面高度）
-        aimPos[0] = tPos[0] + tVel[0] * 0.8;
-        aimPos[1] = tPos[1] + tVel[1] * 0.8;
+        // v5.32: 预判改为按飞行时间（原固定 0.8s：近处提前过多、远处不足）。
+        // 酸液弹道飞行时间 ≈ 距离/1100，保守系数 0.7（与 SpitterAct_Spit 同口径）
+        float dist = GetVectorDistance(sPos, tPos);
+        float flightT = dist / 1100.0;
+        if (flightT > 1.2) flightT = 1.2;
+        aimPos[0] = tPos[0] + tVel[0] * flightT * 0.7;
+        aimPos[1] = tPos[1] + tVel[1] * flightT * 0.7;
         aimPos[2] = tPos[2];
     } else {
         aimPos = tPos;
     }
-    float sPos[3], dir[3], ang[3];
-    GetClientAbsOrigin(client, sPos);
+    float dir[3], ang[3];
     MakeVectorFromPoints(sPos, aimPos, dir);
     GetVectorAngles(dir, ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);

@@ -272,38 +272,138 @@ BT_Status ChargerAct_TryCharge(int client) {
         SI_AbilityMarkTry(client, "_charger", tryAt);
         SI_AbilitySetState(client, "_charger", ABILITY_TRYING);
         SI_SignalAttack(client);
-    }
 
-    // v5.25: 前方直线通路探测 —— 冲锋是直线冲撞，前方 600u 有墙/障碍时
-    // 引擎要么拒绝要么撞墙（用户反馈"Charger 依然会撞墙"）。按 ATTACK 前
-    // 探测自身→目标方向：命中世界几何（非目标实体）→ 不冲，短退避
-    // 交还走位分支（绕行/接近），通路畅通才尝试冲锋。
-    int target = BB_GetInt(client, "target", -1);
-    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
-        float sPos[3], tPos[3], fwd[3], end[3];
-        GetClientAbsOrigin(client, sPos);
-        GetClientAbsOrigin(target, tPos);
-        MakeVectorFromPoints(sPos, tPos, fwd);
-        float dist = NormalizeVector(fwd, fwd);
-        float probe = (dist < 600.0) ? dist * 0.8 : 600.0;   // 近距探到目标身前
-        end[0] = sPos[0] + fwd[0] * probe;
-        end[1] = sPos[1] + fwd[1] * probe;
-        end[2] = sPos[2] + 30.0;
-        TR_TraceRayFilter(sPos, end, MASK_PLAYERSOLID, RayType_EndPoint, LOS_TraceFilter, client);
-        if (TR_DidHit()) {
-            int ent = TR_GetEntityIndex();
-            // 命中目标本人 = 通路畅通；命中其它实体（墙/箱/车/门/其它玩家）=
-            // 直线被挡 → 不冲（短退避防每 tick 重探，走位分支接管绕行）
-            if (ent != target) {
-                SI_AbilityBackoff(client, "_charger", now, GetRandomFloat(0.4, 0.8));
+        // v5.33/v5.34: 情境化冲锋（用户："纯概率生硬"）—— 墙冲概率由战场
+        // 情境动态决定，概率仅作兜底；直冲内部保持跳冲 40% / 地面 60%。
+        //   v5.34 用户修正：
+        //     近距（≤300u）障碍 = "中间有障碍物" → 冲锋白挨打 → 不冲（走位）
+        //     中远（300-600u）障碍 → 墙冲 60%（原 100% 太绝对）
+        //   目标孤立（400u 内无队友）→ 12% 墙冲（直冲稳吃，花活无意义）
+        //   目标附近密集（400u 内 ≥2 人）→ 55% 墙冲（震荡收益最大）
+        //   目标贴墙（150u 内有几何）→ 45% 墙冲（撞墙顺带震墙边）
+        //   普通情况 → 30%（v5.31 原设定兜底）
+        float wallProb = 0.30;
+        bool blockedPath = false;
+        int target = BB_GetInt(client, "target", -1);
+        if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+            float myPos[3], tPos[3];
+            GetClientAbsOrigin(client, myPos);
+            GetClientAbsOrigin(target, tPos);
+
+            // 目标附近密集度
+            int nearby = 0;
+            for (int i = 1; i <= MaxClients; i++) {
+                if (i == target || !IsSurvivor(i) || !IsPlayerAlive(i)) continue;
+                float p[3];
+                GetClientAbsOrigin(i, p);
+                if (GetVectorDistance(tPos, p) < 400.0) nearby++;
+            }
+            if (nearby >= 2) wallProb = 0.55;
+            else if (nearby == 0) wallProb = 0.12;
+
+            // 目标贴墙检测（绝对四向 150u trace，只算世界几何）
+            bool nearWall = false;
+            float baseAng[4][3] = {
+                {0.0, 0.0, 0.0}, {0.0, 90.0, 0.0}, {0.0, 180.0, 0.0}, {0.0, 270.0, 0.0}
+            };
+            for (int d = 0; d < 4 && !nearWall; d++) {
+                float fwd[3], end[3];
+                GetAngleVectors(baseAng[d], fwd, NULL_VECTOR, NULL_VECTOR);
+                end[0] = tPos[0] + fwd[0] * 150.0;
+                end[1] = tPos[1] + fwd[1] * 150.0;
+                end[2] = tPos[2];
+                TR_TraceRayFilter(tPos, end, MASK_PLAYERSOLID, RayType_EndPoint, TerrainTraceFilter, client);
+                if (TR_DidHit()) nearWall = true;
+            }
+            if (nearWall && wallProb < 0.45) wallProb = 0.45;
+
+            // 直线通路检测（分两段，v5.34 用户修正）：
+            //   近距（≤300u）被挡 = "中间有障碍物" → 冲锋白挨打 → 不冲
+            //   （backoff 交走位分支绕行找角度，本尝试放弃）
+            //   中远（300-600u）被挡 → 墙冲概率 60%（用户：不要 100%）
+            float fwd[3], end[3];
+            MakeVectorFromPoints(myPos, tPos, fwd);
+            float dist = NormalizeVector(fwd, fwd);
+            bool nearBlocked = false;
+            float probeNear = (dist < 300.0) ? dist * 0.8 : 300.0;
+            end[0] = myPos[0] + fwd[0] * probeNear;
+            end[1] = myPos[1] + fwd[1] * probeNear;
+            end[2] = myPos[2] + 30.0;
+            TR_TraceRayFilter(myPos, end, MASK_PLAYERSOLID, RayType_EndPoint, LOS_TraceFilter, client);
+            if (TR_DidHit()) {
+                int ent = TR_GetEntityIndex();
+                if (ent != target) nearBlocked = true;
+            }
+            if (nearBlocked) {
+                // 中间有障碍物：冲锋白挨打 → 放弃本尝试，交走位绕行
+                SI_AbilityBackoff(client, "_charger", now, GetRandomFloat(0.5, 1.0));
+                BB_SetBool(client, "_charger_leap_charge", false);
+                BB_SetBool(client, "_charger_wall_mode", false);
                 return BT_FAILURE;
             }
+            bool blockedPath = false;
+            float probeFar = (dist < 600.0) ? dist * 0.8 : 600.0;
+            end[0] = myPos[0] + fwd[0] * probeFar;
+            end[1] = myPos[1] + fwd[1] * probeFar;
+            end[2] = myPos[2] + 30.0;
+            TR_TraceRayFilter(myPos, end, MASK_PLAYERSOLID, RayType_EndPoint, LOS_TraceFilter, client);
+            if (TR_DidHit()) {
+                int ent = TR_GetEntityIndex();
+                if (ent != target) blockedPath = true;
+            }
+            if (blockedPath && wallProb < 0.60) wallProb = 0.60;
+        }
+
+        // 掷骰：wallProb 墙冲 / 其余直冲（内层跳冲 40% / 地面 60%）
+        float roll = GetRandomFloat(0.0, 1.0);
+        if (roll < wallProb) {
+            BB_SetBool(client, "_charger_wall_mode", true);
+            BB_SetBool(client, "_charger_leap_charge", false);
+        } else {
+            BB_SetBool(client, "_charger_wall_mode", false);
+            BB_SetBool(client, "_charger_leap_charge", GetRandomFloat(0.0, 1.0) < 0.4);
         }
     }
 
-    // 持续按住 ATTACK + FORWARD（对准上一节点设定的目标方向），直到确认/超时
-    BT_AddButton(client, IN_ATTACK);
-    BT_AddButton(client, IN_FORWARD);
+    // v5.29: 墙冲震荡模式 —— 重新瞄准"目标侧向偏移点"
+    // （不直接冲人，冲进人群边缘/撞墙 → impact 震荡；偏移方向随机避免套路）
+    bool wallMode = BB_GetBool(client, "_charger_wall_mode", false);
+    int target = BB_GetInt(client, "target", -1);
+    if (wallMode && target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        // v5.29: 侧向偏移两轮收窄（用户实测定向）：150-250 → 60-120 → 40-80。
+        // 撞点越贴目标，impact 震荡覆盖越稳；40-80u 是"擦边不撞人"的紧贴区。
+        float side = GetRandomFloat(40.0, 80.0) * (GetRandomInt(0, 1) ? 1.0 : -1.0);
+        float off[3];
+        // 目标侧向偏移（垂直于目标方向）
+        off[0] = tPos[0] - dir[1] * side;
+        off[1] = tPos[1] + dir[0] * side;
+        off[2] = tPos[2];
+        MakeVectorFromPoints(sPos, off, dir);
+        GetVectorAngles(dir, ang);
+        ang[0] = 0.0;
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+
+    // v5.28: 跳起空中冲锋模式（30% 掷骰结果）——
+    // 地面阶段：按 IN_JUMP 跳起（保持朝目标前进，不按 ATTACK）
+    // 离地阶段：按 IN_ATTACK 在空中发起冲刺（轨迹难预判）
+    if (BB_GetBool(client, "_charger_leap_charge", false)) {
+        if (GetEntityFlags(client) & FL_ONGROUND) {
+            BT_AddButton(client, IN_JUMP);
+            BT_AddButton(client, IN_FORWARD);
+        } else {
+            BT_AddButton(client, IN_ATTACK);
+            BT_AddButton(client, IN_FORWARD);
+        }
+    } else {
+        // 普通/墙冲：地面冲锋（撞墙后树自然落近战簇贴身拳击）
+        BT_AddButton(client, IN_ATTACK);
+        BT_AddButton(client, IN_FORWARD);
+    }
 
     // 真实确认：ability_charge 事件已到（2s 窗口内）→ 清标记防重复消费、
     // 记 CONFIRMED、BT_SUCCESS → 外层 Cooldown(12.0) arm（唯一 12s 冷却源）
@@ -312,6 +412,8 @@ BT_Status ChargerAct_TryCharge(int client) {
             g_fChargerChargeConfirmed[client] = 0.0;
             SI_AbilitySetState(client, "_charger", ABILITY_CONFIRMED);
             SI_AbilityMarkConfirmed(client, "_charger", now);
+            BB_SetBool(client, "_charger_leap_charge", false);   // 重置，下次重新掷骰
+            BB_SetBool(client, "_charger_wall_mode", false);
             return BT_SUCCESS;
         }
         // 陈旧标记（上一轮冲锋的残留/跨重生）：丢弃，不当作本次确认
@@ -322,6 +424,107 @@ BT_Status ChargerAct_TryCharge(int client) {
     // 退避期 TryCharge FAILURE 挡住下一 tick 立刻重按，强制 0.5-1.0s 间隔。
     if (now - tryAt > CHARGER_TRY_TIMEOUT) {
         SI_AbilityBackoff(client, "_charger", now, GetRandomFloat(0.5, 1.0));
+        BB_SetBool(client, "_charger_leap_charge", false);       // 重置，下次重新掷骰
+        BB_SetBool(client, "_charger_wall_mode", false);
+        return BT_FAILURE;
+    }
+
+    return BT_RUNNING;
+}
+
+// ============================================================================
+// v5.27: 高处幸存者震落冲锋（用户设计："幸存者跳上特感够不到的高处，
+// Charger 冲撞其脚下支撑结构/平台边缘，用 charge impact 把人震下来"）
+// 引擎机制：Charger 冲锋撞到障碍物时产生冲击（charge impact），可推倒/
+// 震落冲击范围内的幸存者。瞄准"目标正下方支撑点"直线冲锋 → 撞平台边缘/
+// 支撑结构 → 高处目标被震落（不再干望）。
+// 与普通冲锋（TryCharge）的区别：无通路检查 —— 撞墙正是目的。
+// ============================================================================
+#define CHARGER_SHOCK_MIN_DZ 80.0     // 目标至少高这么多才算"高处"
+#define CHARGER_SHOCK_MAX_DZ 250.0    // 太高 charge impact 够不着
+#define CHARGER_SHOCK_MIN_DIST 250.0
+#define CHARGER_SHOCK_MAX_DIST 900.0
+
+BT_Status ChargerCond_HighShockTarget(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return BT_FAILURE;
+
+    float myPos[3], tPos[3];
+    GetClientAbsOrigin(client, myPos);
+    GetClientAbsOrigin(target, tPos);
+
+    // 垂直落差（目标在高处）
+    float dz = tPos[2] - myPos[2];
+    if (dz < CHARGER_SHOCK_MIN_DZ || dz > CHARGER_SHOCK_MAX_DZ) return BT_FAILURE;
+
+    // 水平距离（冲锋覆盖范围）
+    float dx = tPos[0] - myPos[0], dy = tPos[1] - myPos[1];
+    float hDist = SquareRoot(dx * dx + dy * dy);
+    if (hDist < CHARGER_SHOCK_MIN_DIST || hDist > CHARGER_SHOCK_MAX_DIST) return BT_FAILURE;
+
+    // 目标脚下必须有实体支撑（向下 trace 命中 = 站在平台/屋顶/箱子上，
+    // 而非悬空/水面 —— 悬空的冲了也震不到）
+    float down[3];
+    down[0] = tPos[0];
+    down[1] = tPos[1];
+    down[2] = tPos[2] - 250.0;
+    TR_TraceRayFilter(tPos, down, MASK_PLAYERSOLID, RayType_EndPoint, LOS_TraceFilter, client);
+    if (!TR_DidHit()) return BT_FAILURE;
+
+    return BT_SUCCESS;
+}
+
+// 瞄准目标正下方的支撑点（水平方向，pitch 归零）—— 冲锋撞支撑结构
+BT_Status ChargerAct_ShockAim(int client) {
+    int target = BB_GetInt(client, "target", -1);
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return BT_FAILURE;
+    float tPos[3], myPos[3], dir[3], ang[3];
+    GetClientAbsOrigin(target, tPos);
+    GetClientAbsOrigin(client, myPos);
+    MakeVectorFromPoints(myPos, tPos, dir);
+    dir[2] = 0.0;
+    if (GetVectorLength(dir) < 10.0) return BT_FAILURE;
+    NormalizeVector(dir, dir);
+    GetVectorAngles(dir, ang);
+    ang[0] = 0.0;   // 水平冲撞
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    return BT_SUCCESS;
+}
+
+// 震落冲锋状态机：与 TryCharge 相同（ability_charge 事件确认 arm 12s 冷却 /
+// 超时退避），但独立状态前缀 "_charger_shock" 且【无通路检查】——撞墙是目的
+BT_Status ChargerAct_TryShockCharge(int client) {
+    float now = GetGameTime();
+
+    if (SI_AbilityBackoffActive(client, "_charger_shock")) {
+        return BT_FAILURE;
+    }
+
+    // 真实确认：ability_charge 事件（2s 窗口）→ arm 外层 Cooldown(12.0)
+    if (g_fChargerChargeConfirmed[client] > 0.0) {
+        if (now - g_fChargerChargeConfirmed[client] <= CHARGER_CONFIRM_WINDOW) {
+            g_fChargerChargeConfirmed[client] = 0.0;
+            SI_AbilitySetState(client, "_charger_shock", ABILITY_CONFIRMED);
+            SI_AbilityMarkConfirmed(client, "_charger_shock", now);
+            return BT_SUCCESS;
+        }
+        g_fChargerChargeConfirmed[client] = 0.0;
+    }
+
+    float tryAt = SI_AbilityGetTryAt(client, "_charger_shock");
+    if (SI_AbilityGetState(client, "_charger_shock") != ABILITY_TRYING ||
+        now - tryAt > CHARGER_TRY_TIMEOUT) {
+        tryAt = now;
+        SI_AbilityMarkTry(client, "_charger_shock", tryAt);
+        SI_AbilitySetState(client, "_charger_shock", ABILITY_TRYING);
+        SI_SignalAttack(client);
+    }
+
+    BT_AddButton(client, IN_ATTACK);
+    BT_AddButton(client, IN_FORWARD);
+
+    if (now - tryAt > CHARGER_TRY_TIMEOUT) {
+        SI_AbilityBackoff(client, "_charger_shock", now, GetRandomFloat(0.5, 1.0));
         return BT_FAILURE;
     }
 
@@ -687,6 +890,19 @@ stock int BT_CreateChargerTree() {
         )
     );
     BT_AddChild(root, harassSeq);                  // 2. v5.13: harasser mode
+
+    // 2.5. v5.27: 高处幸存者震落冲锋 —— 目标在够不到的高处时冲撞其脚下
+    // 支撑结构（charge impact 震落），优先于普通冲锋（普通冲锋通路 trace
+    // 会被平台挡 → FAIL，落走位干望）
+    int shockDownSeq = BT_CreateCooldown(12.0,
+        BT_CreateSequence(4,
+            BT_CreateCondition(CND_OnGround),
+            BT_CreateCondition(ChargerCond_HighShockTarget),
+            BT_CreateAction(ChargerAct_ShockAim),
+            BT_CreateAction(ChargerAct_TryShockCharge)
+        )
+    );
+    BT_AddChild(root, shockDownSeq);
 
     BT_AddChild(root, cooldownCharge);          // 3. v4.0.3: 全部冲锋分支（12s 冷却）
     BT_AddChild(root, breakthroughApproach);    // 4. v5.0: 冷却期绕侧后接近密集区

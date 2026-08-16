@@ -814,17 +814,22 @@ stock int BT_CreateHunterTree() {
     // v5.13: 骚扰模式 —— 作为骚扰者时保持距离，等待发起者开团
     // 条件：是骚扰者 AND 尚未解放
     // v5.18: 解放条件放宽为 CND_HarasserReleased（发起者得手 OR 齐射令下）
-    // v5.21: 用户反馈 Hunter 体感无差异 —— 骚扰机制导致 Hunter 永远保持距离不扑击
-    //        （只有 Boomer/Smoker 能当发起者，Hunter 100% 是骚扰者）。
-    //        完全禁用骚扰模式，改为纯攻击性 AI。
-    // int harassSeq = BT_CreateSequence(3,
-    //     BT_CreateCondition(CND_IsHarasser),
-    //     BT_CreateInverter(BT_CreateCondition(CND_HarasserReleased)),
-    //     BT_CreateSequence(2,
-    //         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
-    //         BT_CreateAction(HunterAct_HarasserApproach)
-    //     )
-    // );
+    // v5.21: 用户反馈骚扰导致 Hunter 永远保距不扑 → 曾完全禁用。
+    // v5.26: 恢复骚扰，但语义明确为"游走一会再攻击"（用户拍板：
+    //   骚扰 ≠ 一定不攻击）——
+    //   a) CND_HarasserReleased 内置 5s 硬超时（ai_harass_max_hold）+ "目标到
+    //      嘴边"（≤扑击距离且 LOS）立即放行 → 游走有界，超时转全力进攻；
+    //   b) HunterAct_HarasserApproach 内部本就有机会性扑击（落单/背对 + 8s
+    //      冷却）→ 游走期间也会出手；
+    //   c) <600u 时蹲守（扑击前置态），放行后 fastPounce 下一 tick 直接扑。
+    int harassSeq = BT_CreateSequence(3,
+        BT_CreateCondition(CND_IsHarasser),
+        BT_CreateInverter(BT_CreateCondition(CND_HarasserReleased)),
+        BT_CreateSequence(2,
+            BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
+            BT_CreateAction(HunterAct_HarasserApproach)
+        )
+    );
 
     // v3.2: HasHighGround check so Hunter only climbs when there is
     // actually elevated ground above. Without it, 35% of crouched ticks trace-hit
@@ -1135,7 +1140,8 @@ stock int BT_CreateHunterTree() {
     //      扑空落地直接重扑；逃跳+3s 冷却 = "扑完顿一下"主因)
     //   1. Wall pounce when airborne near wall [v5.16]
     //   2. Evasive jump when being aimed at [v5.12]
-    //   3. Harasser mode — DISABLED [v5.21]（纯攻击性 AI，不再保距等待）
+    //   3. Harasser mode [v5.26 恢复]：骚扰游走（有界——5s 硬超时/目标到嘴边
+    //      立即放行；游走期间有机会性扑击），超时后转全力进攻
     //   4. High-ground positioning (tactical advantage)
     //   5. Narrow corridor → straight pounce
     //   5.5. mode 4/6 分散扑（防 dogpile）[v4.0]
@@ -1206,7 +1212,7 @@ stock int BT_CreateHunterTree() {
     // BT_AddChild(root, missEscSeq);            // 1. (v5.24 removed) escape after miss
     BT_AddChild(root, wallPounceSeq);           // 1. v5.16: wall pounce when airborne
     BT_AddChild(root, evasiveJumpSeq);          // 2. v5.12: evasive jump when aimed at
-    // 3. v5.21: 骚扰模式已禁用（方案 C 纯攻击性 AI）—— Hunter 不再保持距离等待发起者
+    BT_AddChild(root, harassSeq);               // 3. v5.26: 骚扰游走（有界：5s 硬超时/到嘴边放行/机会性扑击）
     BT_AddChild(root, highPounceSeq);           // 4. high-ground positioning
     BT_AddChild(root, narrowPounceSeq);         // 5. v3.2: narrow → straight pounce
     BT_AddChild(root, coordPounceSeq);          // 5.5. v4.0: mode 4/6 分散扑（防 dogpile）

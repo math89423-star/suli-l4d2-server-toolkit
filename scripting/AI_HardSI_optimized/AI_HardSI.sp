@@ -839,35 +839,19 @@ stock void AssignWaveRole(int client) {
         return;
     }
 
-    // 检测波次重置（超过 60 秒未分配发起者，视为新波）
-    float now = GetGameTime();
-    if (now - g_fWaveStartTime > 60.0) {
-        g_bWaveHasInitiator = false;
-        g_fWaveStartTime = now;
-    }
-
-    // 如果已有发起者，所有新生成的特感都是骚扰者
-    if (g_bWaveHasInitiator) {
-        BB_SetInt(client, "wave_role", 2);  // ROLE_HARASSER
-        return;
-    }
-
-    // 首个 Boomer 或 Smoker 成为发起者
-    if (class == 2 || class == 1) {  // Boomer=2, Smoker=1
-        BB_SetInt(client, "wave_role", 1);  // ROLE_INITIATOR
+    // v5.26/v5.30: 角色分配（用户拍板）：
+    //   原：只有首个 Boomer/Smoker 当发起者 → Hunter/Jockey 100% 骚扰者
+    //   v5.26: 每只非 Tank 特感独立 50/50 掷骰
+    //   v5.30: 用户调整为 6:4 —— 进攻者 60% / 骚扰者 40%
+    //   INITIATOR（进攻者）：直接全力进攻（不游走）
+    //   HARASSER（骚扰者）：游走一会（≤ ai_harass_max_hold 硬超时）再进攻
+    // 无发起者时由 CND_HarasserReleased 的 5s 硬超时/到嘴边兜底（v5.19）。
+    if (GetRandomFloat(0.0, 1.0) < 0.6) {
+        BB_SetInt(client, "wave_role", 1);  // ROLE_INITIATOR（60%）
         g_bWaveHasInitiator = true;
-        g_fWaveStartTime = now;
-
-        // 调试日志
-        char className[16];
-        if (class == 2) {
-            strcopy(className, sizeof(className), "Boomer");
-        } else {
-            strcopy(className, sizeof(className), "Smoker");
-        }
-        LogMessage("[AI_HardSI] %s(%d) assigned as INITIATOR", className, client);
+        g_fWaveStartTime = GetGameTime();
+        LogMessage("[AI_HardSI] SI(%d class=%d) assigned as INITIATOR (60%)", client, class);
     } else {
-        // 其他特感默认为骚扰者
-        BB_SetInt(client, "wave_role", 2);  // ROLE_HARASSER
+        BB_SetInt(client, "wave_role", 2);  // ROLE_HARASSER（40%）
     }
 }

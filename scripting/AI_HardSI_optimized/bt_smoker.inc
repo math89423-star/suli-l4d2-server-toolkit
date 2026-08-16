@@ -260,12 +260,24 @@ BT_Status SmokerAct_TryTongue(int client) {
 
     // --- 持续按压：锁瞄黑板 target（Sequence 每 tick 重评首条件，目标移动时
     //     这里的瞄准保持跟随；mode3Pull 序列无 SnapAim 节点，靠本动作兜住）---
+    // v5.32: 命中率优化 —— 原瞄脚底（GetClientAbsOrigin）且无移动预判：
+    //   ① 瞄准点抬到胸口高度（+30u，脚底射线贴地易被障碍/地面边缘挡）
+    //   ② 移动预判：舌头飞行时间 lead（距离越远提前量越大，clamp 0.1-0.6s）
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
-        float sPos[3], tPos[3], dir[3], ang[3];
+        float sPos[3], tPos[3], tVel[3], dir[3], ang[3];
         GetClientAbsOrigin(client, sPos);
         GetClientAbsOrigin(target, tPos);
-        MakeVectorFromPoints(sPos, tPos, dir);
+        GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
+        float dist = GetVectorDistance(sPos, tPos);
+        float leadT = dist / 1600.0;   // 舌头飞行时间估算（~850u 射程 ≈ 0.5s）
+        if (leadT > 0.6) leadT = 0.6;
+        if (leadT < 0.1) leadT = 0.1;
+        float aimPos[3];
+        aimPos[0] = tPos[0] + tVel[0] * leadT;
+        aimPos[1] = tPos[1] + tVel[1] * leadT;
+        aimPos[2] = tPos[2] + 30.0;    // 胸口高度
+        MakeVectorFromPoints(sPos, aimPos, dir);
         GetVectorAngles(dir, ang);
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
