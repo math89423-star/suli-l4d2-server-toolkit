@@ -236,6 +236,158 @@ BT_Status CND_IsTargetInRange(int client) {
     return (GetVectorDistance(sPos, tPos) <= maxDist) ? BT_SUCCESS : BT_FAILURE;
 }
 
+// ============================================================================
+// v5.22: 统一目标校验 API（云端审查任务书 §4）
+// 所有需要目标的攻击 Sequence 统一按：
+//   Acquire → Validate → LOS → Range → Tactical → Execute
+// 本 helper 校验黑板 target 是否满足一组 flag；不满足返回 false，
+// 调用方用 ACT_Acquire*Target 重新获取后再校验。
+// ============================================================================
+
+#define TARGET_ALIVE         (1 << 0)  // 存活
+#define TARGET_NOT_INCAP     (1 << 1)  // 未倒地
+#define TARGET_NOT_HANGING   (1 << 2)  // 未挂边
+#define TARGET_NOT_PINNED    (1 << 3)  // 未被控
+#define TARGET_PINNABLE      (1 << 4)  // 可被控制（站立未控；含 NOT_INCAP/NOT_HANGING/NOT_PINNED）
+#define TARGET_HAS_LOS       (1 << 5)  // 视线通畅（trace）
+#define TARGET_VALID_BASIC   (TARGET_ALIVE)
+
+stock bool SI_IsValidTarget(int target) {
+    return (target > 0 && target <= MaxClients && IsClientInGame(target)
+        && GetClientTeam(target) == 2 && IsPlayerAlive(target));
+}
+
+stock bool BT_TargetSatisfies(int client, int target, int flags) {
+    if (!SI_IsValidTarget(target)) return false;
+    if (flags & TARGET_NOT_INCAP) {
+        if (IsIncapacitated(target)) return false;
+    }
+    if (flags & TARGET_NOT_HANGING) {
+        if (SI_IsHangingFromLedge(target)) return false;
+    }
+    if (flags & TARGET_NOT_PINNED) {
+        if (IsPinned(target)) return false;
+    }
+    if (flags & TARGET_PINNABLE) {
+        if (!SI_IsPinnable(target)) return false;
+    }
+    if (flags & TARGET_HAS_LOS) {
+        float myPos[3], tPos[3];
+        GetClientEyePosition(client, myPos);
+        GetClientEyePosition(target, tPos);
+        TR_TraceRayFilter(myPos, tPos, MASK_PLAYERSOLID, RayType_EndPoint, LOS_TraceFilter, client);
+        if (TR_DidHit() && TR_GetEntityIndex() != target) return false;
+    }
+    return true;
+}
+
+// 校验黑板 target：满足全部 flags 返回 true；否则黑板置 -1 返回 false
+// （调用方随后重新 Acquire）。
+stock bool BT_ValidateBlackboardTarget(int client, int flags) {
+    int target = BB_GetInt(client, "target", -1);
+    if (BT_TargetSatisfies(client, target, flags)) return true;
+    BB_SetInt(client, "target", -1);
+    return false;
+}
+
+// ============================================================================
+// v5.22: 统一技能状态机（云端审查任务书 §16）
+// 原则：按 IN_ATTACK ≠ 技能成功。真实能力事件到达才进入 CONFIRMED，
+// 超时未确认 → 短 backoff → IDLE 重试，不假装成功、不进正式冷却。
+// 状态存 per-client 黑板（key 前缀由调用方给，防跨 SI 撞键）。
+// ============================================================================
+
+enum SIAbilityState {
+    ABILITY_IDLE = 0,       // 无尝试进行
+    ABILITY_TRYING,         // 已按攻击键，等真实事件
+    ABILITY_CONFIRMED,      // 真实事件已到，等 recovery/cooldown
+    ABILITY_RECOVERY        // 正式冷却期（技能成功后）
+};
+
+stock void SI_AbilitySetState(int client, const char[] keyPrefix, SIAbilityState state) {
+    char key[64];
+    Format(key, sizeof(key), "%s_state", keyPrefix);
+    BB_SetInt(client, key, _:state);
+}
+
+stock SIAbilityState SI_AbilityGetState(int client, const char[] keyPrefix) {
+    char key[64];
+    Format(key, sizeof(key), "%s_state", keyPrefix);
+    return view_as<SIAbilityState>(BB_GetInt(client, key, _:ABILITY_IDLE));
+}
+
+// 记录"尝试开始时刻"（进 TRYING 时调用）
+stock void SI_AbilityMarkTry(int client, const char[] keyPrefix, float now) {
+    char key[64];
+    Format(key, sizeof(key), "%s_try_at", keyPrefix);
+    BB_SetFloat(client, key, now);
+}
+
+// 读尝试开始时刻（0 = 无）
+stock float SI_AbilityGetTryAt(int client, const char[] keyPrefix) {
+    char key[64];
+    Format(key, sizeof(key), "%s_try_at", keyPrefix);
+    return BB_GetFloat(client, key, 0.0);
+}
+
+// 记录真实确认时刻（事件到达 → CONFIRMED 时调用）
+stock void SI_AbilityMarkConfirmed(int client, const char[] keyPrefix, float now) {
+    char key[64];
+    Format(key, sizeof(key), "%s_confirmed_at", keyPrefix);
+    BB_SetFloat(client, key, now);
+}
+
+// 读确认/冷却起点（0 = 从未确认）—— 正式冷却以它计算
+stock float SI_AbilityGetConfirmedAt(int client, const char[] keyPrefix) {
+    char key[64];
+    Format(key, sizeof(key), "%s_confirmed_at", keyPrefix);
+    return BB_GetFloat(client, key, 0.0);
+}
+
+// 进入正式冷却（CONFIRMED 后调用；duration 秒内 IsReady=false）
+stock void SI_AbilityStartCooldown(int client, const char[] keyPrefix, float now, float duration) {
+    char key[64];
+    Format(key, sizeof(key), "%s_ready_at", keyPrefix);
+    BB_SetFloat(client, key, now + duration);
+    SI_AbilitySetState(client, keyPrefix, ABILITY_RECOVERY);
+}
+
+// 技能是否可用（未在冷却期）
+stock bool SI_AbilityIsReady(int client, const char[] keyPrefix) {
+    char key[64];
+    Format(key, sizeof(key), "%s_ready_at", keyPrefix);
+    float readyAt = BB_GetFloat(client, key, 0.0);
+    if (readyAt <= 0.0) return true;
+    if (GetGameTime() >= readyAt) {
+        BB_SetFloat(client, key, 0.0);
+        if (SI_AbilityGetState(client, keyPrefix) == ABILITY_RECOVERY) {
+            SI_AbilitySetState(client, keyPrefix, ABILITY_IDLE);
+        }
+        return true;
+    }
+    return false;
+}
+
+// 尝试失败/超时 → 短 backoff 后回 IDLE（不锁正式冷却）
+stock void SI_AbilityBackoff(int client, const char[] keyPrefix, float now, float duration) {
+    char key[64];
+    Format(key, sizeof(key), "%s_backoff_until", keyPrefix);
+    BB_SetFloat(client, key, now + duration);
+    SI_AbilitySetState(client, keyPrefix, ABILITY_IDLE);
+}
+
+stock bool SI_AbilityBackoffActive(int client, const char[] keyPrefix) {
+    char key[64];
+    Format(key, sizeof(key), "%s_backoff_until", keyPrefix);
+    float until = BB_GetFloat(client, key, 0.0);
+    if (until <= 0.0) return false;
+    if (GetGameTime() >= until) {
+        BB_SetFloat(client, key, 0.0);
+        return false;
+    }
+    return true;
+}
+
 // Check if we're within the coordination attack window
 BT_Status CND_IsAttackWindow(int client) {
     return SI_IsAttackWindow() ? BT_SUCCESS : BT_FAILURE;
@@ -525,8 +677,12 @@ BT_Status ACT_MoveToRouteAhead(int client) {
 
 // 在路线前方蹲守 —— 已抢到前方，停下等玩家走进来（前置埋伏的后半段）。
 // 不主动接近：接近就暴露，埋伏的价值在于玩家自己走进射程。
+// v5.22 FIX: 原版调用 BT_ResetMovement 全局清空 —— 会擦掉同一 Sequence
+// 前面节点刚添加的 IN_DUCK（Hunter crouch→HoldRouteAmbush 蹲伏丢失）。
+// 改为细粒度 BT_ClearMoveDirection：只停住移动并声明接管移动类别，
+// 保留其它输入（蹲伏/视角）。(云端审查任务书 §2.3/§5.4)
 BT_Status ACT_HoldRouteAmbush(int client) {
-    BT_ResetMovement(client);
+    BT_ClearMoveDirection(client);
 
     // 朝玩家来的方向看（flow 减小方向 = 队伍推进来的方向）
     int lead = -1;

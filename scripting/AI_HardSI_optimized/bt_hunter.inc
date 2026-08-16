@@ -1,5 +1,5 @@
 // ============================================================================
-// bt_hunter.inc — Hunter Behavior Tree (v5.10)
+// bt_hunter.inc — Hunter Behavior Tree (v5.23)
 // ============================================================================
 // Replaces the old AI_Hunter.sp flat logic with a BT-driven decision tree.
 // Key behaviors preserved from v2.4:
@@ -40,6 +40,19 @@
 //     （幸存者 ≤500u 时蹲下不动）封顶 1 tick / 2.5s，其余时间落走位分支
 //   - coordPounce 瞄准改 SnapAimToBlackboardTarget（原瞄引擎目标，反聚堆扑错人）
 //   - 全部扑击攻击序列统一 SnapAimToBlackboardTarget
+// v5.23 (2026-08, 云端审查, 任务书 §4/§5/§17.2):
+//   - P0 FIX: root selector 重排 —— routeAmbushSeq/routeFlankSeq 移到
+//     crouchPrepSeq 之前（fastPounceSeq 之后）。原顺序 sprintApproachSeq
+//     （OnGround + >400u，动作恒 RUNNING）排在战术分支之前 → 距离 >400u 时
+//     routeAmbush/routeFlank 永远被遮蔽（§5.1）。战术分支优先于泛用接近（§5.2）
+//   - P0 FIX: HunterAct_WallPounce 类型错误 —— ACT_AcquirePinnableTarget 的
+//     返回值（BT_Status 0/1）被赋给 int target（client index），改显式
+//     FAILURE 判定 + 从黑板读回目标（§5.3）
+//   - P1: 扑击序列统一 "Acquire→Validate→LOS→Range→Execute"（§4/§17.2）：
+//     narrowPounceSeq 补 CND_TargetIsPinnable（挂边/倒地/被控不可扑）；
+//     coordPounceSeq / openStrat0 / openStrat1 的 Inverter(CND_IsTargetPinned)
+//     替换为 CND_TargetIsPinnable（原守卫只防"已被控"）；disruptionSeq 补
+//     CND_TargetIsPinnable（原序列无任何可扑守卫）
 // ============================================================================
 
 #if defined _bt_hunter_included
@@ -180,11 +193,13 @@ BT_Status HunterCond_CanWallPounce(int client) {
 
 // Action: 执行墙面二段跳
 BT_Status HunterAct_WallPounce(int client) {
-    // 获取最近的幸存者作为目标
+    // v5.23 FIX: 类型错误 —— ACT_AcquirePinnableTarget 返回 BT_Status
+    // （0=SUCCESS/1=FAILURE），原代码把返回值赋给 int target（client index），
+    // 导致 target 恒为 0/1、瞄准块永远不执行。改为显式判定失败即退 + 从
+    // 黑板读回目标（任务书 §5.3）。
+    if (ACT_AcquirePinnableTarget(client) == BT_FAILURE) return BT_FAILURE;
     int target = BB_GetInt(client, "target", -1);
-    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
-        target = ACT_AcquirePinnableTarget(client);  // v5.19: 优先站立目标
-    }
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return BT_FAILURE;
 
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
         // 瞄准目标
@@ -774,13 +789,16 @@ stock int BT_CreateHunterTree() {
     // In tight spaces, survivors can't dodge → just pounce straight
     // v5.7: HasLOS → Acquire + HasTargetLOS（trace 视线；引擎标志失真时
     // 全扑击分支不可达）+ 距离改 target 口径；攻击瞄准改黑板目标
-    int narrowPounceSeq = BT_CreateSequence(6,
+    // v5.23: 补可扑性守卫 —— 挂边/倒地/被控目标不可扑，扑上去是空转浪费
+    // （任务书 §4/§17.2：Acquire→Validate→LOS→Range→Execute 统一链）
+    int narrowPounceSeq = BT_CreateSequence(7,
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(800.0)  // longer range in corridors
+        BT_CreateIsTargetInRange(800.0),  // longer range in corridors
+        BT_CreateCondition(CND_TargetIsPinnable)
     );
     int narrowAttackSeq = BT_CreateSequence(3,
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
@@ -811,7 +829,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
-        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
+        BT_CreateCondition(CND_TargetIsPinnable)  // v5.23: 同 pounceInnerSeq —— 同时拒挂边/倒地/被控
     );
     int widePounceAttack = BT_CreateSequence(3,
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
@@ -830,7 +848,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
-        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
+        BT_CreateCondition(CND_TargetIsPinnable)  // v5.23: 同 pounceInnerSeq —— 同时拒挂边/倒地/被控
     );
     int erraticPounceAttack = BT_CreateSequence(3,
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
@@ -979,6 +997,10 @@ stock int BT_CreateHunterTree() {
     // ==========================================
     // v5.7: 协同目标上移条件段（门控量同一个人）+ 瞄准改黑板目标 ——
     // 原版门控量 BB target（常空/陈旧）而瞄准引擎目标，反聚堆扑击瞄错人
+    // v5.23: Inverter(CND_IsTargetPinned) → CND_TargetIsPinnable —— 原守卫只
+    // 防"已被控"，挂边/倒地目标仍会扑空转。替换后契合"反聚堆分散扑"语义：
+    // 协同分配的目标若已被控/倒地/挂边则跳过本分支，落到其它扑击/走位分支
+    // （任务书 §4/§17.2 统一 Acquire→Validate→LOS→Range→Execute 链）
     int coordPounceSeq = BT_CreateSequence(7,
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
@@ -986,7 +1008,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateAction(ACT_AcquireCoordTarget),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
-        BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
+        BT_CreateCondition(CND_TargetIsPinnable)  // v5.23: 替换 Inverter(IsTargetPinned)，同时拒挂边/倒地/被控
     );
     int coordPounceAttack = BT_CreateSequence(2,
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
@@ -1001,13 +1023,18 @@ stock int BT_CreateHunterTree() {
     // 扑掉枪手 = 打乱幸存者火力网，为近战 SI 创造突破窗口。
     // 与 coordPounce（mode 4/6 分散）区分：这是通用身份行为，优先级
     // 放在分散扑之后 —— 分散模式仍优先防 dogpile，其余模式优先打枪手。
+    // v5.23: 补可扑性守卫 —— 原序列无任何 pinnable/被控闸：枪手若已倒地/
+    // 挂边/被控，扑上去是空转。CND_TargetIsPinnable 同时拒三种状态；若枪手
+    // 已被控则跳过本分支（合理：优先维持压制，不打重复控制）
+    // （任务书 §4/§17.2：Acquire→Validate→LOS→Range→Execute 统一链）
     // ==========================================
-    int disruptionSeq = BT_CreateSequence(5,
+    int disruptionSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
         BT_CreateAction(ACT_AcquireThreatTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(fPounceRange)
+        BT_CreateIsTargetInRange(fPounceRange),
+        BT_CreateCondition(CND_TargetIsPinnable)
     );
     int disruptionAttack = BT_CreateSequence(3,
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
@@ -1023,13 +1050,15 @@ stock int BT_CreateHunterTree() {
     BT_AddChild(fastPounceSeq, pounceInnerSeq);
     BT_AddChild(fastPounceSeq, attackActionSeq);
 
-    // Root selector — priority order (v5.16):
+    // Root selector — priority order (v5.23):
     //   1. Escape after miss (safety first)
-    //   2. Wall pounce when airborne near wall [v5.16 NEW]
+    //   2. Wall pounce when airborne near wall [v5.16]
     //   3. Evasive jump when being aimed at [v5.12]
-    //   4. Harasser mode (keep distance until initiator engages) [v5.15]
+    //   4. Harasser mode — DISABLED [v5.21]（纯攻击性 AI，不再保距等待）
     //   5. High-ground positioning (tactical advantage)
     //   6. Narrow corridor → straight pounce
+    //   6.5. mode 4/6 分散扑（防 dogpile）[v4.0]
+    //   6.6. 枪线扰乱 → 扑火力输出者 [v5.0]
     //   7a. Open area → roll strategy token
     //   7b. Open + strat0 → wide flank pounce (±35° Gauss)
     //   7c. Open + strat1 → erratic pounce (standard ±15° Gauss)
@@ -1037,14 +1066,22 @@ stock int BT_CreateHunterTree() {
     //   8. Semi open → hug wall approach
     //   9. Close range (≤200) → direct pounce (no Gauss, faster) [v3.3]
     //   10. Standard fast pounce (ducking + LOS + inRange → pounce with Gauss)
-    //   11. In range + not ducking → crouch to prepare pounce [v3.3]
-    //   12. Far away → SPRINT full speed toward target [v3.3]
-    //   13. In range + ducking + no LOS → crouch approach with forward movement [v3.3]
-    //   14. Last resort → wander
+    //   11. Flow 前方 → 蹲守埋伏（路线感知战术分支）[v5.18]
+    //   12. Flow 后方 → 绕行抢位（路线感知战术分支）[v5.18]
+    //   13. In range + not ducking → crouch to prepare pounce [v3.3]
+    //   14. Far away → SPRINT full speed toward target [v3.3]
+    //   15. In range + ducking + no LOS → crouch approach with forward movement [v3.3]
+    //   16. Last resort → wander
     //
-    // The sprint→crouch→pounce flow (11→10 or 12→11→10):
-    //   Tick N:   Hunter far away → branch 12 (sprint) activates, runs toward target
-    //   Tick N+1: Entered pounce range → branch 11 (crouchPrep) fires, presses DUCK
+    // v5.23 P0 FIX: 战术分支（11/12）移到 crouchPrep（13）、sprint（14）之前
+    // —— 原顺序 sprintApproachSeq（OnGround + >400u，动作恒 RUNNING）排在
+    // 战术分支之前，距离 >400u 时 routeAmbush/routeFlank 永远被遮蔽（§5.1）。
+    // 战术分支必须优先于泛用接近分支（§5.2）：
+    // 能扑就扑 → 够不到先走路线战术 → 才退泛用接近（蹲伏准备/冲刺/蹲爬）。
+    //
+    // The sprint→crouch→pounce flow (13→10 or 14→13→10):
+    //   Tick N:   Hunter far away → branch 14 (sprint) activates, runs toward target
+    //   Tick N+1: Entered pounce range → branch 13 (crouchPrep) fires, presses DUCK
     //   Tick N+2: FL_DUCKING set → branch 10 (fastPounce) fires, POUNCES!
     // ==========================================
     // v5.18 功能 1：flow 路线感知（两支）
@@ -1054,6 +1091,8 @@ stock int BT_CreateHunterTree() {
     // b) 落在后方 → 朝 flow 增大方向绕行抢位，而不是从背后直线追
     //    （从后方追 = 全队枪线正对，白给）
     // 两支都排在扑击分支之后：能扑就扑，够不到才走路线逻辑。
+    // v5.23: 且都移到 crouchPrep/sprint 泛用接近之前 —— 路线感知是"战术"
+    // 分支，优先级必须高于泛用接近（任务书 §5.2）。
     // ==========================================
     int routeAmbushSeq = BT_CreateSequence(4,
         BT_CreateIsAheadOnRoute(500.0),
@@ -1086,12 +1125,16 @@ stock int BT_CreateHunterTree() {
     BT_AddChild(root, semiApproachSeq);         // 8. v3.2: semi → hug wall
     BT_AddChild(root, closePounceSeq);          // 9. v3.3: close-range direct pounce
     BT_AddChild(root, fastPounceSeq);           // 10. standard fast pounce (Gauss angle)
-    BT_AddChild(root, crouchPrepSeq);           // 11. v3.3: inRange + noDuck → crouch
-    BT_AddChild(root, sprintApproachSeq);       // 12. v3.3: far away → SPRINT full speed
-    BT_AddChild(root, crouchApproachSeq);       // 13. v3.3: inRange + ducking + noLOS → strafe+forward
-    BT_AddChild(root, routeAmbushSeq);          // 13b. v5.18: flow 前方 → 蹲守埋伏
-    BT_AddChild(root, routeFlankSeq);           // 13c. v5.18: flow 后方 → 绕行抢位
-    BT_AddChild(root, wander);                  // 14. last resort
+    // v5.23 P0 FIX: routeAmbush/routeFlank 移到 crouchPrep 之前 —— 原顺序
+    // sprintApproachSeq（OnGround + >400u，动作恒 RUNNING）排在战术分支之前，
+    // 距离 >400u 时路线战术分支永远被遮蔽（任务书 §5.1）。战术分支优先于
+    // 泛用接近分支（§5.2）：能扑就扑 → 够不到先走路线战术 → 才退泛用接近。
+    BT_AddChild(root, routeAmbushSeq);          // 11. v5.18: flow 前方 → 蹲守埋伏
+    BT_AddChild(root, routeFlankSeq);           // 12. v5.18: flow 后方 → 绕行抢位
+    BT_AddChild(root, crouchPrepSeq);           // 13. v3.3: inRange + noDuck → crouch
+    BT_AddChild(root, sprintApproachSeq);       // 14. v3.3: far away → SPRINT full speed
+    BT_AddChild(root, crouchApproachSeq);       // 15. v3.3: inRange + ducking + noLOS → strafe+forward
+    BT_AddChild(root, wander);                  // 16. last resort
 
     return root;
 }

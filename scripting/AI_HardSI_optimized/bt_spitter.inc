@@ -47,6 +47,10 @@ BT_Status SpitterCnd_HasSpit(int client) {
 BT_Status SpitterCnd_SpitReady(int client) {
     float t = BB_GetFloat(client, "_spitter_spit_time", 0.0);
     if (t > 0.0 && GetGameTime() - t < 8.0) return BT_FAILURE;
+    // v5.23: 退避闸 —— 尝试失败（1.5s 超时未确认 = 引擎拒绝）后的短退避期内
+    // 不重试：所有吐分支都在本冷却门外层，SpitReady FAIL 即自然获得重试间隔，
+    // 防失败后下一 tick 立刻原地重复按吐键（SEQUENCE 失败交走位分支）。
+    if (SI_AbilityBackoffActive(client, "_spitter")) return BT_FAILURE;
     return BT_SUCCESS;
 }
 
@@ -149,9 +153,8 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
     if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
         BB_SetBool(client, "_spitter_waiting_spit", true);
         BB_SetFloat(client, "_spitter_press_start", now);
-        // 决定 post-spit 行为（同普通吐）—— v5.0 三分：40% 据守 / 35% 撤退 / 25% 靠近
-        int r = GetRandomInt(0, 9);
-        BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
+        // v5.23: post-spit 行为不再在按压瞬间 roll —— 移到真实发射确认分支。
+        // 按压即 roll 会被引擎拒绝的失败尝试污染（没吐出来也定死吐后行为）。
     }
 
     float tPos[3], tVel[3];
@@ -177,17 +180,22 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
     // v5.7: 锁在真实发射时刻（ability_spit 事件置 g_bSpitterSpitFired）——
     // 原版按压时刻即锁 8s：单帧按键被引擎风阻吞掉时"吐了个寂寞还锁 8s"
     // （Boomer v5.6 同款修复，Spitter 未跟进）
+    // v5.23: _spitter_post_mode roll 移到本分支 —— 仅真实吐出时决定吐后行为
     if (g_bSpitterSpitFired[client]) {
         g_bSpitterSpitFired[client] = false;
         BB_SetBool(client, "_spitter_waiting_spit", false);
+        // 决定 post-spit 行为（同普通吐）—— v5.0 三分：40% 据守 / 35% 撤退 / 25% 靠近
+        int r = GetRandomInt(0, 9);
+        BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
         BB_SetFloat(client, "_spitter_spit_time", now);
         return BT_SUCCESS;
     }
-    // 1.5s 超时 = 引擎拒绝（冷却/几何）→ 锁 8s 交 postSpit 走位，防无效按吐循环
+    // v5.23: 1.5s 超时 = 引擎拒绝（冷却/几何）→ 尝试失败：不设 _spitter_spit_time
+    // （未吐出绝不进正式 8s 冷却/成功态），短退避防立刻重试，FAIL 交走位分支
     if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
-        BB_SetFloat(client, "_spitter_spit_time", now);
-        return BT_SUCCESS;
+        SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
+        return BT_FAILURE;
     }
     return BT_RUNNING;
 }
@@ -205,8 +213,8 @@ BT_Status SpitterAct_SpitTankCover(int client) {
     if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
         BB_SetBool(client, "_spitter_waiting_spit", true);
         BB_SetFloat(client, "_spitter_press_start", now);
-        // 掩护吐完稍微后退（保持距离）
-        BB_SetInt(client, "_spitter_post_mode", 1);
+        // v5.23: post_mode 移到真实发射确认分支（见下）；按压瞬间不写，
+        // 防止引擎拒绝时把"掩护后退"语义写进失败尝试。
     }
 
     float tPos[3], tAng[3], fwd[3], aimPos[3];
@@ -226,16 +234,19 @@ BT_Status SpitterAct_SpitTankCover(int client) {
     BT_AddButton(client, IN_ATTACK);   // v5.7: 按住至真实发射
 
     // v5.7: 锁在真实发射时刻（同 PredictiveSpit/Spit 的 v5.7 修复）
+    // v5.23: post_mode 在此确认分支设置 —— 掩护吐完稍微后退（保持距离）
     if (g_bSpitterSpitFired[client]) {
         g_bSpitterSpitFired[client] = false;
         BB_SetBool(client, "_spitter_waiting_spit", false);
+        BB_SetInt(client, "_spitter_post_mode", 1);
         BB_SetFloat(client, "_spitter_spit_time", now);
         return BT_SUCCESS;
     }
+    // v5.23: 1.5s 超时 = 引擎拒绝 → 尝试失败（不进 8s 冷却/成功态），短退避重试
     if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
-        BB_SetFloat(client, "_spitter_spit_time", now);
-        return BT_SUCCESS;
+        SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
+        return BT_FAILURE;
     }
     return BT_RUNNING;
 }
@@ -256,10 +267,8 @@ BT_Status SpitterAct_Spit(int client) {
     if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
         BB_SetBool(client, "_spitter_waiting_spit", true);
         BB_SetFloat(client, "_spitter_press_start", now);
-        // v5.0: 吐后行为三分 —— 40% 据守封锁位 / 35% 撤退保持距离 / 25% 贴脸压迫
-        // （原 80% 贴脸送死：Spitter 血 100，贴脸 = 白送，区域毒压应保持压制距离）
-        int r = GetRandomInt(0, 9);
-        BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
+        // v5.23: 吐后行为 roll 移到真实发射确认分支 —— 按压瞬间被引擎拒绝的
+        // 失败尝试不得污染 post_mode（原 80% 贴脸送死已在 v5.0 修正为三分）。
     }
 
     float sPos[3], tPos[3], dir[3], ang[3];
@@ -306,16 +315,22 @@ BT_Status SpitterAct_Spit(int client) {
     BT_AddButton(client, IN_ATTACK);   // v5.7: 按住至真实发射
 
     // v5.7: 锁在真实发射时刻（同 PredictiveSpit 修复）
+    // v5.23: post_mode 在此确认分支 roll —— v5.0 三分：40% 据守封锁位 /
+    // 35% 撤退保持距离 / 25% 贴脸压迫（原 80% 贴脸送死：Spitter 血 100，
+    // 贴脸 = 白送，区域毒压应保持压制距离）
     if (g_bSpitterSpitFired[client]) {
         g_bSpitterSpitFired[client] = false;
         BB_SetBool(client, "_spitter_waiting_spit", false);
+        int r = GetRandomInt(0, 9);
+        BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
         BB_SetFloat(client, "_spitter_spit_time", now);
         return BT_SUCCESS;
     }
+    // v5.23: 1.5s 超时 = 引擎拒绝 → 尝试失败（不进 8s 冷却/成功态），短退避重试
     if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
-        BB_SetFloat(client, "_spitter_spit_time", now);
-        return BT_SUCCESS;
+        SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
+        return BT_FAILURE;
     }
     return BT_RUNNING;
 }

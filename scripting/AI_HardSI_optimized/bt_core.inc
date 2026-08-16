@@ -94,11 +94,59 @@ stock void BT_SetUserParam2(int nodeId, float value) { g_fBTNodeUserParam2[nodeI
 // Movement output (written by BT actions, applied by OnPlayerRunCmd)
 // ---------------------------------------------------------------------------
 
+// v5.22: BT Control Mask —— 每帧控制权声明（云端审查任务书 §2.2）。
+// 行为节点声明"当前行为接管哪些输入类别"，只有被接管的类别才在
+// Apply 阶段清除 Valve 原版 AI 的原始按键意图；未接管的类别保留
+// Valve/NextBot 原生输入（攀爬/梯子/跳跃/引擎技能等不破坏）。
+// BT_AddButton/BT_RemoveButton/BT_SetAimAngles 会自动声明对应的类别；
+// Hold/Ambush 类"接管移动以保持静止"的节点显式调 BT_TakeControl。
+enum BT_ControlFlags {
+    BTCTRL_NONE    = 0,
+    BTCTRL_MOVE    = (1 << 0),   // 移动键：FORWARD/BACK/MOVELEFT/MOVERIGHT
+    BTCTRL_VIEW    = (1 << 1),   // 视角覆盖
+    BTCTRL_ATTACK  = (1 << 2),   // IN_ATTACK / IN_ATTACK2
+    BTCTRL_DUCK    = (1 << 3),   // IN_DUCK
+    BTCTRL_JUMP    = (1 << 4),   // IN_JUMP
+    BTCTRL_FULL    = BTCTRL_MOVE | BTCTRL_VIEW | BTCTRL_ATTACK | BTCTRL_DUCK | BTCTRL_JUMP
+};
+
 int     g_iBT_ButtonsAdd[MAXPLAYERS + 1];       // buttons to ADD
 int     g_iBT_ButtonsRemove[MAXPLAYERS + 1];    // buttons to REMOVE
 bool    g_bBT_AnglesSet[MAXPLAYERS + 1];
 float   g_fBT_Angles[MAXPLAYERS + 1][3];
 bool    g_bBT_Teleport[MAXPLAYERS + 1];
+int     g_iBTControlMask[MAXPLAYERS + 1];       // v5.22: 当前帧 BT 接管的输入类别
+
+// --- Control mask API (v5.22) ---
+stock void BT_TakeControl(int client, int flags) {
+    g_iBTControlMask[client] |= flags;
+}
+
+stock void BT_ReleaseControl(int client, int flags) {
+    g_iBTControlMask[client] &= ~flags;
+}
+
+stock bool BT_HasControl(int client, int flag) {
+    return (g_iBTControlMask[client] & flag) != 0;
+}
+
+// --- 细粒度清除（替换无差别 BT_ResetMovement 的滥用场景）---
+// 只接管/清空"移动"类别：Hold/埋伏类节点用这个停住，同时保留
+// 同一 Sequence 前面节点刚添加的 IN_DUCK/IN_JUMP 等非移动输入。
+stock void BT_ClearMoveDirection(int client) {
+    BT_RemoveButton(client, IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
+    BT_TakeControl(client, BTCTRL_MOVE);
+}
+
+stock void BT_ClearAttack(int client) {
+    BT_RemoveButton(client, IN_ATTACK | IN_ATTACK2);
+    BT_TakeControl(client, BTCTRL_ATTACK);
+}
+
+stock void BT_ClearDuck(int client) {
+    BT_RemoveButton(client, IN_DUCK);
+    BT_TakeControl(client, BTCTRL_DUCK);
+}
 
 // ---------------------------------------------------------------------------
 // Node Creation
@@ -327,12 +375,38 @@ stock void BT_ResetNodeState(int client, int nodeId) {
     }
 }
 
+// v5.22: 真 Abort —— Selector/Sequence 放弃旧 RUNNING 子树时调用。
+// 除递归清 running child 外，清除 action-local 的停滞状态：
+//   - WAIT 节点的时间戳（_bt_wait_<id>）—— 否则"Wait 3s 跑 1s 被抢占，
+//     5s 后重入立即 SUCCESS"（云端审查任务书 §3.4）
+//   - Cooldown 不清理（抢占后保持冷却合理，防止被抢占分支立刻重入刷冷却）
+stock void BT_AbortNode(int client, int nodeId) {
+    if (nodeId < 0 || nodeId >= g_iBTNodeCount) return;
+    g_iBTRunningChild[client][nodeId] = -1;
+
+    if (g_eBTNodeType[nodeId] == BTN_WAIT) {
+        char waitKey[32];
+        Format(waitKey, sizeof(waitKey), "_bt_wait_%d", nodeId);
+        if (g_hBTBlackboard[client] != null) {
+            g_hBTBlackboard[client].Remove(waitKey);
+        }
+    }
+
+    if (g_hBTChildren[nodeId] != null) {
+        int len = g_hBTChildren[nodeId].Length;
+        for (int i = 0; i < len; i++) {
+            BT_AbortNode(client, g_hBTChildren[nodeId].Get(i));
+        }
+    }
+}
+
 // Reset button accumulators before tick
 stock void BT_ResetMovement(int client) {
     g_iBT_ButtonsAdd[client] = 0;
     g_iBT_ButtonsRemove[client] = 0;
     g_bBT_AnglesSet[client] = false;
     g_bBT_Teleport[client] = false;
+    g_iBTControlMask[client] = 0;   // v5.22: 每 tick 重置控制声明
 }
 
 // Apply accumulated movement changes to OnPlayerRunCmd parameters
@@ -343,6 +417,28 @@ stock void BT_ApplyMovement(int client, int &buttons) {
     if (g_iBT_ButtonsRemove[client] != 0) {
         buttons &= ~g_iBT_ButtonsRemove[client];
     }
+}
+
+// v5.22: 每帧控制输出应用（Think/Control 分离的核心出口）。
+// 1) 对被 BT 接管的输入类别，先清除 Valve 原版 AI 的原始按键意图；
+// 2) 再叠加 BT 累积输出（Add/Remove）。
+// 非决策帧也调用本函数（沿用上次决策的累积输出 + 控制声明），
+// 从而"决策降频、控制输出每帧应用"，消除 Valve/BT 交替接管抖动。
+stock void BT_ApplyControlFrame(int client, int &buttons) {
+    int mask = g_iBTControlMask[client];
+    if (mask & _:BTCTRL_MOVE) {
+        buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
+    }
+    if (mask & _:BTCTRL_ATTACK) {
+        buttons &= ~(IN_ATTACK | IN_ATTACK2);
+    }
+    if (mask & _:BTCTRL_DUCK) {
+        buttons &= ~IN_DUCK;
+    }
+    if (mask & _:BTCTRL_JUMP) {
+        buttons &= ~IN_JUMP;
+    }
+    BT_ApplyMovement(client, buttons);
 }
 
 stock void BT_ApplyAngles(int client, float angles[3]) {
@@ -357,12 +453,25 @@ stock void BT_ApplyAngles(int client, float angles[3]) {
 // Movement helpers (called from BT action callbacks)
 // ---------------------------------------------------------------------------
 
+// v5.22: 输出即声明 —— 任何 BT 按键输出自动声明接管对应输入类别，
+// Apply 阶段据此清除 Valve 原版意图（见 BT_ApplyControlFrame）。
+stock int BT_FlagsForButtons(int buttons) {
+    int flags = 0;
+    if (buttons & (IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT)) flags |= _:BTCTRL_MOVE;
+    if (buttons & (IN_ATTACK | IN_ATTACK2)) flags |= _:BTCTRL_ATTACK;
+    if (buttons & IN_DUCK) flags |= _:BTCTRL_DUCK;
+    if (buttons & IN_JUMP) flags |= _:BTCTRL_JUMP;
+    return flags;
+}
+
 stock void BT_AddButton(int client, int button) {
     g_iBT_ButtonsAdd[client] |= button;
+    g_iBTControlMask[client] |= BT_FlagsForButtons(button);
 }
 
 stock void BT_RemoveButton(int client, int button) {
     g_iBT_ButtonsRemove[client] |= button;
+    g_iBTControlMask[client] |= BT_FlagsForButtons(button);
 }
 
 stock void BT_SetAimAngles(int client, float pitch, float yaw, float roll = 0.0) {
@@ -370,6 +479,7 @@ stock void BT_SetAimAngles(int client, float pitch, float yaw, float roll = 0.0)
     g_fBT_Angles[client][0] = pitch;
     g_fBT_Angles[client][1] = yaw;
     g_fBT_Angles[client][2] = roll;
+    g_iBTControlMask[client] |= _:BTCTRL_VIEW;   // v5.22
 }
 
 stock void BT_TeleportToAngles(int client, float angles[3]) {
@@ -397,26 +507,37 @@ BT_Status BT_TickNode(int nodeId, int client) {
             if (len == 0) return BT_FAILURE;
 
             // Re-evaluate from child 0 every tick (conditional abort)
+            // v5.22: 丢弃旧 RUNNING 子树的时机覆盖全部退出路径 —— 原版只在
+            // "新子节点 RUNNING" 时 reset 旧子节点；高优先级子节点直接
+            // SUCCESS/FAILURE 提前返回时旧子树状态残留（WAIT 时间戳等），
+            // 重新进入时恢复陈旧状态。现在 SUCCESS/FAILURE/RUNNING 三条
+            // 路径统一调 BT_AbortNode 收尾旧子树。
+            int prevRunning = g_iBTRunningChild[client][nodeId];
             for (int i = 0; i < len; i++) {
                 int childId = g_hBTChildren[nodeId].Get(i);
                 BT_Status result = BT_TickNode(childId, client);
 
                 if (result == BT_RUNNING) {
                     // If this is a different child than last tick, reset old one
-                    int prevRunning = g_iBTRunningChild[client][nodeId];
                     if (prevRunning != i && prevRunning >= 0 && prevRunning < len) {
-                        BT_ResetNodeState(client, g_hBTChildren[nodeId].Get(prevRunning));
+                        BT_AbortNode(client, g_hBTChildren[nodeId].Get(prevRunning));
                     }
                     g_iBTRunningChild[client][nodeId] = i;
                     g_iBTLastWinningChild[client][nodeId] = i;   // v5.6
                     return BT_RUNNING;
                 }
                 if (result == BT_SUCCESS) {
+                    if (prevRunning != i && prevRunning >= 0 && prevRunning < len) {
+                        BT_AbortNode(client, g_hBTChildren[nodeId].Get(prevRunning));
+                    }
                     g_iBTRunningChild[client][nodeId] = -1;
                     g_iBTLastWinningChild[client][nodeId] = i;   // v5.6: SUCCESS 也记录
                     return BT_SUCCESS;
                 }
                 // BT_FAILURE → continue to next child
+            }
+            if (prevRunning >= 0 && prevRunning < len) {
+                BT_AbortNode(client, g_hBTChildren[nodeId].Get(prevRunning));
             }
             g_iBTRunningChild[client][nodeId] = -1;
             return BT_FAILURE;
@@ -428,19 +549,30 @@ BT_Status BT_TickNode(int nodeId, int client) {
             if (len == 0) return BT_SUCCESS;
 
             // Re-evaluate from child 0 every tick
+            // v5.22: 同 Selector —— 旧 RUNNING 子树被推进/失败时统一 Abort 收尾
+            int prevRunning = g_iBTRunningChild[client][nodeId];
             for (int i = 0; i < len; i++) {
                 int childId = g_hBTChildren[nodeId].Get(i);
                 BT_Status result = BT_TickNode(childId, client);
 
                 if (result == BT_FAILURE) {
+                    if (prevRunning >= 0 && prevRunning < len && prevRunning != i) {
+                        BT_AbortNode(client, g_hBTChildren[nodeId].Get(prevRunning));
+                    }
                     g_iBTRunningChild[client][nodeId] = -1;
                     return BT_FAILURE;
                 }
                 if (result == BT_RUNNING) {
+                    if (prevRunning >= 0 && prevRunning < len && prevRunning != i) {
+                        BT_AbortNode(client, g_hBTChildren[nodeId].Get(prevRunning));
+                    }
                     g_iBTRunningChild[client][nodeId] = i;
                     return BT_RUNNING;
                 }
                 // BT_SUCCESS → continue to next child
+            }
+            if (prevRunning >= 0 && prevRunning < len) {
+                BT_AbortNode(client, g_hBTChildren[nodeId].Get(prevRunning));
             }
             g_iBTRunningChild[client][nodeId] = -1;
             return BT_SUCCESS;

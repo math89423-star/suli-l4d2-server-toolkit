@@ -16,12 +16,25 @@
 //   ENGINE_CVARS.md）。v3.5 的 500/550 为自创值：引擎在 300u 外不发射，
 //   approach 在 550u 就停 → Boomer 永远进不了射程，站桩对空气无限按无效
 //   呕吐键（原版 Boomer 就是贴脸吐，射程只有 300u）。
+// v5.23: 吐出确认（FIRE）与命中反馈（HIT）分离（任务书 §10：VOMIT_FIRED ≠
+//   VOMIT_HIT）——
+//   FIRE：hook L4D_ActivateAbility_Boomer_Post（引擎 CVomit::ActivateAbility
+//     真实触发，无论是否命中）→ 技能状态机 confirmed + 既有 10s 自锁
+//     + 掷 80/20 呕吐后行为。放弃 m_isVomiting prop 探测：该 prop 未在本服
+//     netprops 验证（同类 m_hasBeenBoomed 前科：宣称存在实为假 → 每晚数万
+//     异常），事件驱动无误报风险。
+//   HIT：player_now_it 语义降级为"命中反馈"——SI_SignalBoomerHit 开团/霸体 +
+//     just_vomited（发起者得手）；10s 锁与后置行为改由 FIRE 事件负责。
+//   动作 1.2s 无 FIRE → 短退避 + FAILURE（不锁 10s）。
 // ============================================================================
 
 #if defined _bt_boomer_included
   #endinput
 #endif
 #define _bt_boomer_included
+
+#define BOOMER_VOMIT_TRY_TIMEOUT 1.2   // v5.23: FIRE 确认超时（按压窗口）
+#define BOOMER_VOMIT_BACKOFF     0.5   // v5.23: 引擎拒绝后的短退避
 
 
 // ---------------------------------------------------------------------------
@@ -92,17 +105,21 @@ BT_Status BoomerAct_FlankApproach(int client) {
 }
 
 // Vomit on target + decide post-vomit behavior (80% approach / 20% retreat)
-// v5.6: 按住 IN_ATTACK 直到真实吐出（player_now_it 事件置 _boomer_vomit_hit）
-// 或 2s 超时。原版单帧按键 + 无条件锁 10s：引擎 boomer_vomit_delay=0.1s
-// 风阻窗口吞掉单帧按键 → 按了个寂寞还锁 10s（"300u 内不吐"主因之一）。
-// 超时未命中 = 引擎拒绝（射程/LOS/冷却），返回 FAILURE 不设锁，交走位分支。
+// v5.23: FIRE（吐出确认）与 HIT（命中反馈）分离（任务书 §10）——
+//   按住 IN_ATTACK 直到引擎真实触发呕吐（L4D_ActivateAbility_Boomer_Post
+//   置 confirmed，无论是否命中）或 1.2s 超时：
+//   - FIRE 确认 → SUCCESS：10s 自锁 + 80/20 后置行为由 FIRE 事件设置；
+//   - player_now_it（命中）仅作开团/霸体信号（OnPlayerBoomed），并作为
+//     FIRE 事件环境缺失时的兜底确认（命中必已吐出）；
+//   - 超时无 FIRE = 引擎拒绝（射程/LOS/冷却）→ 短退避 + FAILURE，不锁 10s。
+// 原版 v5.6 行为对照：按住直到 player_now_it 命中或 2s 超时 —— 吐空（无人
+// 命中）时既无锁也无确认，引擎冷却期反复空按；现在吐空也正确进入 10s 冷却。
 BT_Status BoomerAct_Vomit(int client) {
     float now = GetGameTime();
-    float pressStart = BB_GetFloat(client, "_vomit_press_start", 0.0);
-    if (pressStart <= 0.0) {
-        BB_SetFloat(client, "_vomit_press_start", now);
-        BB_SetBool(client, "_boomer_vomit_hit", false);
-    }
+
+    // 短退避中（引擎刚拒绝过）：不按键直接失败，交走位分支
+    if (SI_AbilityBackoffActive(client, "_boomer")) return BT_FAILURE;
+
     // Aim at target
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
@@ -114,16 +131,28 @@ BT_Status BoomerAct_Vomit(int client) {
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
 
-    BT_AddButton(client, IN_ATTACK);  // vomit (held)
+    // 尝试计时：首次进入或上次残留超时 → 重新计时（顺带清命中标记）
+    float tryAt = SI_AbilityGetTryAt(client, "_boomer");
+    if (tryAt > 0.0 && (now - tryAt) > BOOMER_VOMIT_TRY_TIMEOUT) tryAt = 0.0;
+    if (tryAt <= 0.0) {
+        SI_AbilityMarkTry(client, "_boomer", now);
+        SI_AbilitySetState(client, "_boomer", ABILITY_TRYING);
+        BB_SetBool(client, "_boomer_vomit_hit", false);
+        tryAt = now;
+    }
 
-    if (BB_GetBool(client, "_boomer_vomit_hit", false)) {
-        // 真实吐出 —— 锁由 OnPlayerBoomed 事件设置（事件时刻 + 10s）
-        BB_SetFloat(client, "_vomit_press_start", 0.0);
+    // FIRE 确认：本次尝试窗口内事件写入 confirmed_at → SUCCESS（锁由事件设置）；
+    // HIT 兜底：FIRE 事件环境缺失时，player_now_it 命中同样证明已吐出。
+    if (SI_AbilityGetConfirmedAt(client, "_boomer") >= tryAt
+        || BB_GetBool(client, "_boomer_vomit_hit", false)) {
         return BT_SUCCESS;
     }
-    if (now - pressStart > 2.0) {
-        // 引擎拒绝（风阻/冷却/超射程）—— 撤销按压，不设锁
-        BB_SetFloat(client, "_vomit_press_start", 0.0);
+
+    BT_AddButton(client, IN_ATTACK);  // vomit (held)
+
+    if ((now - tryAt) > BOOMER_VOMIT_TRY_TIMEOUT) {
+        // 1.2s 未触发真实呕吐 = 引擎拒绝（风阻/冷却/超射程）→ 短退避，不锁 10s
+        SI_AbilityBackoff(client, "_boomer", now, BOOMER_VOMIT_BACKOFF);
         return BT_FAILURE;
     }
     return BT_RUNNING;
@@ -340,22 +369,55 @@ public Boomer_OnModuleStart() {
     HookEvent("player_now_it", OnPlayerBoomed, EventHookMode_Post);
 }
 
+// ============================================================================
+// v5.23: FIRE 确认（任务书 §10）—— 引擎 CVomit::ActivateAbility 真实触发即
+// 确认"已吐出"（无论是否命中任何人）。事件驱动替代 prop 探测：
+//   m_isVomiting 在本服（2.2.4.3）netprops 未验证，且本插件有 m_hasBeenBoomed
+//   前科（宣称存在的 prop 实为假 → GetEntProp 每晚数万异常，BT tick 全中止），
+//   未验证 prop 的逐 tick 读取风险不可接受；
+//   L4D_ActivateAbility_Boomer_Post 是 left4dhooks 标准 forward（未标记
+//   optional），事件不存在时动作走 1.2s 超时退避兜底，行为不劣于 v5.6。
+// ============================================================================
+public L4D_ActivateAbility_Boomer_Post(int client, int ability) {
+    if (client <= 0 || client > MaxClients) return;
+    if (GetClientTeam(client) != 3 || !IsPlayerAlive(client)) return;
+    if (!IsBotInfected(client) || GetInfectedClass(client) != L4D2Infected_Boomer) return;
+
+    float now = GetGameTime();
+    SI_AbilityMarkConfirmed(client, "_boomer", now);
+    SI_AbilitySetState(client, "_boomer", ABILITY_CONFIRMED);
+    // 正式冷却：既有 10s 自锁（BoomerCnd_HasVomited 消费，到期自动清零，
+    // Boomer 10s 后可再吐；引擎 z_vomit_interval 冷却与之同量级）
+    BB_SetFloat(client, "_boomer_vomit_time", now);
+    // 呕吐后行为 80% 逼近 / 20% 撤退 —— 与是否命中无关（吐空也该走位，
+    // 原版只在本命时掷骰，吐空时既无锁也无后置行为）
+    BB_SetBool(client, "_boomer_approach", GetRandomFloat(0.0, 1.0) < 0.8);
+}
+
+// ============================================================================
+// v5.23: HIT 反馈 —— player_now_it 只能证明"至少一个幸存者被喷"，不能证明
+// "吐了但无人命中"。本事件语义降级为"命中反馈"：开团/霸体信号 + 发起者
+// 得手标记。10s 锁与 80/20 后置行为不再由本事件独占（FIRE 事件负责），
+// 本处只作 FIRE 事件环境缺失时的兜底（命中必已吐出 → 补锁补掷骰）。
+// ============================================================================
 public OnPlayerBoomed(Handle:event, const String:name[], bool:dontBroadcast) {
     int attacker = GetClientOfUserId(GetEventInt(event, "attacker"));
     if (attacker > 0 && IsBotInfected(attacker) && GetInfectedClass(attacker) == L4D2Infected_Boomer) {
+        // 开团/霸体信号 —— 命中反馈（任务书 §10：HIT 确认）
         SI_SignalBoomerHit();
-        // v5.6: 真实吐出确认 —— 原版在按 IN_ATTACK 的瞬间就设 10s 锁：
-        // 引擎拒绝时（超射程/LOS 假/冷却）白白锁 10s。锁起点移到事件：
-        // 只在真的吐到人后才锁 + 掷 80/20 后置行为。
-        BB_SetBool(attacker, "_boomer_vomit_hit", true);
-        BB_SetFloat(attacker, "_boomer_vomit_time", GetGameTime());
         // v5.22 FIX: 补写 just_vomited —— CND_InitiatorEngaged(bt_common.inc:436)
         // 读此键判定 Boomer 发起者是否得手，但全代码库从无写入点 → 恒假 →
         // Boomer 当发起者时骚扰者(Hunter/Jockey/Charger)只能靠 5s 硬超时放行，
         // 配合窗口延迟 5s。此键与 _boomer_vomit_time 同生命周期，在 Boomer_Tick
         // 的 10s 到期处(bt_boomer.inc:38 一带)一并清零。
         BB_SetBool(attacker, "just_vomited", true);
-        bool approach = (GetRandomFloat(0.0, 1.0) < 0.8);
-        BB_SetBool(attacker, "_boomer_approach", approach);
+        float now = GetGameTime();
+        // 兜底：FIRE 事件未触达（极端环境差异）→ 命中必已吐出，补锁补掷骰
+        if (BB_GetFloat(attacker, "_boomer_vomit_time", 0.0) <= 0.0) {
+            BB_SetFloat(attacker, "_boomer_vomit_time", now);
+            BB_SetBool(attacker, "_boomer_approach", GetRandomFloat(0.0, 1.0) < 0.8);
+        }
+        // 命中标记：动作内与 FIRE 状态 OR —— 事件环境缺失时也能确认
+        BB_SetBool(attacker, "_boomer_vomit_hit", true);
     }
 }

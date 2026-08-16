@@ -113,7 +113,9 @@ BT_Status JockeyAct_HarasserRide(int client) {
             }
 
             // 安全环境：进行快速骑乘
-            if (isSafe) {
+            // v5.23: 补 pinnable 守卫 —— 目标已倒地/被控时按 IN_ATTACK 是空转
+            // （引擎不成立）；不可骑则跳过骑乘，继续横移（走下述 StuckDetour）。
+            if (isSafe && SI_IsPinnable(target)) {
                 BB_SetFloat(client, "_jockey_harass_last_leap", now);
                 BB_SetFloat(client, "_jockey_harass_ride_start", now);  // 记录骑乘开始时间
                 BT_AddButton(client, IN_ATTACK);
@@ -400,21 +402,23 @@ stock int BT_CreateJockeyTree() {
     // 获取：出生第一 tick 地形分支胜出时 FlankApproach/CircleFlank 空
     // RUNNING（target 无效无按键输出）→ 整条命插件侧零输出（出生冻结）；
     // + HasLOS → HasTargetLOS（引擎标志失真）+ 距离改 target 口径。
+    // v5.23: 各地形分支统一把 Acquire 移到 HasTargetLOS 之前 —— 先换新目标再
+    // 验证 LOS/Range，消除"先验证旧目标再换目标攻击"（任务书 §6.1）。
     // Ledge: approach (far) → flank
     int ledgeApproach = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNearLedge),
         BT_CreateCondition(CND_OnGround),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateInverter(BT_CreateIsTargetInRange(400.0)),   // still far
-        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(ACT_FlankApproach)
     );
     int ledgeLeap = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNearLedge),
         BT_CreateCondition(CND_OnGround),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(400.0),                       // close enough
-        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
 
@@ -422,17 +426,17 @@ stock int BT_CreateJockeyTree() {
     int narrowApproach = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateCondition(CND_OnGround),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateInverter(BT_CreateIsTargetInRange(350.0)),
-        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(ACT_HugWall)
     );
     int narrowLeap = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateCondition(CND_OnGround),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(350.0),
-        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
 
@@ -448,56 +452,61 @@ stock int BT_CreateJockeyTree() {
     // v5.6: +Acquire + HasTargetLOS + target 口径（同 ledge/narrow）
     int openS0_Approach = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
-        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsNotTargetInRange(400.0),
+        BT_CreateCondition(CND_OnGround),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsNotTargetInRange(400.0),
         BT_CreateAction(ACT_CircleFlank)
     );
     int openS0_Leap = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
-        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(400.0),
+        BT_CreateCondition(CND_OnGround),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(400.0),
         BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
     // Strat 1: Erratic leap — zigzag approach → leap from varied angle
     // v5.6: +Acquire + HasTargetLOS + target 口径（同 ledge/narrow）
     int openS1_Approach = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
-        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsNotTargetInRange(350.0),
+        BT_CreateCondition(CND_OnGround),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsNotTargetInRange(350.0),
         BT_CreateAction(ACT_ErraticApproach)
     );
     int openS1_Leap = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
-        BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(350.0),
+        BT_CreateCondition(CND_OnGround),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateIsTargetInRange(350.0),
         BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
 
     // --- Standard hop attack ---
     // v5.6: 700 → 450 —— 引擎有效 leap 距离实测 250-400u：400-700u 段按
     // ATTACK 大概率被引擎拒绝 → 挠击（"跳一下挠一下"）。450u 对齐实测上限。
-    int hopPreCond = BT_CreateSequence(3,
-        BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(450.0)
-    );
-
-    int hopAcquireTarget = BT_CreateAction(JockeyAct_AlternatingHop);
-    // v5.7: 移除 Cooldown(1.2) —— 和 Hunter v5.8/v5.9 同理：冷却期内 hopPreCond
-    // 仍满足（地面+LOS+距离）→ hopSeq FAIL，但 selector 反复选中 → 站桩。
-    // 引擎自带跳跃冷却，插件侧不需要再锁。
-
+    // v5.23: 重建为单层 Sequence —— 原结构（hopPreCond 独立 sequence + Acquire
+    // 后置 + pinnable 守卫在攻击动作之后）有两个问题（任务书 §6.2）：
+    //   a) 守卫在攻击动作之后：守卫 FAIL 时本帧 IN_ATTACK 副作用已发生；
+    //   b) LOS/Range 校验的是攻击前的陈旧黑板 target（任务书 §4.1/§6.1）。
+    // 现在顺序严格为：OnGround → Acquire(写黑板) → LOS(新目标) → Range(新目标)
+    // → Pinnable 守卫(攻击前) → Execute(IN_ATTACK 副作用最后)。
+    // v5.7: 移除 Cooldown(1.2) —— 和 Hunter v5.8/v5.9 同理：冷却期内条件仍满足
+    // → hopSeq FAIL 但 selector 反复选中 → 站桩。引擎自带跳跃冷却，插件侧不
+    // 需要再锁。
     // v5.18 功能 2：挂边/倒地守卫 —— 骑挂边或倒地的人是空转（引擎不成立），
-    // 而 fallback 选人不过滤这两态。守卫放在 hopSeq 外层：目标不可骑时整支
+    // 而 fallback 选人不过滤这两态。守卫必须在攻击动作之前：目标不可骑时整支
     // FAIL，树落到走位分支重找站着的目标。
-    int hopSeq = BT_CreateSequence(3,
-        hopPreCond,
-        hopAcquireTarget,
-        BT_CreateCondition(CND_TargetIsPinnable)
+    int hopSeq = BT_CreateSequence(6,
+        BT_CreateCondition(CND_OnGround),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // Acquire：写黑板 target（优先站立未控，v5.19）
+        BT_CreateCondition(CND_HasTargetLOS),        // LOS：校验新目标
+        BT_CreateIsTargetInRange(450.0),             // Range：校验新目标
+        BT_CreateCondition(CND_TargetIsPinnable),    // Validate：攻击前守卫（§6.2）
+        BT_CreateAction(JockeyAct_AlternatingHop)    // Execute：IN_ATTACK 副作用最后
     );
 
     // Approach: always strafe while closing in

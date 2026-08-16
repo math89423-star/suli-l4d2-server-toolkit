@@ -8,6 +8,11 @@
 //   - Ledge priority: when ledge is between SI and survivor → 90% farthest (pull for fall damage)
 //   - Narrow corridor: pull survivor through chokepoint into infected pack
 //   - Open area: standard mixed target (back-line + front-line disruption)
+// v5.23:
+//   - 尝试-确认分离（任务书 §9）：tongue attempt ≠ tongue confirmed —— 拉人分支
+//     末端改 SmokerAct_TryTongue：持续按压直到 m_tongueVictim>0（引擎拉中）确认
+//     成功（SUCCESS → 外层 Cooldown(1.8) arm），1.2s 超时未拉中 → 短退避 +
+//     FAILURE（不锁冷却）。动作不再"按了就算成功"。SteerPinToAcid 拖拽不受影响。
 // Key behaviors:
 //   - Mixed target: farthest (traditional) + closest (front-line)
 //   - Strafe approach to avoid being an easy snipe target
@@ -31,6 +36,8 @@
 // ---------------------------------------------------------------------------
 
 #define SMOKER_ISOLATION_THRESHOLD 350.0
+#define SMOKER_TONGUE_TRY_TIMEOUT  1.2   // v5.23: 尝试超时（按压窗口，覆盖舌头发射+飞行+挂钩）
+#define SMOKER_TONGUE_BACKOFF      0.5   // v5.23: 超时未拉中后的短退避
 
 BT_Status SmokerAct_AcquireTarget(int client) {
     // v5.6: 选人时效 —— 4s 内刚选过就不重选（原版每次调用重掷 40% 最近/
@@ -211,6 +218,68 @@ BT_Status SmokerAct_SteerPinToAcid(int client) {
 }
 
 // ============================================================================
+// v5.23: SmokerAct_TryTongue —— 尝试-确认分离（任务书 §9：tongue attempt ≠
+// tongue confirmed）
+// 原版 6 个拉人分支末端全是 ACT_Attack："按了 IN_ATTACK 就返回 SUCCESS"，
+// 外层 Cooldown(1.8) 把"尝试"当"成功"武装冷却，舌头冷却期还贴脸挠击。
+// 现在改为处理态动作：持续按压 IN_ATTACK，直到
+//   1. m_tongueVictim > 0（引擎真实拉中）→ SI_AbilityMarkConfirmed +
+//      SUCCESS —— 外层 Cooldown(1.8) 只在此时 arm（拉中确认 → 1.8s 反挠击
+//      窗口，拉断舌头后不会立刻再按）；
+//   2. 1.2s 超时仍未拉中（舌头被闪避/打断/射程假阳性）→ SI_AbilityBackoff
+//      (0.5) + FAILURE —— 不 arm 外层冷却，树立即回走位/选人分支重试。
+// 引擎判据说明：m_tongueVictim 在拉中瞬间才 > 0，飞行中无已验证 prop
+// （m_tongueEntity 未在本服 netprops 验证；left4dhooks PlayerAnimState 系
+// 可选 native 不可依赖）。用 1.2s 超时窗口覆盖"发射→飞行→挂钩"全程，
+// 超时未拉中即视为尝试失败退避，不做假成功。
+// 拉中后的拖拽 steering（SmokerAct_SteerPinToAcid）与 pinSeq 分支不受影响。
+// ============================================================================
+
+BT_Status SmokerAct_TryTongue(int client) {
+    float now = GetGameTime();
+
+    // 退避中（上一次尝试超时后的短惩罚）：不按键直接失败，交走位分支
+    if (SI_AbilityBackoffActive(client, "_smoker")) return BT_FAILURE;
+
+    // --- 已拉中：引擎 latch 确认（与 pinSeq/SteerPinToAcid 同口径）---
+    int victim = GetEntPropEnt(client, Prop_Send, "m_tongueVictim");
+    if (victim > 0) {
+        SI_AbilityMarkConfirmed(client, "_smoker", now);
+        SI_AbilitySetState(client, "_smoker", ABILITY_CONFIRMED);
+        return BT_SUCCESS;   // 触发外层 Cooldown arm（1.8s 反挠击窗口）
+    }
+
+    // --- 尝试计时：首次进入或上次残留超时 → 重新计时 ---
+    float tryAt = SI_AbilityGetTryAt(client, "_smoker");
+    if (tryAt > 0.0 && (now - tryAt) > SMOKER_TONGUE_TRY_TIMEOUT) tryAt = 0.0;
+    if (tryAt <= 0.0) {
+        SI_AbilityMarkTry(client, "_smoker", now);
+        SI_AbilitySetState(client, "_smoker", ABILITY_TRYING);
+        tryAt = now;
+    }
+
+    // --- 持续按压：锁瞄黑板 target（Sequence 每 tick 重评首条件，目标移动时
+    //     这里的瞄准保持跟随；mode3Pull 序列无 SnapAim 节点，靠本动作兜住）---
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], dir[3], ang[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, dir);
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
+    BT_AddButton(client, IN_ATTACK);
+
+    // --- 尝试超时未拉中：短退避 + FAILURE（不锁冷却，立即重评分支）---
+    if ((now - tryAt) > SMOKER_TONGUE_TRY_TIMEOUT) {
+        SI_AbilityBackoff(client, "_smoker", now, SMOKER_TONGUE_BACKOFF);
+        return BT_FAILURE;
+    }
+    return BT_RUNNING;   // 继续按住直到拉中或超时
+}
+
+// ============================================================================
 // v3.2: Terrain-aware target acquisition
 // ============================================================================
 
@@ -326,7 +395,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(ACT_Attack)
+        BT_CreateAction(SmokerAct_TryTongue)
     );
     // Strat 1: Erratic pull — zigzag approach → pull from varied angle
     // v3.7 FIX: was HasLOS (dead code — pull fires first when HasLOS=true).
@@ -343,7 +412,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(ACT_Attack)
+        BT_CreateAction(SmokerAct_TryTongue)
     );
     // Strat 2: Standard pull — falls through to pullSeq below
 
@@ -360,7 +429,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(ACT_Attack)
+        BT_CreateAction(SmokerAct_TryTongue)
     );
 
     // Narrow: 50/50 target mix → pull through chokepoint
@@ -371,7 +440,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(ACT_Attack)
+        BT_CreateAction(SmokerAct_TryTongue)
     );
 
     // Standard: pull (mixed targeting), check LOS, aim, attack
@@ -383,7 +452,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(ACT_Attack)
+        BT_CreateAction(SmokerAct_TryTongue)
     );
 
     // Retarget every 2s — 孤立度动态变化，持续重新评估最佳目标
@@ -420,7 +489,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateAction(SmokerAct_AcquireBoomedTarget),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
-        BT_CreateAction(ACT_Attack)
+        BT_CreateAction(SmokerAct_TryTongue)
     );
     int mode3Approach = BT_CreateSequence(4,
         BT_CreateIsMode(3),
@@ -462,6 +531,11 @@ stock int BT_CreateSmokerTree() {
     // 现在所有拉人分支包进一个 Cooldown(1.8)：冷却窗口内整个簇 FAIL，
     // 树落到走位/重新选人分支（v3.6 设计意图原样落地），
     // ATTACK 频率从每 tick → 每 1.8s。
+    // v5.23: 语义升级（任务书 §9 尝试-确认分离）—— 末端动作换
+    // SmokerAct_TryTongue：只有 m_tongueVictim>0 拉中返回 SUCCESS 才 arm
+    // 1.8s；失败/超时返回 FAILURE 不消耗冷却（v5.6 框架已保证"失败不 arm"，
+    // 动作本身也不再把"按了"当成功）。尝试期间动作 RUNNING 持续按压，拉中
+    // 后下一 tick 由 root 第 1 子 pinSeq 接管拖拽，冷却期不挠击。
     // ==========================================
     int pullCluster = BT_Create(BTN_SELECTOR);
     BT_AddChild(pullCluster, ledgePullSeq);       // ledge → pull

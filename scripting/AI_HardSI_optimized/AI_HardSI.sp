@@ -160,6 +160,12 @@
 #include "bt_core.inc"
 #include "bt_common.inc"
 
+// v5.22: Charger 真实冲锋确认标记 —— ability_charge 事件置位
+// （云端审查任务书 §8：按 ATTACK ≠ 冲锋成功，只有事件到达才确认）。
+// 必须声明在 bt_charger.inc 之前（bt_charger.inc 的 ChargerAct_TryCharge 消费它，
+// SourcePawn 单遍编译按 include 展开顺序解析符号）。
+float g_fChargerChargeConfirmed[MAXPLAYERS + 1];
+
 // Per-SI behavior trees
 #include "bt_hunter.inc"
 #include "bt_charger.inc"
@@ -179,7 +185,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "5.20.0",
+    version = "5.23.0",
     url = "github.com/breezyplease"
 };
 
@@ -488,38 +494,38 @@ public Action:OnPlayerRunCmd(int client, int &buttons, int &impulse,
         buttons &= ~IN_DUCK;
     }
 
-    // Tick throttle
+    // --- v5.22: Think Rate != Control Rate（云端审查任务书 §2.4）---
+    // 决策（跑树）降频到 TICK_INTERVAL 帧一次；但控制输出（按键/视角/移动
+    // 接管掩码）每帧应用 —— 非决策帧沿用上次决策的累积输出与控制声明。
+    // 原版非决策帧直接 Plugin_Continue 把整帧交还 Valve AI → "BT 帧 / Valve
+    // 帧"交替接管（BT 要埋伏、Valve 向前跑；BT 绕侧、Valve 直冲）。
+    // 现在非决策帧也执行 BT_ApplyControlFrame：被 BT 接管的输入类别清掉
+    // Valve 原始意图，BT 输出连续生效，消除两套脑子抢方向盘的抖动。
     g_iTickCounter[client]++;
-    if (g_iTickCounter[client] < TICK_INTERVAL) {
-        // For Tanks: we already suppressed jump/duck above → must return Changed
-        if (GetInfectedClass(client) == L4D2Infected_Tank) {
-            return Plugin_Changed;
+    if (g_iTickCounter[client] >= TICK_INTERVAL) {
+        g_iTickCounter[client] = 0;
+
+        // Skip if not bound to a BT
+        if (!BT_IsBound(client)) {
+            return Plugin_Continue;
         }
-        return Plugin_Continue;
+
+        // Reset BT movement accumulators (含 v5.22 控制掩码)
+        BT_ResetMovement(client);
+
+        // v5.18: 齐射状态机（内部 0.5s 节流，每 SI 调用无妨）
+        Wave_EvaluateSync();
+
+        // Set tank aggression mode on blackboard (cached handle, no FindConVar per tick)
+        BB_SetBool(client, "tank_aggro", g_hCvarTankAggroBhop != null && GetConVarBool(g_hCvarTankAggroBhop));
+
+        // Execute Behavior Tree
+        // The BT modifies buttons/angles via BT_AddButton/BT_RemoveButton/BT_SetAimAngles.
+        BT_Tick(client);
     }
-    g_iTickCounter[client] = 0;
 
-    // Skip if not bound to a BT
-    if (!BT_IsBound(client)) {
-        return Plugin_Continue;
-    }
-
-    // Reset BT movement accumulators
-    BT_ResetMovement(client);
-
-    // v5.18: 齐射状态机（内部 0.5s 节流，每 SI 调用无妨）
-    Wave_EvaluateSync();
-
-    // Set tank aggression mode on blackboard (cached handle, no FindConVar per tick)
-    BB_SetBool(client, "tank_aggro", g_hCvarTankAggroBhop != null && GetConVarBool(g_hCvarTankAggroBhop));
-
-    // Execute Behavior Tree
-    // The BT modifies buttons/angles via BT_AddButton/BT_RemoveButton/BT_SetAimAngles.
-    // OnPlayerRunCmd then applies these modifications.
-    BT_Tick(client);
-
-    // Apply accumulated movement changes
-    BT_ApplyMovement(client, buttons);
+    // --- 每帧：应用当前 BT 控制状态（决策帧 = 本帧新输出；非决策帧 = 上次输出）---
+    BT_ApplyControlFrame(client, buttons);
     BT_ApplyAngles(client, angles);
 
     // Handle teleport (used by Tank bhop for velocity override)
@@ -554,6 +560,9 @@ public Action:Event_AbilityUse(Handle:event, String:name[], bool:dontBroadcast) 
 
     } else if (StrEqual(abilityName, "ability_charge")) {
         // Charger charge: signal coordination
+        // v5.22: 真实冲锋确认标记 —— 引擎实际发起冲锋的事件（按 ATTACK ≠ 成功）。
+        // bt_charger.inc 读它才锁 12s 正式冷却（云端审查任务书 §8）。
+        g_fChargerChargeConfirmed[client] = GetGameTime();
         SI_SignalAttack(client);
         return Plugin_Handled;
 
@@ -756,10 +765,20 @@ void Wave_EvaluateSync() {
         total++;
 
         // 就位判定：距最近幸存者 ≤ readyRange 且有 LOS
+        // v5.22 FIX: 注释承诺 LOS，实际只查距离 —— 隔墙/楼上/门后无射线通路
+        // 也被计入 ready，齐射提前发动（云端审查任务书 §12）。补 trace 视线。
         float pos[3];
         GetClientAbsOrigin(i, pos);
         int prox = GetSurvivorProximity(pos);
-        if (prox > 0 && float(prox) <= readyRange) {
+        if (prox <= 0 || float(prox) > readyRange) continue;
+
+        int near = GetClosestSurvivor(pos);
+        if (near <= 0 || !IsSurvivor(near) || !IsPlayerAlive(near)) continue;
+
+        float tPos[3];
+        GetClientAbsOrigin(near, tPos);
+        TR_TraceRayFilter(pos, tPos, MASK_SHOT, RayType_EndPoint, TracerayFilter, i);
+        if (TR_GetFraction() > 0.9) {   // 视线通畅才计就位
             ready++;
         }
     }

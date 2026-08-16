@@ -1,6 +1,10 @@
 // ============================================================================
 // bt_charger.inc — Charger Behavior Tree (v3.2)
 // ============================================================================
+// v5.22（云端审查任务书 §8）：真实冲锋确认 —— 按 IN_ATTACK ≠ 冲锋成功。
+// 冲锋分支统一走 ChargerAct_TryCharge：ability_charge 事件（AI_HardSI.sp
+// 置位 g_fChargerChargeConfirmed）到达才 BT_SUCCESS（arm 外层 12s 冷却）；
+// ~1.1s 未确认 = 引擎拒绝 → 短退避 FAILURE，绝不"Attempt==Success 白锁 12s"。
 // Key behaviors preserved from v2.4:
 //   - Charge proximity blocking (wait until in range)
 //   - Velocity-based prediction (via ability_use event hook)
@@ -230,12 +234,71 @@ BT_Status ChargerAct_AimAtTarget(int client) {
     return BT_SUCCESS;
 }
 
-// Execute charge — press ATTACK after aiming
-BT_Status ChargerAct_Charge(int client) {
+// ============================================================================
+// v5.22: 统一冲锋尝试动作 ChargerAct_TryCharge（云端审查任务书 §8：
+// 按 ATTACK ≠ 冲锋成功）
+// ----------------------------------------------------------------------------
+// 根因：旧 ChargerAct_Charge 每次按 IN_ATTACK 立即 BT_SUCCESS —— 引擎拒绝
+// （冲锋冷却 z_charge_interval=12s / 风阻吞键 / 角度几何 / 距离）时也照样
+// SUCCESS → 外层 BT_CreateCooldown(12.0) 记录 12s 冷却 = "Attempt == Success"，
+// 白锁一个冷却窗口；被拒多少次就白锁多少个窗口。
+// 修法：真实冲锋确认唯一依据 = ability_charge 事件（AI_HardSI.sp
+// Event_AbilityUse 置位 g_fChargerChargeConfirmed[client]=GetGameTime()）。
+// 只有引擎实际发起冲锋才 BT_SUCCESS（arm 外层 12s 冷却）；约 1.1s 未确认
+// = 引擎拒绝 → SI_AbilityBackoff 短退避 0.5-1.0s → BT_FAILURE（外层 Cooldown
+// 在 v5.6 已实现"失败不 arm"，树落冷却期走位分支，绝不锁 12s）。
+// 状态机记账全部走 SI_Ability*（"_charger" 前缀）：
+//   TRYING —— 已按 ATTACK，等真实事件；CONFIRMED —— 事件已到（仅记账）。
+// 冷却源唯一 = 外层 BT_CreateCooldown(12.0)（v4.0.3 对齐 z_charge_interval）；
+// 本动作不用 SI_AbilityStartCooldown，避免内外双计时把间隔叠成 24s。
+#define CHARGER_TRY_TIMEOUT 1.1     // 尝试超时（任务书 0.6-1.2s，取居中）
+#define CHARGER_CONFIRM_WINDOW 2.0  // 确认事件有效窗口（防跨多轮的陈旧标记）
+BT_Status ChargerAct_TryCharge(int client) {
+    float now = GetGameTime();
+
+    // 退避中：不按 ATTACK，FAILURE → 树落冷却期走位分支（v5.1 已有）
+    if (SI_AbilityBackoffActive(client, "_charger")) {
+        return BT_FAILURE;
+    }
+
+    // 进入/续行尝试：非 TRYING（空闲或上次超时后的残留状态）或上次尝试已
+    // 过期（被高优先级分支中断后残留的陈旧 try_at）→ 重新标记开始时刻并
+    // 置 TRYING。SI_SignalAttack 只在尝试开始时发一次（同旧版按压时刻语义，
+    // 事件到达时 .sp 还会再发一次）。
+    float tryAt = SI_AbilityGetTryAt(client, "_charger");
+    if (SI_AbilityGetState(client, "_charger") != ABILITY_TRYING ||
+        now - tryAt > CHARGER_TRY_TIMEOUT) {
+        tryAt = now;
+        SI_AbilityMarkTry(client, "_charger", tryAt);
+        SI_AbilitySetState(client, "_charger", ABILITY_TRYING);
+        SI_SignalAttack(client);
+    }
+
+    // 持续按住 ATTACK + FORWARD（对准上一节点设定的目标方向），直到确认/超时
     BT_AddButton(client, IN_ATTACK);
     BT_AddButton(client, IN_FORWARD);
-    SI_SignalAttack(client);
-    return BT_SUCCESS;
+
+    // 真实确认：ability_charge 事件已到（2s 窗口内）→ 清标记防重复消费、
+    // 记 CONFIRMED、BT_SUCCESS → 外层 Cooldown(12.0) arm（唯一 12s 冷却源）
+    if (g_fChargerChargeConfirmed[client] > 0.0) {
+        if (now - g_fChargerChargeConfirmed[client] <= CHARGER_CONFIRM_WINDOW) {
+            g_fChargerChargeConfirmed[client] = 0.0;
+            SI_AbilitySetState(client, "_charger", ABILITY_CONFIRMED);
+            SI_AbilityMarkConfirmed(client, "_charger", now);
+            return BT_SUCCESS;
+        }
+        // 陈旧标记（上一轮冲锋的残留/跨重生）：丢弃，不当作本次确认
+        g_fChargerChargeConfirmed[client] = 0.0;
+    }
+
+    // 超时未确认 = 引擎拒绝（冲锋冷却/风阻吞键/角度几何/距离）→ 短退避。
+    // 退避期 TryCharge FAILURE 挡住下一 tick 立刻重按，强制 0.5-1.0s 间隔。
+    if (now - tryAt > CHARGER_TRY_TIMEOUT) {
+        SI_AbilityBackoff(client, "_charger", now, GetRandomFloat(0.5, 1.0));
+        return BT_FAILURE;
+    }
+
+    return BT_RUNNING;
 }
 
 // v3.6: Blind charge — charge even without LOS (30% chance).
@@ -261,10 +324,12 @@ BT_Status ChargerAct_BlindCharge(int client) {
         ang[0] = 0.0;  // v5.20: zero pitch
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
-    BT_AddButton(client, IN_ATTACK);
-    BT_AddButton(client, IN_FORWARD);
-    SI_SignalAttack(client);
-    return BT_SUCCESS;
+    // v5.22: 按压与结果解耦 —— 旧版"按 IN_ATTACK 即 SUCCESS"（Attempt==Success，
+    // 引擎拒绝时也假成功白锁 12s）。现在交给 ChargerAct_TryCharge 做真实确认
+    // 状态机：按住 ATTACK 直到 ability_charge 事件才 SUCCESS（arm 外层 12s）；
+    // ~1.1s 未确认 → 短退避 FAILURE（不锁冷却）。盲冲自身 8s 门（_charger_last_blind）
+    // 继续兜底防 spam（被拒后 8s 内不再盲冲，其余冲锋分支照常经退避重试）。
+    return ChargerAct_TryCharge(client);
 }
 
 // v3.6: Step-back then charge — when too close (<200u), back up briefly
@@ -302,8 +367,12 @@ BT_Status ChargerAct_StepBackCharge(int client) {
     }
 
     // Back-up complete → charge now
+    // v5.22: 尝试状态机 —— 真实 ability_charge 事件确认才 SUCCESS（arm 外层
+    // 12s）；被引擎拒绝（冷却/风阻）时 ~1.1s 超时 FAILURE → 交走位分支，
+    // 不再"按了就假成功白锁 12s"（贴脸时若引擎拒绝，IN_ATTACK 变近战拳击
+    // 的旧兜底语义仍由引擎侧保留，但不会消耗插件冷却）。
     BB_SetFloat(client, "_charger_backup_until", 0.0);
-    return ChargerAct_Charge(client);
+    return ChargerAct_TryCharge(client);
 }
 stock int BT_CreateChargerTree() {
     // --- Read charge-range cvars (v3.4 FIX: were created but never read) ---
@@ -324,7 +393,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
 
     // === v3.5: Open terrain — 3-way random strategies ===
@@ -346,7 +415,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
     // Strat 1: Erratic charge — zigzag approach → charge
     int openS1_Approach = BT_CreateSequence(5,
@@ -361,7 +430,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
     // Strat 2: Standard — falls through to defaultChargeSeq below
 
@@ -372,7 +441,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(450.0),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
 
     // Low-health desperation charge (v3.8 FIX: added AcquireClosestTarget + HasLOS
@@ -384,7 +453,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
 
     // Coordination attack
@@ -403,7 +472,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ACT_SnapAimToCoordTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
 
     // ==========================================
@@ -417,7 +486,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(900.0),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
 
     // ==========================================
@@ -429,7 +498,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
 
     // ==========================================
@@ -444,7 +513,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
 
     // Default charge: in range + LOS → charge (v3.2 fix: was missing)
@@ -453,7 +522,7 @@ stock int BT_CreateChargerTree() {
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fChargeProx),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
 
     // v3.2 FIX: approach when in range but no LOS (LOS blind-spot deadlock).
@@ -513,6 +582,11 @@ stock int BT_CreateChargerTree() {
     // 走位分支（不按 ATTACK），12s 一到引擎技能就绪 → 立刻再冲，零浪费。
     // 分支相对顺序与 v4.0 一致：出生保护 > pin 判断 > 近距离/盲冲/洪流/
     // 协同/酸液/悬崖/窄巷/开阔/残血/默认。
+    // v5.22（任务书 §8）：簇内所有 ATTACK 动作统一替换为
+    // ChargerAct_TryCharge —— 真实 ability_charge 事件确认才 SUCCESS（arm
+    // 本 12s 冷却），引擎拒绝时 ~1.1s 超时 → 短退避 FAILURE（v5.6 失败不
+    // arm）。外层 Cooldown(12.0) 仍是唯一冷却源；"被拒也白锁 12s"的
+    // Attempt==Success 问题从根上消除。
     // ==========================================
     int chargeCluster = BT_Create(BTN_SELECTOR);
     BT_AddChild(chargeCluster, stepBackCharge);    // too close → step back + charge
@@ -547,7 +621,7 @@ stock int BT_CreateChargerTree() {
     int hangingCharge = BT_CreateSequence(3,
         BT_CreateAcquireHangingTarget(400.0),
         BT_CreateAction(ChargerAct_AimAtTarget),
-        BT_CreateAction(ChargerAct_Charge)
+        BT_CreateAction(ChargerAct_TryCharge)
     );
 
     int chargeRoot = BT_Create(BTN_SELECTOR);

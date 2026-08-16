@@ -651,25 +651,24 @@ stock SI_SignalBoomerHit() {
 	if (g_hCvarCoordEnable != INVALID_HANDLE && GetConVarBool(g_hCvarCoordEnable))
 	{
 		// All SI enter assault mode (no hiding/dithering)
+		// —— 保留：全特感恐慌模式 vscript，无个体意图冲突（任务书 §13.2 例外项）
 		L4D2_StartAssault();
 
-		// Command idle/approaching SI to attack distributed targets
+		// 任务书 §13：协同 = shared intent，不是直接命令接管。
+		// 旧实现（v2.4）曾对所有未 COMMITTED 的 SI bot 直接调用
+		//   L4D2_CommandABot(si, cmdTarget, BOT_CMD_ATTACK) —— 已移除。
+		// 理由：所有 SI bot 均由 AI_HardSI 行为树（BT）管理，Valve 原版 AI 的
+		// attack intent 会与 BT 决策（flank/hold/pounce）逐帧互抢，产生振荡。
+		// Boomer 命中的协同意图只通过共享状态转发，每只 SI 的 BT 自行消费决策：
+		//   - g_bSIBoomerHit（Boomer 命中） → BT 的 CND_IsBoomerActive
+		//   - g_fSIWindowEndTime（攻击窗口）→ BT 的 CND_IsAttackWindow
+		//   - SI_GetCoordinatedTarget()（分散目标，被胆汁覆盖者优先）
+		//     → BT 的 ACT_AcquireCoordTarget
 		new bestTarget = GetRandomSurvivor();
 		if (bestTarget > 0)
 		{
-			for (new si = 1; si <= MaxClients; si++)
-			{
-				if (IsValidClient(si) && IsBotInfected(si) && IsPlayerAlive(si)
-					&& g_iSIAttackState[si] < SI_COMMITTED)
-				{
-					new cmdTarget = SI_GetCoordinatedTarget(si);
-					if (cmdTarget > 0)
-					{
-						L4D2_CommandABot(si, cmdTarget, BOT_CMD_ATTACK);
-					}
-				}
-			}
 			// Common infected rush toward the affected survivor
+			// —— 保留：尸潮 rush（L4D2_RushVictim），非个体 SI 决策（任务书 §13.2 例外项）
 			L4D2_RushVictim(bestTarget, 1000.0);
 		}
 	}
@@ -780,28 +779,17 @@ stock SI_SignalAttack(si) {
 			GetConVarFloat(g_hCvarCoordWindow) : 3.0;
 		g_fSIWindowEndTime = GetGameTime() + window;
 
-		// v2.4: VScript command — force nearby idle SI to join the attack
-		new target = g_iSIAttackTarget[si];
-		if (target > 0 && IsSurvivor(target))
-		{
-			new Float:siPos[3];
-			GetClientAbsOrigin(si, siPos);
-			for (new other = 1; other <= MaxClients; other++)
-			{
-				if (other == si) continue;
-				if (IsValidClient(other) && IsBotInfected(other) && IsPlayerAlive(other)
-					&& g_iSIAttackState[other] < SI_COMMITTED)
-				{
-					// Only command SI that are within range
-					new Float:otherPos[3];
-					GetClientAbsOrigin(other, otherPos);
-					if (GetVectorDistance(siPos, otherPos) < 2000.0)
-					{
-						L4D2_CommandABot(other, target, BOT_CMD_ATTACK);
-					}
-				}
-			}
-		}
+		// 任务书 §13：协同 = shared intent，不是直接命令接管。
+		// 旧实现（v2.4）曾对 2000u 内、攻击状态 < SI_COMMITTED 的队友 SI bot
+		// 直接调用 L4D2_CommandABot(other, target, BOT_CMD_ATTACK) —— 已移除。
+		// 理由：所有 SI bot 均由 AI_HardSI 行为树（BT）管理，Valve 原版 AI 的
+		// attack intent 会与 BT 决策（flank/hold/pounce）逐帧互抢，产生振荡。
+		// 攻击意图只通过共享状态广播，每只 SI 的 BT 自行读取并决定是否改优先级：
+		//   - g_fSIWindowEndTime（攻击窗口）→ BT 的 CND_IsAttackWindow（SI_IsAttackWindow）
+		//   - g_iSIAttackTarget / g_iSIAttackState（per-SI 目标/状态）
+		//     → SI_GetCoordinatedTarget / BT 的 ACT_AcquireCoordTarget
+		//   - g_iSIPinTarget（集火广播）→ BT 的 ACT_AcquirePinTarget
+		// 本函数只负责把"本 SI 发起进攻"这一事实写入共享状态，不做任何 bot 命令接管。
 	}
 }
 
