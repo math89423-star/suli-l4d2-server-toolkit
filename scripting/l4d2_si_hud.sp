@@ -1,10 +1,17 @@
 /**
- * [L4D2] SI HUD — Unified Special Infected HP + Kill Display  v1.13.1
+ * [L4D2] SI HUD — Unified Special Infected HP + Kill Display  v1.13.5
  *
  * Replaces:
  *   - l4d2_bf_killfeedback    (was kill sounds + center text + chat; now bf does sound only)
  *   - L4D_All_Infected_HUD_HP (persistent SI HP HUD)
  *   - l4d2_si_hp_hud          (per-SI HP bar on hit)
+ *
+ * v1.13.5 (2026-08-16): FIX 中途加入/断线重连玩家团灭回滚错误清零——
+ *   OnMapStart 只拍一次全服快照，之后进服的玩家 g_iSaveWallet 仍是 0/旧值，
+ *   团灭 RestoreScoreState 把他钱包错误回滚。ScoreLoad_Player 恢复存档后
+ *   同步 g_iSaveWallet = 恢复值（"本图开始时的初始值"对该类玩家 = 进图时的
+ *   余额，用户 2026-08-16 定稿：团灭回到本图开局值 + 2000 补偿，其余场景
+ *   跨图永久保留不清零）。
  *
  * v1.13.1 (2026-08-15): 修复 AGM 导弹等超额伤害导致的积分爆炸 bug——
  *   钳制特感/普通僵尸/Witch 伤害分到目标最大血量（AGM 对 Hunter 注入 900000
@@ -809,7 +816,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.13.4"
+#define PLUGIN_VERSION "1.13.5"
 
 // ============================================================================
 // ConVar handles
@@ -1487,6 +1494,11 @@ void ScoreLoad_Player(int client)
         int max = g_cvWalletMax.IntValue;          // v1.13.0: 旧档可能超上限
         if (max > 0 && g_iWallet[client] > max)
             g_iWallet[client] = max;
+        // v1.13.5: 中途加入/断线重连/热加载恢复的玩家同步个人团灭快照——
+        // OnMapStart 只拍一次全服快照，之后进服的玩家快照仍是 0/旧值，
+        // 团灭回滚会把他钱包错误清零；"本图开始时的初始值"对该类玩家
+        // 定义为进图（恢复存档）时的余额（用户 2026-08-16 定稿确认）。
+        g_iSaveWallet[client] = g_iWallet[client];
     }
     delete kv;
 }
