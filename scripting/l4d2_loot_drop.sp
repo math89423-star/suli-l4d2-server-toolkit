@@ -4,7 +4,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "1.8.0"
+#define PLUGIN_VERSION "1.9.0"
 #define CHAT_PREFIX "\x04[战利品]\x01"
 #define MAX_LOOT_ITEMS 16
 
@@ -26,7 +26,8 @@ int g_Count_Throw = 0;
 LootItem g_Pool_Witch[MAX_LOOT_ITEMS];
 int g_Count_Witch = 0;
 
-// 装备池：Tank 必掉 4 选 1（医疗包/电击器/M60/榴弹发射器）
+// 装备池：Tank 必掉 2 选 1（医疗包/电击器 50/50——v1.9.0 移除 M60/榴弹：
+// 两把大杀器可补给弹药后持续作战，Tank 再掉落不合理，用户拍板 2026-08-17）
 LootItem g_Pool_Equip[MAX_LOOT_ITEMS];
 int g_Count_Equip = 0;
 
@@ -51,7 +52,7 @@ public Plugin myinfo =
 {
     name        = "L4D2 Loot Drop",
     author      = "Claude",
-    description = "击杀掉落战利品：小僵尸1%(胆汁/土制), 特感4%(单件), Tank 必掉3件(医疗/重火力+投掷物+小药), Witch 4选1",
+    description = "击杀掉落战利品：小僵尸1%(胆汁/土制), 特感4%(单件), Tank 必掉3件(医疗包/电击器+投掷物+小药), Witch 4选1",
     version     = PLUGIN_VERSION,
     url         = ""
 };
@@ -100,12 +101,11 @@ void LoadTables()
     AddWitch("weapon_first_aid_kit",          "医疗包",     15);
     AddWitch("weapon_defibrillator",          "电击器",     15);
 
-    // —— 装备池：Tank 必掉 4 选 1（医疗包/电击器/M60/榴弹 各25%）——
+    // —— 装备池：Tank 必掉 2 选 1（医疗包/电击器 50/50）——
+    // v1.9.0: 移除 M60/榴弹（可补给弹药后持续作战，Tank 再掉落不合理——用户拍板）
     g_Count_Equip = 0;
     AddEquip("weapon_first_aid_kit",   "医疗包",     25);
     AddEquip("weapon_defibrillator",   "电击器",     25);
-    AddEquip("weapon_rifle_m60",       "M60 轻机枪", 25);
-    AddEquip("weapon_grenade_launcher","榴弹发射器", 25);
 
     // —— 小药池：Tank 必掉 1 个（止痛药/肾上腺素 50/50）——
     g_Count_SmallMed = 0;
@@ -461,7 +461,7 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 
         if (zClass == 8)
         {
-            // ---- Tank：必掉 3 件 = 装备(医疗/电击/M60/榴弹 4选1) + 投掷物 + 小药 ----
+            // ---- Tank：必掉 3 件 = 装备(医疗包/电击器 2选1) + 投掷物 + 小药 ----
             int equipIdx = WeightedPick(g_Pool_Equip, g_Count_Equip);
             int throwIdx = WeightedPick(g_Pool_Throw, g_Count_Throw);
             int medIdx   = WeightedPick(g_Pool_SmallMed, g_Count_SmallMed);
