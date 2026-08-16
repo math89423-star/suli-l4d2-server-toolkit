@@ -9,6 +9,14 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.1（2026-08-16）：**预警 HUD 改固定屏幕中央（用户实测修正）**——
+ * v1.10.0 把 Instructor Hint 锚定在落点 info_target 上，实测背对落点时
+ * 变成屏幕边缘指向箭头（不是用户要的居中提示）→ 改 flags 带 STATIC
+ * （bit 8）："Serverside Hint" 模板走 icon_target = player local_player
+ * 分支，每玩家各自一个、固定屏幕中央显示，无边缘箭头；删除 info_target
+ * 锚点实体（g_iArtWarnEntRef）与 ART_WARN_HINT_OFFSET。倒计时每秒重建、
+ * AGM 俯冲 icon_alert_red、6s 轰炸开始提示、聊天/光圈兜底全部保留。
+ *
  * v1.10.0（2026-08-16）：**火力支援 HUD 预警改游戏内置 Instructor Hint**——
  * 用引擎自带 ⚠️ 图标（icon_alert / icon_alert_red，清单见
  * scripts/instructor_lessons.txt）替换呆傻的 PrintHintText 倒计时：
@@ -286,7 +294,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.0"
+#define PLUGIN_VERSION "1.10.1"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -638,10 +646,10 @@ int       g_iArtWarnBuyer;                    // 召唤者
 float     g_fArtWarnEnd;                      // 预警结束 GameTime
 Handle    g_hArtWarnTimer;                    // 预警光圈心跳
 int       g_iArtWarnLastSec;                  // 上次播报的剩余秒数（每秒倒计时去重）
-// v1.10.0: HUD 预警锚点实体（落点 info_target）——游戏内置 Instructor Hint
-// （icon_alert ⚠️）图标悬浮落点上空，屏幕外时边缘出指向箭头；倒计时每秒
-// 重建 hint（同名单覆盖）。换图/卸载走 Art_WarnHintStop 清理。
-int       g_iArtWarnEntRef;
+// v1.10.1: HUD 预警 = 游戏内置 Instructor Hint（icon_alert ⚠️）固定屏幕中央
+// （STATIC flag → local_player 锚定，每玩家一个）；v1.10.0 的落点锚点实体
+// （g_iArtWarnEntRef / info_target）已删——实测背对落点时变屏幕边缘箭头，
+// 用户要求"就显示在屏幕中央，同时只显示一个"。
 // v1.8.0: AGM导弹状态。g_iArt6MapUses 每图重置（限购计数）；模型/粒子索引在
 // OnMapStart precache（粒子必须注册进 ParticleEffectNames 才能生成，见 V1_PrecacheParticle）
 int       g_iArt6MapUses;                     // 本图 V1 已用次数
@@ -3280,18 +3288,9 @@ void Art_ConfirmStrike(int client, ArtTargetInfo info)
     if (kind == 6)
         g_fArt6CorridorStart = info.corridorStart;
 
-    // v1.10.0: 预警锚点实体——Instructor Hint（icon_alert ⚠️）悬浮落点上空，
-    // 屏幕外时边缘出指向箭头。倒计时每秒重建 hint（同名单覆盖旧实例）。
-    int anchor = CreateEntityByName("info_target");
-    if (anchor > 0)
-    {
-        DispatchSpawn(anchor);
-        float anchorPos[3];
-        anchorPos = target;
-        anchorPos[2] += 5.0;
-        TeleportEntity(anchor, anchorPos, NULL_VECTOR, NULL_VECTOR);
-        g_iArtWarnEntRef = EntIndexToEntRef(anchor);
-    }
+    // v1.10.1: Instructor Hint 固定屏幕中央（STATIC → local_player 锚定），
+    // 无需落点锚点实体（v1.10.0 的 info_target 方案已删：实测出现屏幕边缘
+    // 指向箭头，用户要求"屏幕中央一个"）。
 
     // 结束时刻 = 预警 + 首罐延迟 + 末秒生成 + 落地(fallT) + 落地后燃烧 + 引爆（播报"剩余 x 秒"）
     // v1.7.86: 点燃的罐子对伤害免疫且燃烧结束不自爆（实测"假火"）→ 火灭后引擎引爆
@@ -3326,32 +3325,27 @@ void Art_ConfirmStrike(int client, ArtTargetInfo info)
         g_cvArtWarnTime.FloatValue, duration, radius, height, info.corridorIndex);
 }
 
-// v1.10.0: 火力支援 HUD 预警——游戏内置 Instructor Hint（引擎自带 ⚠️ 图标，
+// v1.10.1: 火力支援 HUD 预警——游戏内置 Instructor Hint（引擎自带 ⚠️ 图标，
 // 图标清单见 scripts/instructor_lessons.txt：icon_alert 黄警告 / icon_alert_red
 // 红紧急）。left4dhooks 包装 instructor_server_hint_create 事件：
-//   - 图标+文字悬浮于锚点实体（落点 info_target）上空 150u，屏幕外时屏幕
-//     边缘自动出指向箭头（no_offscreen=false），force_caption 穿墙可见
+//   - 固定屏幕中央：flags 带 STATIC（bit 8）→ "Serverside Hint" 模板走
+//     icon_target = player local_player 分支，每玩家各自一个、屏幕中央显示；
+//     不再锚定世界落点（v1.10.0 实测问题：锚定落点 → 背对落点时会变成
+//     屏幕边缘指向箭头，用户要求"就显示在屏幕中央，同时只显示一个"）
 //   - 全服单槽"Serverside Hint"（实例类型 2 = 同类型新者覆盖旧者），所以
 //     每秒倒计时直接重建即可，无需先 stop
 //   - 死亡玩家不显示（模板未置 can_open_when_dead）——聊天播报/光圈兜底
-// 失败（锚点丢失/事件创建失败）回退聊天播报，不吞提示。
+// 失败（事件创建失败）回退聊天播报，不吞提示。
 #define ART_WARN_HINT_NAME      "l4d2_shop_art_warn"
 #define ART_WARN_HINT_ICON      "icon_alert"
 #define ART_WARN_HINT_ICON_RED  "icon_alert_red"
-#define ART_WARN_HINT_OFFSET    150.0    // 图标悬浮高度（落点上方）
+#define ART_WARN_HINT_FLAGS     (L4D2_IHFLAG_STATIC | L4D2_IHFLAG_PULSE_URGENT)
 
 void Art_WarnHintShow(const char[] caption, const char[] icon, int timeout)
 {
-    int ent = EntRefToEntIndex(g_iArtWarnEntRef);
-    if (ent <= 0 || !IsValidEntity(ent))
-    {
-        PrintToChatAll("\x04[火力支援]\x01 %s", caption);
-        return;
-    }
     int color[3] = { 255, 90, 90 };
-    if (!L4D2_CreateInstructorHint(ART_WARN_HINT_NAME, ent, caption, color, icon, icon, "",
-        ART_WARN_HINT_OFFSET, 0.0, timeout, true, false, true,
-        L4D2_IHFLAG_PULSE_URGENT))
+    if (!L4D2_CreateInstructorHint(ART_WARN_HINT_NAME, 0, caption, color, icon, icon, "",
+        0.0, 0.0, timeout, true, false, true, ART_WARN_HINT_FLAGS))
     {
         PrintToChatAll("\x04[火力支援]\x01 %s", caption);
     }
@@ -3360,10 +3354,6 @@ void Art_WarnHintShow(const char[] caption, const char[] icon, int timeout)
 void Art_WarnHintStop()
 {
     L4D2_StopInstructorHint(ART_WARN_HINT_NAME);
-    int ent = EntRefToEntIndex(g_iArtWarnEntRef);
-    if (ent > 0 && IsValidEntity(ent))
-        AcceptEntityInput(ent, "Kill");
-    g_iArtWarnEntRef = 0;
 }
 
 // v1.0.6: 预警光圈心跳（全员可见）——颜色 I-炮击蓝 / II-燃烧黄；预警结束自动停
