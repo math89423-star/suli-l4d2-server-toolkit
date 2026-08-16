@@ -9,6 +9,17 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.0（2026-08-16）：**火力支援 HUD 预警改游戏内置 Instructor Hint**——
+ * 用引擎自带 ⚠️ 图标（icon_alert / icon_alert_red，清单见
+ * scripts/instructor_lessons.txt）替换呆傻的 PrintHintText 倒计时：
+ * 图标+文字悬浮于落点上空（info_target 锚点），屏幕外时屏幕边缘自动出
+ * 指向箭头；每秒倒计时重建 hint（同名单"Serverside Hint"单槽，最新覆盖旧，
+ * 实例类型 2）；AGM 俯冲阶段换红色紧急图标（icon_alert_red + 俯冲时长超时
+ * 自动消失）；轰炸开始提示带 6s 超时，不长期占用 hint 单槽；换图/卸载
+ * 兜底 Art_WarnHintStop 清理。局限：instructor hint 对死亡玩家不显示
+ * （"can_open_when_dead" 未置位），死亡玩家看聊天播报 + 光圈；聊天播报/
+ * 光圈/音效全部保留。
+ *
  * v1.9.1（2026-08-17）：**AGM 1/2 圈层清场彻底化（用户定稿）**——核心区 +
  * 冲击波区对特感伤害统一 99999（含 Tank/Witch：原核心区 900000 秒杀 /
  * 冲击波区分层 特感500/Tank10000/Witch1200 全改为 99999）；余波区分层保留
@@ -275,7 +286,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.9.1"
+#define PLUGIN_VERSION "1.10.0"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -627,6 +638,10 @@ int       g_iArtWarnBuyer;                    // 召唤者
 float     g_fArtWarnEnd;                      // 预警结束 GameTime
 Handle    g_hArtWarnTimer;                    // 预警光圈心跳
 int       g_iArtWarnLastSec;                  // 上次播报的剩余秒数（每秒倒计时去重）
+// v1.10.0: HUD 预警锚点实体（落点 info_target）——游戏内置 Instructor Hint
+// （icon_alert ⚠️）图标悬浮落点上空，屏幕外时边缘出指向箭头；倒计时每秒
+// 重建 hint（同名单覆盖）。换图/卸载走 Art_WarnHintStop 清理。
+int       g_iArtWarnEntRef;
 // v1.8.0: AGM导弹状态。g_iArt6MapUses 每图重置（限购计数）；模型/粒子索引在
 // OnMapStart precache（粒子必须注册进 ParticleEffectNames 才能生成，见 V1_PrecacheParticle）
 int       g_iArt6MapUses;                     // 本图 V1 已用次数
@@ -3265,9 +3280,18 @@ void Art_ConfirmStrike(int client, ArtTargetInfo info)
     if (kind == 6)
         g_fArt6CorridorStart = info.corridorStart;
 
-    // v1.0.8: PrintHintText priming（记忆 l4d2-printhinttext-priming-bug）——
-    // 第一条 hint 必须替换已有 hint 才正常渲染 CJK；空格占位 0.1s 内被倒计时替换
-    PrintHintTextToAll(" ");
+    // v1.10.0: 预警锚点实体——Instructor Hint（icon_alert ⚠️）悬浮落点上空，
+    // 屏幕外时边缘出指向箭头。倒计时每秒重建 hint（同名单覆盖旧实例）。
+    int anchor = CreateEntityByName("info_target");
+    if (anchor > 0)
+    {
+        DispatchSpawn(anchor);
+        float anchorPos[3];
+        anchorPos = target;
+        anchorPos[2] += 5.0;
+        TeleportEntity(anchor, anchorPos, NULL_VECTOR, NULL_VECTOR);
+        g_iArtWarnEntRef = EntIndexToEntRef(anchor);
+    }
 
     // 结束时刻 = 预警 + 首罐延迟 + 末秒生成 + 落地(fallT) + 落地后燃烧 + 引爆（播报"剩余 x 秒"）
     // v1.7.86: 点燃的罐子对伤害免疫且燃烧结束不自爆（实测"假火"）→ 火灭后引擎引爆
@@ -3302,6 +3326,46 @@ void Art_ConfirmStrike(int client, ArtTargetInfo info)
         g_cvArtWarnTime.FloatValue, duration, radius, height, info.corridorIndex);
 }
 
+// v1.10.0: 火力支援 HUD 预警——游戏内置 Instructor Hint（引擎自带 ⚠️ 图标，
+// 图标清单见 scripts/instructor_lessons.txt：icon_alert 黄警告 / icon_alert_red
+// 红紧急）。left4dhooks 包装 instructor_server_hint_create 事件：
+//   - 图标+文字悬浮于锚点实体（落点 info_target）上空 150u，屏幕外时屏幕
+//     边缘自动出指向箭头（no_offscreen=false），force_caption 穿墙可见
+//   - 全服单槽"Serverside Hint"（实例类型 2 = 同类型新者覆盖旧者），所以
+//     每秒倒计时直接重建即可，无需先 stop
+//   - 死亡玩家不显示（模板未置 can_open_when_dead）——聊天播报/光圈兜底
+// 失败（锚点丢失/事件创建失败）回退聊天播报，不吞提示。
+#define ART_WARN_HINT_NAME      "l4d2_shop_art_warn"
+#define ART_WARN_HINT_ICON      "icon_alert"
+#define ART_WARN_HINT_ICON_RED  "icon_alert_red"
+#define ART_WARN_HINT_OFFSET    150.0    // 图标悬浮高度（落点上方）
+
+void Art_WarnHintShow(const char[] caption, const char[] icon, int timeout)
+{
+    int ent = EntRefToEntIndex(g_iArtWarnEntRef);
+    if (ent <= 0 || !IsValidEntity(ent))
+    {
+        PrintToChatAll("\x04[火力支援]\x01 %s", caption);
+        return;
+    }
+    int color[3] = { 255, 90, 90 };
+    if (!L4D2_CreateInstructorHint(ART_WARN_HINT_NAME, ent, caption, color, icon, icon, "",
+        ART_WARN_HINT_OFFSET, 0.0, timeout, true, false, true,
+        L4D2_IHFLAG_PULSE_URGENT))
+    {
+        PrintToChatAll("\x04[火力支援]\x01 %s", caption);
+    }
+}
+
+void Art_WarnHintStop()
+{
+    L4D2_StopInstructorHint(ART_WARN_HINT_NAME);
+    int ent = EntRefToEntIndex(g_iArtWarnEntRef);
+    if (ent > 0 && IsValidEntity(ent))
+        AcceptEntityInput(ent, "Kill");
+    g_iArtWarnEntRef = 0;
+}
+
 // v1.0.6: 预警光圈心跳（全员可见）——颜色 I-炮击蓝 / II-燃烧黄；预警结束自动停
 // v1.0.7: 光圈用 ring 显示半径 + 圆心光柱（显眼，全员可见）+ 每秒倒计时播报
 public Action Timer_ArtWarn(Handle timer)
@@ -3317,11 +3381,19 @@ public Action Timer_ArtWarn(Handle timer)
     if (remain != g_iArtWarnLastSec && remain >= 1)
     {
         g_iArtWarnLastSec = remain;
-        // v1.8.11: AGM导弹倒计时播报导弹发射
+        // v1.10.0: 改游戏内置 Instructor Hint 预警（icon_alert ⚠️ 悬浮落点 +
+        // 每秒重建倒计时；屏幕外时边缘箭头指向落点），替换 PrintHintText。
+        char warnBuf[128];
         if (g_iArtWarnKind == 6)
-            PrintHintTextToAll("[AGM导弹] 导弹发射倒计时：%d 秒", remain);
+        {
+            Format(warnBuf, sizeof(warnBuf), "导弹发射倒计时：%d 秒！", remain);
+            Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
+        }
         else
-            PrintHintTextToAll("[火力支援] 空袭将在 %d 秒后到来，注意躲避！", remain);
+        {
+            Format(warnBuf, sizeof(warnBuf), "空袭将在 %d 秒后到来，注意躲避！", remain);
+            Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
+        }
 
         // v1.8.12: AGM导弹倒计时剩余3秒时播放发射音效（导弹从远处飞来，3秒后到达并出现在天空）
         if (g_iArtWarnKind == 6 && remain == 3)
@@ -3330,7 +3402,7 @@ public Action Timer_ArtWarn(Handle timer)
             // V1_SND_LAUNCH 的 #define 在本行之后，故用字面量避免预处理顺序报错）
             EmitAmbientSound("animation/overpass_jets.wav", g_fArtWarnTarget, 0, SNDLEVEL_RAIDSIREN, _, 1.0);
             LogMessage("[V1] Playing launch warning sound at T-3");
-            PrintHintTextToAll("[AGM导弹] 导弹已发射，正在接近目标！");
+            Art_WarnHintShow("导弹已发射，正在接近目标！", ART_WARN_HINT_ICON, 0);
         }
     }
 
@@ -3380,12 +3452,18 @@ public Action Timer_ArtWarnEnd(Handle timer)
     if (g_iArtWarnKind == 6)
     {
         // v1.8.13: 飞行音效已移到 V1_Launch 内绑定导弹实体，此处只显示提示
-        PrintHintTextToAll("[AGM导弹] 导弹来袭，正在俯冲！");
+        // v1.10.0: 红色紧急图标（icon_alert_red）+ 俯冲时长超时自动消失
+        Art_WarnHintShow("导弹来袭，正在俯冲！", ART_WARN_HINT_ICON_RED,
+            RoundToNearest(g_cvArt6DiveTime.FloatValue) + 1);
         V1_Launch(g_iArtWarnBuyer, g_fArtWarnTarget, g_fArtWarnRadius);
         return Plugin_Continue;
     }
 
-    PrintHintTextToAll("[火力支援] 空袭将在 %.0f 秒后结束，注意躲避！", g_fArtWarnDuration);
+    // v1.10.0: 轰炸开始提示带 6s 超时自动消失，不长期占用 hint 单槽
+    char warnBuf[128];
+    Format(warnBuf, sizeof(warnBuf), "空袭进行中！约 %.0f 秒后结束，注意躲避",
+        g_fArtWarnDuration);
+    Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 6);
     Art_LaunchBarrage(g_iArtWarnBuyer, g_fArtWarnTarget, g_iArtWarnKind,
         g_fArtWarnRadius, g_fArtWarnHeight, g_fArtWarnDuration);
     return Plugin_Continue;
@@ -3695,6 +3773,7 @@ void Art_LaunchCan(int ent, const float pos[3], float height, bool converted, in
 public Action Timer_ArtNotifyEnd(Handle timer)
 {
     PrintToChatAll("\x04[商店]\x01 \x05火炮支援结束\x01，\x03%.0f\x01 秒后可重新购买", g_cvArtCooldown.FloatValue);
+    Art_WarnHintStop();                      // v1.10.0: 清预警 hint + 锚点实体
     return Plugin_Continue;
 }
 
@@ -4253,6 +4332,7 @@ void Art_CleanupAll()
         g_hArtWarnTimer = null;
     }
     g_bArtWarning = false;
+    Art_WarnHintStop();                      // v1.10.0: 换图/卸载兜底清预警 hint + 锚点
 
     for (int i = 1; i <= MaxClients; i++)
     {
@@ -4816,6 +4896,8 @@ void V1_PushItem(int ent, const float pos[3], const float target[3], float coreR
 // 归属铁律：attacker/inflictor = 召唤者（买家），击杀计入其战绩。
 void V1_Detonate(int client, const float target[3], float radius)
 {
+    Art_WarnHintStop();                      // v1.10.0: 命中即清俯冲预警 hint（幂等）
+
     V1_BlastFx(target, radius);
 
     // v1.8.14: 爆炸音效已提前到 V1_Launch（导弹出现时）播放，此处不再播放，避免重复
