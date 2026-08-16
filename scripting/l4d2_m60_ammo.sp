@@ -19,7 +19,7 @@ public Plugin myinfo = {
 
 public void OnPluginStart()
 {
-    g_cvM60Clip = CreateConVar("sm_m60_clip", "450", "M60 clip size", _, true, 150.0);
+    g_cvM60Clip = CreateConVar("sm_m60_clip", "150", "M60 clip size", _, true, 150.0);
     AutoExecConfig(true, "l4d2_m60_ammo");
 }
 

@@ -23,6 +23,78 @@ public void OnPluginStart()
     RegAdminCmd("sm_sw_drain", CmdDrain, ADMFLAG_ROOT, "sm_sw_drain <name|all> [clip]");
     RegAdminCmd("sm_sw_status", CmdStatus, ADMFLAG_ROOT, "sm_sw_status [name|all]");
     RegAdminCmd("sm_sw_common", CmdCommon, ADMFLAG_ROOT, "sm_sw_common <name|all> — spawn common 150u in front of each target");
+    RegAdminCmd("sm_sw_world", CmdWorld, ADMFLAG_ROOT, "sm_sw_world <name> <m60|gl> <clip> — spawn world weapon 100u in front of target");
+    RegAdminCmd("sm_sw_scan", CmdScan, ADMFLAG_ROOT, "sm_sw_scan — 枚举地图上 M60/GL/spawn/ammo 实体状态");
+}
+
+Action CmdScan(int client, int args)
+{
+    char classes[5][64] = {
+        "weapon_rifle_m60", "weapon_grenade_launcher",
+        "weapon_rifle_m60_spawn", "weapon_grenade_launcher_spawn",
+        "weapon_ammo_spawn"
+    };
+    for (int c = 0; c < 5; c++)
+    {
+        int found = 0;
+        int ent = -1;
+        while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
+        {
+            int owner = GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity");
+            int clip = GetEntProp(ent, Prop_Send, "m_iClip1");
+            int extra = GetEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo");
+            float pos[3];
+            GetEntPropVector(ent, Prop_Send, "m_vecOrigin", pos);
+            ReplyToCommand(client, "[swtest] %s ent=%d owner=%d clip=%d extra=%d @(%.0f %.0f %.0f)",
+                classes[c], ent, owner, clip, extra, pos[0], pos[1], pos[2]);
+            found++;
+        }
+        ReplyToCommand(client, "[swtest] %s: %d total", classes[c], found);
+    }
+    return Plugin_Handled;
+}
+
+Action CmdWorld(int client, int args)
+{
+    if (args < 3) { ReplyToCommand(client, "usage: sm_sw_world <name> <m60|gl> <clip>"); return Plugin_Handled; }
+    char target[64], wcls[32], buf[16];
+    GetCmdArg(1, target, sizeof(target));
+    GetCmdArg(2, wcls, sizeof(wcls));
+    GetCmdArg(3, buf, sizeof(buf));
+    int clip = StringToInt(buf);
+
+    char cls[64];
+    if (StrEqual(wcls, "m60")) strcopy(cls, sizeof(cls), "weapon_rifle_m60");
+    else if (StrEqual(wcls, "gl")) strcopy(cls, sizeof(cls), "weapon_grenade_launcher");
+    else { ReplyToCommand(client, "weapon must be m60|gl"); return Plugin_Handled; }
+
+    int count = 0;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (!IsClientInGame(i) || GetClientTeam(i) != 2) continue;
+        char name[64]; GetClientName(i, name, sizeof(name));
+        if (!(StrEqual(target, "all") || StrContains(name, target, false) != -1)) continue;
+
+        int ent = CreateEntityByName(cls);
+        if (ent <= 0) { ReplyToCommand(client, "[swtest] create %s failed", cls); continue; }
+        DispatchSpawn(ent);
+        SetEntProp(ent, Prop_Send, "m_iClip1", clip);
+        SetEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo", 0);
+
+        float pos[3], ang[3], fwd[3];
+        GetClientEyePosition(i, pos);
+        GetClientEyeAngles(i, ang);
+        GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+        pos[0] += fwd[0] * 100.0;
+        pos[1] += fwd[1] * 100.0;
+        pos[2] -= 40.0;
+        TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
+        ReplyToCommand(client, "[swtest] world %s clip=%d ent=%d at (%.0f %.0f %.0f) for %N",
+            cls, clip, ent, pos[0], pos[1], pos[2], i);
+        count++;
+    }
+    if (count == 0) ReplyToCommand(client, "[swtest] no target matched '%s'", target);
+    return Plugin_Handled;
 }
 
 Action CmdCommon(int client, int args)

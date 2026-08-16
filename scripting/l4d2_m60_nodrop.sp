@@ -22,9 +22,17 @@
 //   与 AmmoSets hotgunammo 一致）——否则 M60 reserve 上限 0，给了也被吞；
 //   GL 引擎上限 ammo_grenadelauncher_max 已是 30 不动。
 //
+// v1.2.0（2026-08-16）：地面 0 发 M60/GL 拾取修复（用户实测：NoDrop 后打空
+//   武器留手里→换武器/手动丢下→地面 0 发 M60/GL **引擎拒绝拾取**；满弹可捡、
+//   0 发不可捡实锤）。补 Lux 1.0.9 同款定时扫描：每 1s 扫描无人持有(owner==-1)
+//   且 clip<=0 的 M60/GL → 临时设 clip=1 并标记 → 可拾取；WeaponCanUse 拾取
+//   瞬间减回真实 0 发。GL 一并纳入（本服 GL 打空也会被丢地上）。
+//
+// v1.3.0（2026-08-16）：弹药量定稿（用户拍板）——M60 弹夹 150（l4d2_m60_ammo
+//   sm_m60_clip）+ 备弹 600（ammo_m60_max）；GL 备弹 40（ammo_grenadelauncher_max，
+//   共 40+1=41 发）。新增 sm_gl_ammo_max cvar 管理 GL 上限。
+//
 // 移植自 LuxLuma 的 [L4D2] M60_NoDrop_AmmoPile_patch (GPLv3)。
-// 保留了「地面 0 发 M60 拾取保护」：手动丢出的空 M60 在地面暂时显示 1 发
-// （否则引擎拾取处理异常），玩家拾取瞬间减回 0 发。
 // ============================================================================
 
 #include <sourcemod>
@@ -35,7 +43,7 @@
 #pragma newdecls required
 
 #define GAMEDATA "l4d2_m60_nodrop"
-#define PLUGIN_VERSION "1.1.0"
+#define PLUGIN_VERSION "1.3.0"
 
 Address g_addrM60Drop = Address_Null;
 int g_iM60DropOffset = -1;
@@ -49,6 +57,7 @@ int g_iAmmoM60Offset = -1, g_iAmmoM60Original = -1;
 ConVar g_cvEnable;
 ConVar g_cvAmmoPile;      // v1.1.0: 弹药堆补丁开关
 ConVar g_cvM60AmmoMax;    // v1.1.0: ammo_m60_max 值
+ConVar g_cvGLAmmoMax;     // v1.3.0: ammo_grenadelauncher_max 值
 
 bool g_bM60AddedClip[2049];
 int g_iM60Ref[2049];
@@ -65,8 +74,10 @@ public void OnPluginStart()
 {
     g_cvEnable = CreateConVar("sm_m60_nodrop", "1", "M60 空弹不丢弃补丁开关（0=禁用；运行时改需 reload 生效）", FCVAR_NOTIFY);
     g_cvAmmoPile = CreateConVar("sm_m60_ammopile", "1", "M60/GL 地图弹药堆补弹补丁开关（0=禁用；运行时改需 reload 生效）", FCVAR_NOTIFY);
-    g_cvM60AmmoMax = CreateConVar("sm_m60_ammo_max", "192", "引擎 ammo_m60_max（M60 reserve 上限；0=引擎默认无后备）", FCVAR_NOTIFY);
-    g_cvM60AmmoMax.AddChangeHook(OnM60AmmoMaxChanged);
+    g_cvM60AmmoMax = CreateConVar("sm_m60_ammo_max", "600", "引擎 ammo_m60_max（M60 reserve 上限；0=引擎默认无后备）", FCVAR_NOTIFY);
+    g_cvM60AmmoMax.AddChangeHook(OnAmmoMaxChanged);
+    g_cvGLAmmoMax = CreateConVar("sm_gl_ammo_max", "40", "引擎 ammo_grenadelauncher_max（榴弹 reserve 上限，+1 上膛=总弹数）", FCVAR_NOTIFY);
+    g_cvGLAmmoMax.AddChangeHook(OnAmmoMaxChanged);
     AutoExecConfig(true, "l4d2_m60_nodrop");
 
     Handle hGamedata = LoadGameConfigFile(GAMEDATA);
@@ -82,7 +93,10 @@ public void OnPluginStart()
 
     RegAdminCmd("sm_m60nodrop_status", CmdStatus, ADMFLAG_ROOT, "显示 M60 NoDrop / 弹药堆补丁状态（当前内存字节）");
 
-    ApplyM60AmmoMax();   // 热加载立即生效（正常流程 OnConfigsExecuted 也会执行）
+    // v1.2.0: 地面 0 发武器扫描（Lux 1.0.9 同款）——每 1s 补一次
+    CreateTimer(1.0, Timer_ScanGround, _, TIMER_REPEAT);
+
+    ApplyAmmoMaxCvars();   // 热加载立即生效（正常流程 OnConfigsExecuted 也会执行）
 
     // late load：给已在线的玩家补挂拾取保护钩子
     for (int i = 1; i <= MaxClients; i++)
@@ -179,23 +193,36 @@ void Patch_AmmoPile(Handle hGamedata)
 
 public void OnConfigsExecuted()
 {
-    ApplyM60AmmoMax();
+    ApplyAmmoMaxCvars();
 }
 
-void OnM60AmmoMaxChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+void OnAmmoMaxChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
-    ApplyM60AmmoMax();
+    ApplyAmmoMaxCvars();
 }
 
-void ApplyM60AmmoMax()
+// v1.3.0: 同时管理 M60 与榴弹的引擎 reserve 上限
+void ApplyAmmoMaxCvars()
 {
     ConVar cvar = FindConVar("ammo_m60_max");
     if (cvar == null)
     {
         LogError("[M60NoDrop] 找不到引擎 cvar ammo_m60_max");
-        return;
     }
-    cvar.IntValue = g_cvM60AmmoMax.IntValue;
+    else
+    {
+        cvar.IntValue = g_cvM60AmmoMax.IntValue;
+    }
+
+    cvar = FindConVar("ammo_grenadelauncher_max");
+    if (cvar == null)
+    {
+        LogError("[M60NoDrop] 找不到引擎 cvar ammo_grenadelauncher_max");
+    }
+    else
+    {
+        cvar.IntValue = g_cvGLAmmoMax.IntValue;
+    }
 }
 
 public void OnPluginEnd()
@@ -217,7 +244,7 @@ public void OnPluginEnd()
     }
 }
 
-// ---- 地面 0 发 M60 拾取保护（Lux 1.0.7 同款逻辑）----
+// ---- 地面 0 发 M60/GL 拾取保护（Lux 1.0.7 drop 钩子 + 1.0.9 定时扫描）----
 
 public void OnEntityCreated(int entity, const char[] classname)
 {
@@ -226,10 +253,40 @@ public void OnEntityCreated(int entity, const char[] classname)
 
     g_bM60AddedClip[entity] = false;
 
-    if (classname[0] != 'w' || !StrEqual(classname, "weapon_rifle_m60"))
+    if (classname[0] != 'w')
         return;
+    if (StrEqual(classname, "weapon_rifle_m60") || StrEqual(classname, "weapon_grenade_launcher"))
+        g_iM60Ref[entity] = EntIndexToEntRef(entity);
+}
 
-    g_iM60Ref[entity] = EntIndexToEntRef(entity);
+// v1.2.0: 定时扫描地面 0 发 M60/GL —— 引擎拒绝拾取 0 发武器（用户实测实锤），
+// 临时补 1 发使其可拾取，拾取瞬间减回（WeaponCanUse 钩子）。覆盖地图静态
+// 0 发出生、打空后丢弃、换武器自动丢下等所有来源。
+Action Timer_ScanGround(Handle timer)
+{
+    char classes[2][32] = { "weapon_rifle_m60", "weapon_grenade_launcher" };
+    for (int c = 0; c < 2; c++)
+    {
+        int ent = -1;
+        while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
+        {
+            if (ent < 1 || ent > 2048)
+                continue;
+            if (GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity") != -1)
+                continue;   // 有人持有，跳过
+            if (g_bM60AddedClip[ent])
+                continue;   // 已补过，保持
+            int clip = GetEntProp(ent, Prop_Send, "m_iClip1");
+            if (clip <= 0)
+            {
+                g_bM60AddedClip[ent] = true;
+                SetEntProp(ent, Prop_Send, "m_iClip1", 1);
+                LogMessage("[M60NoDrop] Ground %s (ent %d) clip=%d -> 1 (pickup protection)",
+                    classes[c], ent, clip);
+            }
+        }
+    }
+    return Plugin_Continue;
 }
 
 public void OnClientPutInServer(int client)
@@ -297,5 +354,7 @@ Action CmdStatus(int client, int args)
 
     ConVar cvar = FindConVar("ammo_m60_max");
     ReplyToCommand(client, "[M60NoDrop] ammo_m60_max = %d", cvar != null ? cvar.IntValue : -1);
+    cvar = FindConVar("ammo_grenadelauncher_max");
+    ReplyToCommand(client, "[M60NoDrop] ammo_grenadelauncher_max = %d", cvar != null ? cvar.IntValue : -1);
     return Plugin_Handled;
 }
