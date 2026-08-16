@@ -9,6 +9,12 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.9.1（2026-08-17）：**AGM 1/2 圈层清场彻底化（用户定稿）**——核心区 +
+ * 冲击波区对特感伤害统一 99999（含 Tank/Witch：原核心区 900000 秒杀 /
+ * 冲击波区分层 特感500/Tank10000/Witch1200 全改为 99999）；余波区分层保留
+ * （特感100/Tank6000/Witch800）。si_hud_art6_tank_kill / si_hud_art6_tank_damage
+ * 两个 cvar 随定稿删除（统一 99999 后成死声明，遵循残留 cvar 误判教训）。
+ *
  * v1.8.0（2026-08-15）：新增「火力支援IV-AGM导弹」（artillery6，15000 分）
  * ——仿 BF5 V1 小队增援：单发导弹从天俯冲 + 落点一次瞬爆清场。与 I/II/III
  * 的「持续 N 秒落罐」机制根本不同（那三档走 Art_LaunchBarrage 按秒排队），
@@ -269,7 +275,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.9.0"
+#define PLUGIN_VERSION "1.9.1"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -346,15 +352,13 @@ ConVar g_cvArt5RadiusOut;
 ConVar g_cvArt5RadiusMid;
 ConVar g_cvArt5RadiusSmall;
 // v1.8.0: IV-AGM导弹（artillery6）。单发瞬爆，无 duration 概念，只有杀伤半径 +
-// 俯冲时长 + 各目标类型伤害。三个平衡开关（Tank 秒杀 / 幸存者友伤 / 每图限购）
-// 全部走 cvar，随时热改不用重编。
+// 俯冲时长 + 各目标类型伤害。两个平衡开关（幸存者友伤 / 每图限购）走 cvar，
+// 随时热改不用重编。v1.9.1: Tank 秒杀开关已删（1/2 圈层统一 99999 定稿）。
 ConVar g_cvArt6RadiusOut;
 ConVar g_cvArt6RadiusMid;
 ConVar g_cvArt6RadiusSmall;
 ConVar g_cvArt6DiveTime;    // 俯冲时长（秒），从生成到落地
 ConVar g_cvArt6DiveHeight;  // 俯冲起始高度（落点上方）
-ConVar g_cvArt6TankKill;    // 1=Tank 秒杀 0=按 tank_damage 扣血
-ConVar g_cvArt6TankDamage;  // TankKill=0 时对 Tank 的伤害
 ConVar g_cvArt6Friendly;    // 1=幸存者也被炸（BF5 原味）0=幸存者免伤
 // v1.8.2: 幸存者分圈伤害（用户定稿：内圈秒杀倒地太无脑，改成只有贴脸的才倒地）
 ConVar g_cvArt6SurvInner;   // 内圈半径（秒杀倒地区）
@@ -828,11 +832,7 @@ public void OnPluginStart()
     g_cvArt6DiveHeight = CreateConVar("si_hud_art6_dive_height", "2600.0",
         "Missile spawn height above impact point.", FCVAR_NOTIFY, true, 500.0, true, 6000.0);
 
-    // 平衡三开关（用户可随时热改）
-    g_cvArt6TankKill = CreateConVar("si_hud_art6_tank_kill", "1",
-        "1 = V1 instantly kills Tank, 0 = deal si_hud_art6_tank_damage instead.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvArt6TankDamage = CreateConVar("si_hud_art6_tank_damage", "3000.0",
-        "Damage dealt to Tank when si_hud_art6_tank_kill is 0.", FCVAR_NOTIFY, true, 100.0, true, 20000.0);
+    // 平衡两开关（用户可随时热改；v1.9.1 删 Tank 秒杀开关——1/2 圈层统一 99999）
     g_cvArt6Friendly = CreateConVar("si_hud_art6_friendly_fire", "1",
         "1 = survivors inside blast are killed too (BF5 behaviour), 0 = survivors immune.",
         FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -4822,8 +4822,10 @@ void V1_Detonate(int client, const float target[3], float radius)
 
     // v1.8.16: 三层分区伤害系统（圆柱形，高度 ±1500u）
     // 0-radius*1.38(核心区): 幸存者原分圈伤害逻辑，特感/僵尸秒杀
-    // radius*1.38-2000u(冲击波区): 幸存者震屏无伤，僵尸/特感500伤，只有Charger/Witch/Tank能活
+    // radius*1.38-2000u(冲击波区): 幸存者震屏无伤，僵尸秒杀
     // 2000-3000u(余波区): 幸存者无影响，僵尸100伤秒杀，特感轻伤
+    // v1.9.1: 1/2 圈层（核心区+冲击波区）特感/Tank/Witch 统一 99999 秒杀（用户定稿），
+    // 余波区分层保留（特感100/Tank6000/Witch800）
     float coreRadius = radius * 1.38;              // 核心区扩大 38%（1.2 × 1.15）
     float shockwaveRadius = 2000.0;               // 冲击波区外边界
     float aftershockRadius = 3000.0;              // 余波区外边界
@@ -4927,10 +4929,9 @@ void V1_Detonate(int client, const float target[3], float radius)
         if (bWitch)
         {
             // v1.8.18: Witch 分层伤害（用户定稿）：核心区秒杀，冲击波区1200，余波区800
-            if (inCore)
-                SDKHooks_TakeDamage(ent, attacker, attacker, 10000.0, DMG_GENERIC);
-            else if (inShockwave)
-                SDKHooks_TakeDamage(ent, attacker, attacker, 1200.0, DMG_GENERIC);
+            // v1.9.1: 1/2 圈层统一 99999 秒杀（用户定稿：清场彻底化），余波区 800 保留
+            if (inCore || inShockwave)
+                SDKHooks_TakeDamage(ent, attacker, attacker, 99999.0, DMG_GENERIC);
             else
                 SDKHooks_TakeDamage(ent, attacker, attacker, 800.0, DMG_GENERIC);
             killedWitch++;
@@ -4947,30 +4948,15 @@ void V1_Detonate(int client, const float target[3], float radius)
             int zClass = GetEntProp(ent, Prop_Send, "m_zombieClass");
             bool isTank = (zClass == 8);
 
-            if (inCore)
+            // v1.9.1: 1/2 圈层（核心区+冲击波区）全部特感（含 Tank）统一 99999 秒杀
+            // （用户定稿：清场彻底化；si_hud_art6_tank_kill/damage 已删）
+            if (inCore || inShockwave)
             {
-                // 核心区：Tank 按开关走秒杀或 tank_damage（v1.9.0 恢复 cvar 语义——
-                // v1.8.18 分层后变成死声明）；其他特感一律秒杀
-                if (isTank)
-                {
-                    float tankDmg = g_cvArt6TankKill.BoolValue
-                        ? 900000.0 : g_cvArt6TankDamage.FloatValue;
-                    SDKHooks_TakeDamage(ent, attacker, attacker, tankDmg, DMG_BLAST);
-                }
-                else
-                    SDKHooks_TakeDamage(ent, attacker, attacker, 900000.0, DMG_BLAST);
-            }
-            else if (inShockwave)
-            {
-                // v1.8.18: Tank（zClass==8）冲击波区10000伤，其他特感500伤
-                if (isTank)
-                    SDKHooks_TakeDamage(ent, attacker, attacker, 10000.0, DMG_BLAST);
-                else
-                    SDKHooks_TakeDamage(ent, attacker, attacker, 500.0, DMG_BLAST);
+                SDKHooks_TakeDamage(ent, attacker, attacker, 99999.0, DMG_BLAST);
             }
             else
             {
-                // v1.8.18: Tank 余波区6000伤，其他特感100伤
+                // 余波区：Tank 6000 伤，其他特感 100 伤（v1.8.18 分层保留）
                 if (isTank)
                     SDKHooks_TakeDamage(ent, attacker, attacker, 6000.0, DMG_BLAST);
                 else
