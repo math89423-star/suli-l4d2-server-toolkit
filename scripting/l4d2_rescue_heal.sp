@@ -22,8 +22,10 @@ native int SH_AddWallet(int client, int amount);
 //     吃到 20 回血"为 bug；医疗包引擎自身回血不受影响）
 //   · 积分走 si_hud SH_AddWallet native（可选绑定，si_hud 未加载静默跳过）
 //   · 电击/挂边/递药维持原样（无积分）
+// v1.6: 电击复活积分奖励（用户 2026-08-16 定稿 1000——电击器最稀缺，
+//   奖励最高档）l4d2_rescue_heal_defib_score；实血 +20 保留
 
-#define PLUGIN_VERSION "1.5"
+#define PLUGIN_VERSION "1.6"
 
 ConVar g_hCvarEnable;
 ConVar g_hCvarIncap;
@@ -36,6 +38,7 @@ ConVar g_hCvarAnnounce;
 // v1.5: 积分奖励（0=off；实血奖励保留原 cvar）
 ConVar g_hCvarIncapScore;   // 拉起倒地队友积分
 ConVar g_hCvarMedkitScore;  // 给队友打包积分
+ConVar g_hCvarDefibScore;   // v1.6: 电击复活队友积分
 
 // 状态镜像（0.2s 轮询），用于区分 revive_success 三种来源：挂边拉起 / 电击复活 / 救助倒地
 // L4D2 只有 revive_success 一个复活事件（无 defibrillated 事件），需靠事件前状态区分
@@ -96,6 +99,9 @@ public void OnPluginStart()
         "Score (wallet) rewarded for reviving an incapped teammate (0=off).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
     g_hCvarMedkitScore = CreateConVar("l4d2_rescue_heal_medkit_score", "800",
         "Score (wallet) rewarded for healing a teammate with a medkit (0=off).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    // v1.6: 电击积分（用户 2026-08-16 定稿 1000——电击器最稀缺，奖励最高档）
+    g_hCvarDefibScore = CreateConVar("l4d2_rescue_heal_defib_score", "1000",
+        "Score (wallet) rewarded for defibrillating a teammate (0=off).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
 
     AutoExecConfig(true, "l4d2_rescue_heal");
 
@@ -204,6 +210,8 @@ void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
     else if (defib)
     {
         Reward(rescuer, g_hCvarDefib, "电击复活队友");
+        // v1.6: 电击积分奖励（用户定稿 1000；实血 +20 保留在上方）
+        ScoreReward(rescuer, g_hCvarDefibScore, "电击复活队友");
     }
     else
     {
