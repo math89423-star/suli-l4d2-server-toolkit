@@ -269,7 +269,16 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.8.25"
+#define PLUGIN_VERSION "1.9.0"
+// v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
+// ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
+//   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
+//   Art_ResolveGround（墙面/天花板 → 解析真实地面点），删除 z-=120 悬空 hack；
+// ③ Art_SolveTarget 统一 Preview/Confirm（ArtTargetInfo 缓存 + 0.15s 复用窗口，
+//   绿圈看到什么开枪就确认什么）；④ AGM Attack Corridor（8 方向斜向俯冲走廊判定，
+//   C5 城区窄街/桥下可呼叫，密闭室内明确拒绝）；⑤ spread 重试加 found 标志防用
+//   最后一个 invalid 点；⑥ 新增 l4d2_shop_art_aim_max_dist / l4d2_shop_art_debug。
+// v1.8.25: AGM 爆炸音效前摇对齐 + si_hud 导弹聚合击杀横幅
 // v1.8.24: AGM导弹爆炸后暂停全部特感/小僵尸刷新（默认 20s，si_hud_art6_pause_spawn）——
 //          特感走 specialspawner SS_PauseSpawning，小僵尸走 l4d2_max_common MC_PauseCommon
 // v1.8.23: 购买任意物品后自动关闭商店（不再重开同分类）；打开后无操作 6 秒自动关闭
@@ -379,6 +388,11 @@ ConVar g_cvArtWarnTime;     // v1.0.6: 确认后预警时长（5s）
 ConVar g_cvArtRingOut;      // v1.0.7: 光圈显示半径-开阔地（750）
 ConVar g_cvArtRingMid;      // v1.0.7: 光圈显示半径-高顶（525）
 ConVar g_cvArtRingSmall;    // v1.0.7: 光圈显示半径-矮房（375）
+// v1.9.0: 准星 trace 最大距离（长街/浅角度瞄地；默认 3000，可热调）——原
+// #define ART_AIM_MAX_DIST 2000 硬编码移除
+ConVar g_cvArtAimMaxDist;
+// v1.9.0: 目标解析调试（0=关 1=结果日志 2=详细日志+可视化 3=走廊逐方向）
+ConVar g_cvArtDebug;
 ConVar g_cvRespawnGear;     // v1.5.1: 复活套装装备列表（逗号分隔；近战 weapon_melee|脚本名）
 ConVar g_cvRespawnHealth;   // v1.5.1: 复活套装满血值（0=不动）
 
@@ -386,10 +400,12 @@ ConVar g_cvRespawnHealth;   // v1.5.1: 复活套装满血值（0=不动）
 // 常量（自 si_hud 逐字移植）
 // ============================================================================
 
-#define ART_AIM_MAX_DIST     2000.0   // 准星 trace 最远距离
+#define ART_AIM_MAX_DIST_DEFAULT 3000.0   // v1.9.0: 准星 trace 最远距离默认值（长街/浅角度瞄地；可热调 l4d2_shop_art_aim_max_dist）
 #define ART_CEIL_CLEAR       4096.0   // 向上探测上限（无遮挡 = 室外）
 #define ART_CEIL_LOW         600.0    // 天花板 < 600 且上方非开阔 → 无效（拒绝确认）
 #define ART_CEIL_MID         900.0    // 天花板 ≥ 900 → 中等规模
+#define ART_CEIL_START       200.0    // v1.8.19: ceiling trace 起点抬高（防起伏地形起点在地面内部）；v1.9.0: 返回值加回该偏移 → 净空以 ground 为基准
+#define ART_TARGET_REUSE_WIN 0.15     // v1.9.0: Preview 缓存复用窗口（秒）——绿圈看到什么确认什么
 #define ART_GRAVITY          800.0    // 引擎重力 u/s²（落时 t=sqrt(2h/g)）
 #define ART_MAX_TOTAL        600      // v1.7.95: 单次空袭罐数硬上限（防 cvar 误配超载）
 #define ART_CANS_MIN_PER_SEC 2        // v1.7.96: 每秒落罐数随机范围（用户拍板 2-3）
@@ -428,6 +444,53 @@ ConVar g_cvRespawnHealth;   // v1.5.1: 复活套装满血值（0=不动）
 #define WALLHACK_SLOT       11      // g_ShopTable 槽位（= 透视特感）；v1.7.1: 12→11（v1.7.0 删复活币行使透视滑到 11）
 #define WALLHACK_DURATION   180.0   // v1.8.2: 3 分钟（2026-08-03 用户改回，原 v1.8.1 定稿 300=5 分钟）
 // v1.0.10: 生效期间不可重复购买 → WALLHACK_CAP（900s 续费封顶）已删除
+
+// ============================================================================
+// v1.9.0: 火力支援统一目标结构（任务书：View Hit = Intent / Ground = Target /
+// Environment = Context / Delivery = Capability）。所有 Preview / Confirm /
+// Execute 读取同一份 ArtTargetInfo，杜绝"绿圈看到 A、开枪确认 B"。
+// ============================================================================
+
+enum ArtEnvironment
+{
+    ART_ENV_INVALID = 0,      // 解析失败/未解析
+    ART_ENV_OUTDOOR,          // 正上方开阔无遮挡（标准全规模）
+    ART_ENV_COVERED_OPEN,     // 局部遮挡但侧面/投送方向开放（桥下/雨棚/挑檐/树冠）
+    ART_ENV_INDOOR_HIGH,      // 高净空室内（≥900：大厅/车站/仓库，缩小半径/落高）
+    ART_ENV_INDOOR_LOW        // 低净空室内（600-900：小房，更小规模）
+};
+
+enum ArtFailReason
+{
+    ART_FAIL_NONE = 0,
+    ART_FAIL_NO_AIM_HIT,      // 准星 trace 无命中（瞄天空等）
+    ART_FAIL_NO_GROUND,       // 命中点下方无实心地面
+    ART_FAIL_GROUND_INVALID,  // 地面法线/位置校验失败（墙面/无底空间/超距）
+    ART_FAIL_TOO_LOW,         // 净空低于门槛且上方非开阔
+    ART_FAIL_BLOCKED,         // 落点被遮挡
+    ART_FAIL_NO_ATTACK_CORRIDOR,  // AGM：8 方向均无攻击走廊（密闭室内/隧道）
+    ART_FAIL_TOO_FAR,         // 超出最大目标距离
+    ART_FAIL_SOLID            // 起点/落点在 solid 内
+};
+
+enum struct ArtTargetInfo
+{
+    bool valid;               // 本轮解析是否可用（Environment != INVALID 且 failReason == NONE）
+    float rawHit[3];          // 准星第一视觉命中点（Intent）
+    float rawNormal[3];       // 命中面法线
+    float ground[3];          // 解析出的真实地面点（Target）
+    float groundNormal[3];    // 地面法线
+    float clearance;          // 真实净空（ground.z → 实心遮挡，基准 ground，含起点偏移补偿）
+    bool skyVisible;          // 遮挡上方是否通向天空
+    bool covered;             // 存在 overhead 遮挡（非完全室外）
+    ArtEnvironment environment;
+    ArtFailReason failReason;
+    float radius;             // 该环境下的落点半径
+    float spawnHeight;        // 该环境下的生成高度
+    float solvedAt;           // GameTime（Preview/Confirm 复用窗口）
+    int corridorIndex;        // AGM：选中的攻击走廊方向索引（-1 = 无）
+    float corridorStart[3];   // AGM：走廊起点（导弹生成点）
+}
 
 // ============================================================================
 // 商品表（!shop）——价格/限购编译期写死（改价格需重编译本插件）
@@ -565,6 +628,10 @@ int       g_iArtWarnLastSec;                  // 上次播报的剩余秒数（�
 int       g_iArt6MapUses;                     // 本图 V1 已用次数
 int       g_iArt6MdlIdx = -1;                 // 导弹模型 precache 索引
 bool      g_bArt6AssetOk;                     // 素材就绪（模型+粒子+音效）
+// v1.9.0: 统一目标缓存——Preview 心跳每 tick 刷新，Confirm 在 0.15s 窗口内直接
+// 复用（绿圈看到什么，开枪就确认什么）；AGM 走廊起点供 V1_Launch 使用。
+ArtTargetInfo g_ArtTarget[MAXPLAYERS + 1];
+float     g_fArt6CorridorStart[3];            // v1.9.0: AGM 选中的走廊起点（确认时记录，发射时读取）
 
 // ============================================================================
 // Plugin Info
@@ -847,6 +914,18 @@ public void OnPluginStart()
         "Pre-strike warning seconds after confirm: target ring visible to all + chat broadcast, then cans start falling.", FCVAR_NOTIFY, true, 1.0, true, 30.0);
     g_cvArtWarnTime.SetBounds(ConVarBound_Upper, true, 30.0);
     g_cvArtWarnTime.SetBounds(ConVarBound_Lower, true, 1.0);
+
+    // v1.9.0: 准星 trace 最大距离（长街/浅角度瞄地；原 2000 硬编码 → 可热调）
+    g_cvArtAimMaxDist = CreateConVar("l4d2_shop_art_aim_max_dist", "3000.0",
+        "Max distance (units) of the fire support aim ray.", FCVAR_NOTIFY, true, 500.0, true, 8000.0);
+    g_cvArtAimMaxDist.SetBounds(ConVarBound_Upper, true, 8000.0);
+    g_cvArtAimMaxDist.SetBounds(ConVarBound_Lower, true, 500.0);
+
+    // v1.9.0: 目标解析调试级别（0=关 1=结果日志 2=详细+可视化 3=AGM 走廊逐方向）
+    g_cvArtDebug = CreateConVar("l4d2_shop_art_debug", "0",
+        "Fire support target solver debug level (0-3).", FCVAR_NOTIFY, true, 0.0, true, 3.0);
+    g_cvArtDebug.SetBounds(ConVarBound_Upper, true, 3.0);
+    g_cvArtDebug.SetBounds(ConVarBound_Lower, true, 0.0);
 
     // v1.0.7: 光圈显示半径（收紧前原值档位）——瞄准圈/预警圈用，与轰炸半径解耦
     g_cvArtRingOut = CreateConVar("si_hud_art_ring_out", "750.0",
@@ -2583,39 +2662,41 @@ public Action Timer_ArtAim(Handle timer, int userid)
         return Plugin_Stop;
     }
 
-    // 标记更新：瞄准点 + 圆圈（爆炸范围）+ 光柱；v1.4.2: I-轰炸蓝 / II-燃烧黄 /
-    // I-绿色雨幕绿 / 无效红（用户定稿四色；原 v1.2.0 IV-榴弹雨红已禁用）
-    float target[3];
-    bool valid;
-    Art_AimPoint(client, target, valid);
+    // v1.9.0: 统一目标解析（Intent → Ground → Env → Delivery）+ 缓存到
+    // g_ArtTarget[client]——Preview 每 tick 刷新，Confirm 在窗口内直接复用，
+    // 彻底消除"绿圈看到 A、开枪确认 B"（任务书 §14）
+    int kind = Art_KindOfSlot(g_iArtSlot[client]);
+    ArtTargetInfo info;
+    Art_SolveTarget(client, kind, info);
+    g_ArtTarget[client] = info;
 
-    bool openAbove;
-    float ceiling = Art_FindCeiling(target, openAbove);
-    if (ceiling > 0.0 && ceiling < ART_CEIL_LOW && !openAbove)
-        valid = false;
+    // 标记/圈画在解析出的真实地面点（瞄墙/天花板也落到附近地面，不再贴墙/悬空）
+    float target[3];
+    target = info.valid ? info.ground : info.rawHit;
 
     int color[4] = { 0, 0, 255, 255 };            // 火力支援III-区域轰炸：蓝
     int radius = 150;
-    if (valid)
+    if (info.valid)
     {
-        // v1.0.1: 预览圈按火力类型用对应半径组（与 ConfirmStrike 口径一致）
         // v1.1.0/v1.4.2/v1.4.3: kind = 1 炮击[已禁] / 2 燃烧→III / 3 胆汁雨→I / 4 榴弹雨[已禁] / 5 轰炸→II / 6 小牛AGM
-        int kind = Art_KindOfSlot(g_iArtSlot[client]);
         if (kind == 2)
             color[0] = 255, color[1] = 255, color[2] = 0;   // 火力支援II-地狱烈火：黄
         else if (kind == 3)
             color[0] = 0, color[1] = 255, color[2] = 0;     // 火力支援I-绿色雨幕：绿
         else if (kind == 6)
             color[0] = 128, color[1] = 0, color[2] = 128;   // 火力支援IV-AGM导弹：紫
-        // v1.4.2: kind 5（II-轰炸）落默认分支 = 蓝；kind 1/4 已禁用不可购买
         // v1.0.7/v1.4.2/v1.6.4: 光圈显示用 ring 档位 = 各火力轰炸半径 + 效果半径（v1.6.4 改）
         float ring;
-        Art_RingParams(kind, ceiling, openAbove, ring);
+        Art_RingParams(kind, info.clearance, info.skyVisible, ring);
         radius = RoundToNearest(ring);
     }
     else
     {
         color[0] = 255; color[1] = 0; color[2] = 0;   // 无效红
+        if (g_cvArtDebug.IntValue >= 1)
+            LogMessage("[artillery] aim invalid client=%N env=%d fail=%d clearance=%.0f raw=(%.0f %.0f %.0f)",
+                client, info.environment, info.failReason, info.clearance,
+                info.rawHit[0], info.rawHit[1], info.rawHit[2]);
     }
 
     int marker = EntRefToEntIndex(g_iArtMarker[client]);
@@ -2649,109 +2730,241 @@ public Action Timer_ArtAim(Handle timer, int userid)
             2.0, 2.0, 0, 0.0, color, 0);
         TE_SendToClient(client);
     }
+
+    // v1.9.0: debug 可视化（level ≥ 2）
+    Art_DebugTick(client, info, kind);
     return Plugin_Continue;
 }
 
+// v1.9.0: debug 可视化——rawHit 红点 / ground 绿点 / ceiling 蓝点 / AGM 走廊白
+// beam（仅购买者可见，与瞄准圈一致；level ≥ 2 时绘制）。C5 城区调参用。
+void Art_DebugTick(int client, const ArtTargetInfo info, int kind)
+{
+    if (g_cvArtDebug.IntValue < 2 || g_iBeamLaser <= 0 || g_iBeamHalo <= 0)
+        return;
+
+    float a[3], b[3];
+    int color[4];
+
+    // Raw Aim Hit：红
+    color = { 255, 0, 0, 255 };
+    a = info.rawHit; b = info.rawHit; b[2] += 60.0;
+    TE_SetupBeamPoints(a, b, g_iBeamLaser, g_iBeamHalo, 0, 10, 0.1, 1.5, 1.5, 0, 0.0, color, 0);
+    TE_SendToClient(client);
+
+    // Resolved Ground：绿
+    color = { 0, 255, 0, 255 };
+    a = info.ground; b = info.ground; b[2] += 60.0;
+    TE_SetupBeamPoints(a, b, g_iBeamLaser, g_iBeamHalo, 0, 10, 0.1, 1.5, 1.5, 0, 0.0, color, 0);
+    TE_SendToClient(client);
+
+    // Ceiling Hit：蓝（有遮挡时）
+    if (info.clearance > 0.0)
+    {
+        color = { 0, 0, 255, 255 };
+        a = info.ground; a[2] += info.clearance;
+        b = a; b[2] += 60.0;
+        TE_SetupBeamPoints(a, b, g_iBeamLaser, g_iBeamHalo, 0, 10, 0.1, 1.5, 1.5, 0, 0.0, color, 0);
+        TE_SendToClient(client);
+    }
+
+    // AGM Corridor：白（起点 → 落点）
+    if (kind == 6 && info.corridorIndex >= 0)
+    {
+        color = { 255, 255, 255, 255 };
+        TE_SetupBeamPoints(info.corridorStart, info.ground, g_iBeamLaser, g_iBeamHalo,
+            0, 10, 0.1, 2.0, 2.0, 0, 0.0, color, 0);
+        TE_SendToClient(client);
+    }
+}
+
 // 任意武器左键开火 = 确认轰炸（v1.7.95: 不再切马格南/限定武器，用户拍板简化）
+// v1.9.0: 0.15s 窗口内复用 Preview 缓存（绿圈看到什么确认什么）；超时才重新解析
 public Action Event_WeaponFire(Event event, const char[] name, bool dontBroadcast)
 {
     int client = GetClientOfUserId(event.GetInt("userid"));
     if (client < 1 || !g_bArtAiming[client])
         return Plugin_Continue;
 
-    float target[3];
-    bool valid;
-    Art_AimPoint(client, target, valid);
-    bool openAbove;
-    float ceiling = Art_FindCeiling(target, openAbove);
-    if (ceiling > 0.0 && ceiling < ART_CEIL_LOW && !openAbove)
-        valid = false;
-    LogMessage("[artillery] confirm client=%N valid=%d ceiling=%.0f openAbove=%d target=(%.0f %.0f %.0f)",
-        client, valid, ceiling, openAbove, target[0], target[1], target[2]);
-    if (!valid)
+    int kind = Art_KindOfSlot(g_iArtSlot[client]);
+    ArtTargetInfo info;
+    info = g_ArtTarget[client];
+    if (GetGameTime() - info.solvedAt > ART_TARGET_REUSE_WIN)
+        Art_SolveTarget(client, kind, info);
+
+    LogMessage("[artillery] confirm client=%N valid=%d env=%d fail=%d clearance=%.0f ground=(%.0f %.0f %.0f)",
+        client, info.valid, info.environment, info.failReason, info.clearance,
+        info.ground[0], info.ground[1], info.ground[2]);
+    if (!info.valid)
     {
-        PrintToChat(client, "\x04[商店]\x01 目标无效：需要能落到地面的开阔区域（天花板过低或瞄天空），请重新瞄准开火");
+        Art_PrintFailReason(client, info);
         return Plugin_Continue;                   // 留在瞄准模式，可再次开火
     }
 
     ArtEndDesignate(client, false);
-    Art_ConfirmStrike(client, target);
+    Art_ConfirmStrike(client, info);
     return Plugin_Continue;
 }
 
-// 准星瞄准点（只碰世界固体，不碰玩家/特感）；瞄天花板底面 → 落点下移 120u
-// v1.7.82: 水面支持——水面是 CONTENTS_WATER 不是 brush，MASK_SOLID_BRUSHONLY
-// 不命中 → 瞄水面必报无效；补一次 CONTENTS_WATER trace（水面 = 开阔落点，合法）。
-void Art_AimPoint(int client, float out[3], bool &valid)
+// ============================================================================
+// v1.9.0: 目标解析核心（任务书：View Hit = Intent / Ground = Target）
+// Art_GetAimIntent   — 只做"准星打到哪"（原始命中 + 法线），不做任何判定
+// Art_ResolveGround  — 把 Intent 解析为真实可落点地面（墙/天花板 → 就近地面）
+// Art_FindCeiling    — 净空基准修正：返回真实净空（ground.z 起算）
+// Art_SolveTarget    — Preview/Confirm 共用入口：Intent → Ground → Env → Delivery
+// ============================================================================
+
+#define ART_GROUND_THRESHOLD   0.55    // 命中面法线 z ≥ 此值 = 直接瞄地面（缓坡也算）
+#define ART_GROUND_NORMAL_MIN  0.45    // 最终地面法线下限（允许坡地/楼梯/斜坡）
+#define ART_GROUND_PROBE_DOWN  4096.0  // 向下探测距离（找地板）
+#define ART_GROUND_WALL_BACK   32.0    // 墙面候选沿视线回退步长
+#define ART_GROUND_WALL_TRIES  3       // 墙面候选次数（32/64/96u）
+
+// 准星第一视觉命中（Intent）。只碰世界 brush（不碰玩家/特感/弹丸）；
+// 水面兜底（CONTENTS_WATER）。返回 false = 无命中（瞄天空等）。
+bool Art_GetAimIntent(int client, float rawHit[3], float rawNormal[3])
 {
-    valid = false;
     float eye[3], ang[3], fwd[3], end[3];
     GetClientEyePosition(client, eye);
     GetClientEyeAngles(client, ang);
     GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+    float maxDist = g_cvArtAimMaxDist.FloatValue;
     end = eye;
-    end[0] += fwd[0] * ART_AIM_MAX_DIST;
-    end[1] += fwd[1] * ART_AIM_MAX_DIST;
-    end[2] += fwd[2] * ART_AIM_MAX_DIST;
+    end[0] += fwd[0] * maxDist;
+    end[1] += fwd[1] * maxDist;
+    end[2] += fwd[2] * maxDist;
 
-    char hitType[16];
-    strcopy(hitType, sizeof(hitType), "brush");
     Handle tr = TR_TraceRayFilterEx(eye, end, MASK_SOLID_BRUSHONLY,
         RayType_EndPoint, ShopTraceFilter, client);
     if (TR_DidHit(tr))
     {
-        TR_GetEndPosition(out, tr);
-        float normal[3];
-        TR_GetPlaneNormal(tr, normal);
-        if (normal[2] < -0.7)                     // 瞄到天花板底面 → 落到室内地面
-            out[2] -= 120.0;
-        valid = true;
-    }
-    else
-    {
-        // 水面兜底（瞄天空/无遮挡时此 trace 也无命中 → 保持无效）
-        Handle trw = TR_TraceRayFilterEx(eye, end, CONTENTS_WATER,
-            RayType_EndPoint, ShopTraceFilter, client);
-        if (TR_DidHit(trw))
-        {
-            TR_GetEndPosition(out, trw);
-            valid = true;
-            strcopy(hitType, sizeof(hitType), "water");
-        }
-        delete trw;
+        TR_GetEndPosition(rawHit, tr);
+        TR_GetPlaneNormal(tr, rawNormal);
+        delete tr;
+        return true;
     }
     delete tr;
+
+    // 水面兜底（瞄水面：水平法线，视为合法地面）
+    Handle trw = TR_TraceRayFilterEx(eye, end, CONTENTS_WATER,
+        RayType_EndPoint, ShopTraceFilter, client);
+    if (TR_DidHit(trw))
+    {
+        TR_GetEndPosition(rawHit, trw);
+        rawNormal[0] = 0.0; rawNormal[1] = 0.0; rawNormal[2] = 1.0;
+        delete trw;
+        return true;
+    }
+    delete trw;
+    return false;
 }
 
-// 落点上方找天花板：返回距离；0 = 4096u 内无遮挡（室外）
-// v1.7.82: 薄遮挡穿透——公园树冠/路灯/电线/雨棚是 <50u 的薄 brush（c5m2 实测
-// 开阔室外被树冠误判 ceiling<600 报"目标无效"），穿透后继续向上找，只认
-// ≥50u 的实心结构（楼板/岩石/桥面）为天花板；最多穿透 3 层。
-// v1.7.83: 侧面命中穿透——树干/柱/墙是"竖直柱面"（法线近乎水平），向上 trace
-// 穿树干时侧面命中被判"实心天花板"（17:22 日志 dist=339 实锤）；法线 z>-0.7
-// → 不是天花板，穿透继续。薄遮挡阈值 50→100u（树冠/雨棚常见 50-100u）。
-// v1.7.84: openAbove 输出——最终判定实心天花板的上方是否开阔（再向上 4096u
-// 无遮挡）。平台/桥/单层屋顶上方是天空 → openAbove=true → <600 也放行
-// （罐子从遮挡下 150u 短落爆炸，用户在大平台/桥上也有轰炸效果）；
-// 多层建筑/地下室 → openAbove=false → <600 拒绝（保持 v1.7.80 用户拍板）。
+// 从起点向下探测真实地板：命中 + 法线够竖（非墙面/悬垂面）。忽略所有实体
+// （func_brush 也会漏，与现有落点验证口径一致；头顶隐形实体不干扰地面解析）。
+bool Art_DropProbe(const float from[3], float ground[3], float groundNormal[3])
+{
+    float to[3];
+    to = from;
+    to[2] -= ART_GROUND_PROBE_DOWN;
+    Handle tr = TR_TraceRayFilterEx(from, to, MASK_SOLID,
+        RayType_EndPoint, ShopTraceFilter, -1);
+    if (!TR_DidHit(tr))
+    {
+        delete tr;
+        return false;                     // 无底空间
+    }
+    float normal[3];
+    TR_GetPlaneNormal(tr, normal);
+    if (normal[2] < ART_GROUND_NORMAL_MIN)
+    {
+        delete tr;
+        return false;                     // 命中面是墙面/悬垂 → 不是地板
+    }
+    TR_GetEndPosition(ground, tr);
+    groundNormal = normal;
+    delete tr;
+    return true;
+}
+
+// Intent → Ground：按命中面类型分流
+// ① 直接瞄地面（法线 z ≥ 0.55）：小偏移向上 → 向下重新确认（防路缘/小 brush 边缘）
+// ② 瞄天花板底面（法线 z ≤ -0.7）：从天花板下方往下找该房间地板（不再 z-=120 悬空）
+// ③ 墙面/柱面（法线近水平）：沿视线回退 32/64/96u 各从高处向下探测附近地板
+bool Art_ResolveGround(const float rawHit[3], const float rawNormal[3],
+    const float viewDir[3], float ground[3], float groundNormal[3], ArtFailReason &reason)
+{
+    reason = ART_FAIL_NO_GROUND;
+
+    // ① 直接瞄地面
+    if (rawNormal[2] >= ART_GROUND_THRESHOLD)
+    {
+        float from[3];
+        from = rawHit;
+        from[2] += 20.0;                  // 小偏移向上，避免起点嵌地面
+        if (Art_DropProbe(from, ground, groundNormal))
+        {
+            reason = ART_FAIL_NONE;
+            return true;
+        }
+        // probe 失败（无底空间等）→ 用命中点本身（水面/边缘场景）
+        ground = rawHit;
+        groundNormal = rawNormal;
+        reason = ART_FAIL_NONE;
+        return true;
+    }
+
+    // ② 瞄天花板底面 → 解析该房间地板
+    if (rawNormal[2] <= -0.7)
+    {
+        float from[3];
+        from = rawHit;
+        from[2] -= 10.0;                  // 天花板下方开始向下找
+        if (Art_DropProbe(from, ground, groundNormal))
+        {
+            reason = ART_FAIL_NONE;
+            return true;
+        }
+        return false;                     // 无底空间
+    }
+
+    // ③ 墙面/柱面 → 沿视线回退多档找附近地板
+    for (int i = 1; i <= ART_GROUND_WALL_TRIES; i++)
+    {
+        float cand[3];
+        cand = rawHit;
+        cand[0] -= viewDir[0] * ART_GROUND_WALL_BACK * float(i);
+        cand[1] -= viewDir[1] * ART_GROUND_WALL_BACK * float(i);
+        cand[2] -= viewDir[2] * ART_GROUND_WALL_BACK * float(i);
+        cand[2] += 150.0;                 // 探测起点抬高（从候选上方往下找）
+        if (Art_DropProbe(cand, ground, groundNormal))
+        {
+            reason = ART_FAIL_NONE;
+            return true;
+        }
+    }
+    return false;
+}
+
+// 落点上方找天花板：返回**真实净空**（ground.z → 实心遮挡垂直距离；0 = 4096u 内
+// 无遮挡 = 室外）。v1.9.0 净空基准修正：trace 起点抬高 ART_CEIL_START 防起点嵌
+// 地面，返回时加回该偏移——之前直接用"从 +200 起点算的距离"与 600/900 比较，
+// 真实净空 750 会被算成 550 → 误判 <600 拒绝（任务书 P0-1）。
+// 薄遮挡（树冠/路灯/雨棚 <100u）穿透继续；侧面命中（树干/柱/墙法线近水平）穿透
+// 继续；只认 ≥100u 实心结构（楼板/岩石/桥面）为天花板，最多穿透 16 层。
 float Art_FindCeiling(const float pos[3], bool &openAbove)
 {
     openAbove = false;
     float from[3], to[3];
     from = pos;
-    from[2] += 200.0;   // v1.8.19: 60→200u，防止在起伏地形中起点在地面内部导致误判
+    from[2] += ART_CEIL_START;
     to = from;
     to[2] += ART_CEIL_CLEAR;
 
     // data=-1 → ShopTraceFilter(entity != -1) 恒真 → 忽略所有实体，只算世界几何
     float dist = 0.0;
     int hops = 0;
-    int hits = 0;
     float lastNormal[3] = { 0.0, 0.0, 0.0 };
     float lastHit[3];
-    // v1.8.20: 穿透上限 4→16——狭窄长巷向上 trace 频繁击中两侧墙壁侧面，4 次穿透
-    // 不够到天空 → ceiling 返回低值+openAbove=false → 误拒"目标无效"；提高到 16
-    // 让狭窄地形能穿透更多侧墙最终识别出露天（用户：虽然有些炸屋顶但不应不能释放）
     while (hops < 16)
     {
         Handle tr = TR_TraceRayFilterEx(from, to, MASK_SOLID,
@@ -2762,7 +2975,6 @@ float Art_FindCeiling(const float pos[3], bool &openAbove)
             delete tr;
             break;
         }
-        hits++;
         float frac = TR_GetFraction(tr);
         float seg = frac * (to[2] - from[2]);
         TR_GetEndPosition(lastHit, tr);
@@ -2816,7 +3028,108 @@ float Art_FindCeiling(const float pos[3], bool &openAbove)
         openAbove = !TR_DidHit(tr);
         delete tr;
     }
-    return dist;
+
+    if (dist <= 0.0)
+        return 0.0;
+    return dist + ART_CEIL_START;   // v1.9.0: 净空以 ground 为统一基准
+}
+
+// 环境分类：OUTDOOR（无遮挡）/ COVERED_OPEN（遮挡上方开阔：平台/桥/单层屋顶）/
+// INDOOR_HIGH（≥900 高净空室内）/ INDOOR_LOW（600-900 低净空室内）。
+// <600 且上方非开阔 → 也归 INDOOR_LOW，由调用方按 failReason=TOO_LOW 拒绝
+// （保持 v1.7.80 用户拍板的二值拒绝；净空基准修正后阈值判定更准）。
+ArtEnvironment Art_ClassifyEnvironment(float clearance, bool openAbove, bool &covered)
+{
+    covered = (clearance > 0.0);
+    if (clearance <= 0.0)
+        return ART_ENV_OUTDOOR;
+    if (openAbove)
+        return ART_ENV_COVERED_OPEN;
+    if (clearance >= ART_CEIL_MID)
+        return ART_ENV_INDOOR_HIGH;
+    return ART_ENV_INDOOR_LOW;
+}
+
+// 统一目标解析（Preview 心跳与 Confirm 共用的唯一入口）：
+// Intent → Ground → 净空 → 环境分类 → 半径/高度（kind 分档）→ AGM 走廊判定
+void Art_SolveTarget(int client, int kind, ArtTargetInfo info)
+{
+    info.valid = false;
+    info.failReason = ART_FAIL_NO_AIM_HIT;
+    info.environment = ART_ENV_INVALID;
+    info.corridorIndex = -1;
+    info.clearance = 0.0;
+
+    float eye[3], ang[3], viewDir[3];
+    GetClientEyePosition(client, eye);
+    GetClientEyeAngles(client, ang);
+    GetAngleVectors(ang, viewDir, NULL_VECTOR, NULL_VECTOR);
+
+    if (!Art_GetAimIntent(client, info.rawHit, info.rawNormal))
+    {
+        info.failReason = ART_FAIL_NO_AIM_HIT;
+        return;
+    }
+
+    if (!Art_ResolveGround(info.rawHit, info.rawNormal, viewDir,
+        info.ground, info.groundNormal, info.failReason))
+        return;
+
+    bool openAbove;
+    info.clearance = Art_FindCeiling(info.ground, openAbove);
+    info.skyVisible = openAbove;
+    info.environment = Art_ClassifyEnvironment(info.clearance, openAbove, info.covered);
+
+    // 拒绝级：真实净空 <600 且上方非开阔（保持 v1.7.80 用户拍板；基准已修正）
+    if (info.clearance > 0.0 && info.clearance < ART_CEIL_LOW && !openAbove)
+    {
+        info.failReason = ART_FAIL_TOO_LOW;
+        return;
+    }
+
+    Art_PickParams(kind, info.clearance, openAbove, info.radius, info.spawnHeight);
+
+    // AGM：攻击走廊判定（替代"正上方开放"——斜向俯冲只要存在侧向通道即可投送）
+    if (kind == 6)
+    {
+        int idx = -1;
+        float start[3];
+        float gnd[3];
+        gnd = info.ground;   // enum struct 字段不能直接作数组实参，先拷局部
+        if (!Art_FindAGMCorridor(gnd, start, idx))
+        {
+            info.failReason = ART_FAIL_NO_ATTACK_CORRIDOR;
+            return;
+        }
+        info.corridorIndex = idx;
+        info.corridorStart = start;
+    }
+
+    info.valid = true;
+    info.failReason = ART_FAIL_NONE;
+    info.solvedAt = GetGameTime();
+}
+
+// 失败原因用户反馈（替代一刀切"需要开阔区域"——对 Covered Open/城市峡谷不准确）
+void Art_PrintFailReason(int client, const ArtTargetInfo info)
+{
+    switch (info.failReason)
+    {
+        case ART_FAIL_NO_AIM_HIT:
+            PrintToChat(client, "\x04[商店]\x01 目标无效：视线无命中（请瞄准地面或建筑）");
+        case ART_FAIL_NO_GROUND:
+            PrintToChat(client, "\x04[商店]\x01 目标无效：命中点下方找不到实心地面");
+        case ART_FAIL_GROUND_INVALID:
+            PrintToChat(client, "\x04[商店]\x01 目标无效：地面校验失败（墙面/无底空间）");
+        case ART_FAIL_TOO_LOW:
+            PrintToChat(client, "\x04[商店]\x01 目标无效：净空不足（%.0f u）且上方非开阔", info.clearance);
+        case ART_FAIL_NO_ATTACK_CORRIDOR:
+            PrintToChat(client, "\x04[商店]\x01 无法呼叫 AGM：建筑完全遮挡，无法建立攻击走廊（密闭室内/隧道）");
+        case ART_FAIL_TOO_FAR:
+            PrintToChat(client, "\x04[商店]\x01 目标无效：超出最大距离（%.0f u）", g_cvArtAimMaxDist.FloatValue);
+        default:
+            PrintToChat(client, "\x04[商店]\x01 目标无效：无法在该位置投送，请重新瞄准");
+    }
 }
 
 // 三级参数：室外 / 室内大(≥900) / 室内小(600-900) / 遮挡下短落(<600 且上方开阔)
@@ -2907,7 +3220,11 @@ void Art_RingParams(int kind, float ceiling, bool openAbove, float &ring)
 
 // 确认轰炸（v1.0.6 重构）: 锁定落点 → 5s 预警（光圈全员可见 + 聊天播报）
 // → 预警结束光圈消失、开始落罐（Art_LaunchBarrage）
-void Art_ConfirmStrike(int client, float target[3])
+// 确认轰炸（v1.0.6 重构）: 锁定落点 → 预警（光圈全员可见 + 聊天播报）
+// → 预警结束光圈消失、开始落罐/发射。
+// v1.9.0: 改为接收 Preview 阶段已解析的 ArtTargetInfo——落点 = 缓存的 ground，
+// 半径/高度 = 缓存的 radius/spawnHeight（绿圈看到什么，就炸什么）。
+void Art_ConfirmStrike(int client, ArtTargetInfo info)
 {
     if (g_hArtCans == null)
         g_hArtCans = new ArrayList();
@@ -2915,10 +3232,10 @@ void Art_ConfirmStrike(int client, float target[3])
     // v1.1.0/v1.2.0: kind = 1 炮击 / 2 燃烧 / 3 胆汁雨 / 4 榴弹雨（g_iArtSlot 在确认时未被清除，仍有效）
     int kind = Art_KindOfSlot(g_iArtSlot[client]);
 
-    bool openAbove;
-    float ceiling = Art_FindCeiling(target, openAbove);
-    float radius, height;
-    Art_PickParams(kind, ceiling, openAbove, radius, height);
+    float target[3];
+    target = info.ground;
+    float radius = info.radius;
+    float height = info.spawnHeight;
     float duration = kind == 2 ? g_cvArtDuration2.FloatValue
         : (kind == 3 ? g_cvArt3Duration.FloatValue
         : (kind == 4 ? g_cvArt4Duration.FloatValue
@@ -2930,7 +3247,7 @@ void Art_ConfirmStrike(int client, float target[3])
     g_fArtWarnTarget = target;
     // v1.0.7/v1.4.2/v1.6.4: 光圈显示半径（ring 档位 = 各火力轰炸半径 + 效果半径）与落罐半径分开存
     float ring;
-    Art_RingParams(kind, ceiling, openAbove, ring);
+    Art_RingParams(kind, info.clearance, info.skyVisible, ring);
     g_fArtWarnRing = ring;
     g_fArtWarnRadius = radius;
     g_fArtWarnHeight = height;
@@ -2940,6 +3257,10 @@ void Art_ConfirmStrike(int client, float target[3])
     float warnTime = (kind == 6) ? g_cvArt6WarnTime.FloatValue : g_cvArtWarnTime.FloatValue;
     g_fArtWarnEnd = GetGameTime() + warnTime;
     g_iArtWarnLastSec = 999;   // v1.0.8: 心跳第一 tick 播首秒（prime 已就位）
+
+    // v1.9.0: AGM 记录选中的走廊起点——发射时导弹从走廊起点俯冲（非固定 900u 偏移）
+    if (kind == 6)
+        g_fArt6CorridorStart = info.corridorStart;
 
     // v1.0.8: PrintHintText priming（记忆 l4d2-printhinttext-priming-bug）——
     // 第一条 hint 必须替换已有 hint 才正常渲染 CJK；空格占位 0.1s 内被倒计时替换
@@ -2973,8 +3294,9 @@ void Art_ConfirmStrike(int client, float target[3])
     CreateTimer(g_cvArtWarnTime.FloatValue, Timer_ArtWarnEnd, INVALID_HANDLE,
         TIMER_FLAG_NO_MAPCHANGE);
 
-    LogMessage("[artillery] confirm client=%N target=(%.0f,%.0f,%.0f) ceiling=%.0f warn=%.0fs dur=%.0fs r=%.0f h=%.0f",
-        client, target[0], target[1], target[2], ceiling, g_cvArtWarnTime.FloatValue, duration, radius, height);
+    LogMessage("[artillery] confirm client=%N target=(%.0f,%.0f,%.0f) env=%d clearance=%.0f warn=%.0fs dur=%.0fs r=%.0f h=%.0f corridor=%d",
+        client, target[0], target[1], target[2], info.environment, info.clearance,
+        g_cvArtWarnTime.FloatValue, duration, radius, height, info.corridorIndex);
 }
 
 // v1.0.6: 预警光圈心跳（全员可见）——颜色 I-炮击蓝 / II-燃烧黄；预警结束自动停
@@ -3227,6 +3549,9 @@ public Action Timer_ArtSpawnCan(Handle timer, DataPack dp)
     // 到 z=972 屋顶 vs 目标地面 169，800u 落差 → 全在屋顶爆，地面零效果）。
     // 从生成点向下 trace：首面非目标地面（|end.z - target[2]| > 150）→ 重掷
     // 坐标（≤8 次）；无命中（地面是实体几何）→ 放行（fallback groundZ 兜底）。
+    // v1.9.0: found 标志——8 次重试全失败时回退中心落点，禁止使用最后一个
+    // invalid 点（任务书 §15：散布点失败 fallback = 中心 → 小半径 → skip）。
+    bool found = false;
     for (int tries = 0; tries < 8; tries++)
     {
         float probe[3];
@@ -3237,19 +3562,30 @@ public Action Timer_ArtSpawnCan(Handle timer, DataPack dp)
         if (!TR_DidHit(tr))
         {
             delete tr;
-            break;                             // 下方无实心世界几何 → 放行
+            found = true;                      // 下方无实心世界几何 → 放行
+            break;
         }
         float end[3];
         TR_GetEndPosition(end, tr);
         delete tr;
         if (FloatAbs(end[2] - target[2]) <= 150.0)
-            break;                             // 首面即目标地面 → 落点 OK
+        {
+            found = true;                      // 首面即目标地面 → 落点 OK
+            break;
+        }
         LogMessage("[artillery3] validate reject try=%d endz=%.0f target=%.0f → 重掷",
             tries, end[2], target[2]);
         ang = GetRandomFloat(0.0, 6.2831853);
         r = radius * SquareRoot(GetRandomFloat(0.0, 1.0));
         pos[0] = target[0] + Cosine(ang) * r;
         pos[1] = target[1] + Sine(ang) * r;
+        pos[2] = target[2] + height;
+    }
+    if (!found)
+    {
+        LogMessage("[artillery3] spread fallback to center (8 tries failed) kind=%d", kind);
+        pos[0] = target[0];
+        pos[1] = target[1];
         pos[2] = target[2] + height;
     }
 
@@ -3736,29 +4072,25 @@ public Action Timer_Art3KillPfx(Handle timer, int ref)
 
 public Action Cmd_Art3Test(int client, int args)
 {
-    float target[3];
-    bool valid;
-    Art_AimPoint(client, target, valid);
-    if (!valid)
+    if (client < 1)
     {
-        PrintToChat(client, "\x04[商店]\x01 目标无效——请照准地面/开阔处");
+        ReplyToCommand(client, "[商店] 测试命令需要游戏内管理员执行（控制台无眼位置）");
         return Plugin_Handled;
     }
-    bool openAbove;
-    float ceiling = Art_FindCeiling(target, openAbove);
-    if (ceiling > 0.0 && ceiling < ART_CEIL_LOW && !openAbove)
+    // v1.9.0: 走统一解析（与正式购买/确认同一条路径）
+    ArtTargetInfo info;
+    Art_SolveTarget(client, 3, info);
+    if (!info.valid)
     {
-        PrintToChat(client, "\x04[商店]\x01 目标无效——天花板过低");
+        Art_PrintFailReason(client, info);
         return Plugin_Handled;
     }
-    float radius, height;
-    Art_PickParams(3, ceiling, openAbove, radius, height);
     float pos[3];
-    pos = target;
-    pos[2] += height;
-    Art3_SpawnJar(pos, height, client);
-    PrintToChat(client, "\x04[商店]\x01 火力支援III 测试瓶：h=%.0f（坠落 ~%.1fs 后碎裂）",
-        height, SquareRoot((2.0 * height) / ART_GRAVITY));
+    pos = info.ground;
+    pos[2] += info.spawnHeight;
+    Art3_SpawnJar(pos, info.spawnHeight, client);
+    PrintToChat(client, "\x04[商店]\x01 火力支援III 测试瓶：h=%.0f env=%d（坠落 ~%.1fs 后碎裂）",
+        info.spawnHeight, info.environment, SquareRoot((2.0 * info.spawnHeight) / ART_GRAVITY));
     return Plugin_Handled;
 }
 
@@ -3851,64 +4183,58 @@ public Action Timer_Art4Detonate(Handle timer, DataPack dp)
 // v1.2.0: 空服实测脚手架——准星处单发榴弹（验证坠落→近地空爆→伤害全链路）
 public Action Cmd_Art4Test(int client, int args)
 {
-    float target[3];
-    bool valid;
-    Art_AimPoint(client, target, valid);
-    if (!valid)
+    if (client < 1)
     {
-        PrintToChat(client, "\x04[商店]\x01 目标无效——请照准地面/开阔处");
+        ReplyToCommand(client, "[商店] 测试命令需要游戏内管理员执行（控制台无眼位置）");
         return Plugin_Handled;
     }
-    bool openAbove;
-    float ceiling = Art_FindCeiling(target, openAbove);
-    if (ceiling > 0.0 && ceiling < ART_CEIL_LOW && !openAbove)
+    // v1.9.0: 走统一解析（与正式购买/确认同一条路径）
+    ArtTargetInfo info;
+    Art_SolveTarget(client, 4, info);
+    if (!info.valid)
     {
-        PrintToChat(client, "\x04[商店]\x01 目标无效——天花板过低");
+        Art_PrintFailReason(client, info);
         return Plugin_Handled;
     }
-    float radius, height;
-    Art_PickParams(4, ceiling, openAbove, radius, height);
+    float height = info.spawnHeight;
     if (height > ART4_FUSE_HEIGHT)
         height = ART4_FUSE_HEIGHT;             // 引信特调（与 Timer_ArtSpawnCan kind==4 同口径）
     float pos[3];
-    pos = target;
+    pos = info.ground;
     pos[2] += height;
     Art4_SpawnGrenade(pos, height, client);
-    PrintToChat(client, "\x04[商店]\x01 火力支援IV 测试弹：h=%.0f（引信 ~1.2s，贴近地面空爆）", height);
+    PrintToChat(client, "\x04[商店]\x01 火力支援IV 测试弹：h=%.0f env=%d（引信 ~1.2s，贴近地面空爆）",
+        height, info.environment);
     return Plugin_Handled;
 }
 
 // v1.3.0: 空服实测脚手架——准星单件，走正式 kind=5 分流（随机罐子/榴弹）
 public Action Cmd_Art5Test(int client, int args)
 {
-    float target[3];
-    bool valid;
-    Art_AimPoint(client, target, valid);
-    if (!valid)
+    if (client < 1)
     {
-        PrintToChat(client, "\x04[商店]\x01 目标无效——请照准地面/开阔处");
+        ReplyToCommand(client, "[商店] 测试命令需要游戏内管理员执行（控制台无眼位置）");
         return Plugin_Handled;
     }
-    bool openAbove;
-    float ceiling = Art_FindCeiling(target, openAbove);
-    if (ceiling > 0.0 && ceiling < ART_CEIL_LOW && !openAbove)
+    // v1.9.0: 走统一解析（与正式购买/确认同一条路径）
+    ArtTargetInfo info;
+    Art_SolveTarget(client, 5, info);
+    if (!info.valid)
     {
-        PrintToChat(client, "\x04[商店]\x01 目标无效——天花板过低");
+        Art_PrintFailReason(client, info);
         return Plugin_Handled;
     }
-    float radius, height;
-    Art_PickParams(5, ceiling, openAbove, radius, height);
     DataPack dp = new DataPack();            // 复用 Timer_ArtSpawnCan 正式路径（含 kind=5 随机分流）
-    dp.WriteFloat(target[0]);
-    dp.WriteFloat(target[1]);
-    dp.WriteFloat(target[2]);
-    dp.WriteFloat(radius);
-    dp.WriteFloat(height);
+    dp.WriteFloat(info.ground[0]);
+    dp.WriteFloat(info.ground[1]);
+    dp.WriteFloat(info.ground[2]);
+    dp.WriteFloat(info.radius);
+    dp.WriteFloat(info.spawnHeight);
     dp.WriteCell(client);
     dp.WriteCell(5);
     Timer_ArtSpawnCan(INVALID_HANDLE, dp);
-    PrintToChat(client, "\x04[商店]\x01 火力支援V 测试件：h=%.0f（随机罐子或榴弹，混合比 si_hud_art5_can_pct=%d%%）",
-        height, g_cvArt5CanPct.IntValue);
+    PrintToChat(client, "\x04[商店]\x01 火力支援V 测试件：h=%.0f env=%d（随机罐子或榴弹，混合比 si_hud_art5_can_pct=%d%%）",
+        info.spawnHeight, info.environment, g_cvArt5CanPct.IntValue);
     return Plugin_Handled;
 }
 
@@ -4067,15 +4393,110 @@ public Action Timer_V1KillEnt(Handle timer, any ref)
     return Plugin_Stop;
 }
 
+// ============================================================================
+// v1.9.0: AGM Attack Corridor（攻击走廊）——任务书核心创意升级
+// 与落罐类不同，AGM 是斜向俯冲投送（水平偏移 + 高空下插），只要存在一条
+// 侧面进入路线即可投送，不必正上方开放。C5 城区窄街/桥下/雨棚只要 8 个
+// 方向中有 1 条 clear 走廊 → 可呼叫；密闭室内/隧道 8 方向全 blocked →
+// ART_FAIL_NO_ATTACK_CORRIDOR 明确拒绝（不再靠随机 heuristic 偶尔成功）。
+// ============================================================================
+
+#define ART6_CORRIDOR_DIRS     8       // 走廊采样方向数（45° 步进）
+#define ART6_CORRIDOR_DIST     1200.0  // 走廊起点水平距离（u）
+#define ART6_CORRIDOR_END_FREE 300.0   // 末端容差：距落点水平 ≤300u 内的命中
+                                        // 视为"接近地面的斜插段"不算阻挡
+
+// 走廊 trace 专用 filter：忽略玩家/特感/武器/弹丸/可动物理件（罐子/油桶），
+// 只把世界几何 + func_* + prop_static + prop_dynamic（含门/集装箱等大件）
+// 当阻挡——宁可保守拒绝，也不让导弹穿模建筑。
+public bool Art_TraceFilterCorridor(int entity, int contentsMask, any data)
+{
+    if (entity >= 1 && entity <= MaxClients)
+        return true;                          // 玩家/特感不挡导弹
+    if (!IsValidEntity(entity))
+        return true;
+    char cls[32];
+    GetEntityClassname(entity, cls, sizeof(cls));
+    if (StrContains(cls, "weapon_") == 0)
+        return true;
+    if (StrContains(cls, "_projectile") != -1)
+        return true;
+    if (StrEqual(cls, "prop_physics") || StrEqual(cls, "prop_physics_override"))
+        return true;                          // 可动物理件（罐子/油桶/车残骸）不挡
+    return false;                             // 其余（world/func_*/prop_static/prop_dynamic）参与命中
+}
+
+// 单条走廊检测：起点（高空斜上方）→ 落点。末端 300u 容差内命中地面/近地
+// 结构不算阻挡（导弹斜插末段必然接近地面）。
+bool Art_CorridorClear(const float start[3], const float target[3])
+{
+    Handle tr = TR_TraceRayFilterEx(start, target, MASK_SOLID,
+        RayType_EndPoint, Art_TraceFilterCorridor, 0);
+    bool clear = !TR_DidHit(tr);
+    if (TR_DidHit(tr))
+    {
+        float hit[3];
+        TR_GetEndPosition(hit, tr);
+        float dx = hit[0] - target[0];
+        float dy = hit[1] - target[1];
+        if (SquareRoot(dx * dx + dy * dy) < ART6_CORRIDOR_END_FREE)
+            clear = true;
+    }
+    delete tr;
+    return clear;
+}
+
+// 8 方向采样：0°/45°/.../315°，起点 = 落点 + dir×1200 + diveHeight 高。
+// 找到第一条 clear 走廊即返回（简单版：不打分选优）。全 blocked → false。
+bool Art_FindAGMCorridor(const float target[3], float start[3], int &corridorIndex)
+{
+    corridorIndex = -1;
+    float diveH = g_cvArt6DiveHeight.FloatValue;
+    if (diveH < 500.0) diveH = 500.0;
+
+    for (int i = 0; i < ART6_CORRIDOR_DIRS; i++)
+    {
+        float ang = DegToRad(45.0 * float(i));
+        float s[3];
+        s = target;
+        s[0] += Cosine(ang) * ART6_CORRIDOR_DIST;
+        s[1] += Sine(ang) * ART6_CORRIDOR_DIST;
+        s[2] += diveH;
+
+        bool clear = Art_CorridorClear(s, target);
+        if (g_cvArtDebug.IntValue >= 3)
+            LogMessage("[artillery] corridor dir=%d start=(%.0f %.0f %.0f) clear=%d",
+                i, s[0], s[1], s[2], clear);
+
+        if (clear)
+        {
+            start = s;
+            corridorIndex = i;
+            if (g_cvArtDebug.IntValue >= 1)
+                LogMessage("[artillery] AGM corridor selected dir=%d start=(%.0f %.0f %.0f)",
+                    i, s[0], s[1], s[2]);
+            return true;
+        }
+    }
+    return false;
+}
+
 // v1.8.11: 发射：导弹在落点上方 dive_height、水平偏移 V1_DIVE_OFFSET 处生成，
 // 朝落点插值俯冲。落地 → V1_Detonate。
+// v1.9.0: 起点 = 解析出的攻击走廊起点（方向已确认可投送）；无走廊记录
+// （老版本缓存/异常路径）时回退原固定偏移。
 // 飞行音效在倒计时阶段已播放，这里不再重复。
 void V1_Launch(int client, const float target[3], float radius)
 {
     float start[3];
-    start = target;
-    start[0] += V1_DIVE_OFFSET;
-    start[2] += g_cvArt6DiveHeight.FloatValue;
+    if (g_fArt6CorridorStart[2] > 0.0)
+        start = g_fArt6CorridorStart;
+    else
+    {
+        start = target;
+        start[0] += V1_DIVE_OFFSET;
+        start[2] += g_cvArt6DiveHeight.FloatValue;
+    }
 
     int ent = CreateEntityByName("prop_dynamic_override");
     if (ent <= 0)
@@ -4438,7 +4859,7 @@ void V1_Detonate(int client, const float target[3], float radius)
         // 判断所在区域
         bool inCore = (dist2 <= core2);                          // 0-radius*1.38 核心区
         bool inShockwave = !inCore && (dist2 <= shockwave2);     // 核心区-2000u 冲击波区
-        bool inAftershock = !inCore && !inShockwave;             // 2000-3000u 余波区
+        // 余波区 = !inCore && !inShockwave（2000-3000u），用 else 分支隐含
 
         if (bItem)
         {
@@ -4482,8 +4903,16 @@ void V1_Detonate(int client, const float target[3], float radius)
 
             if (inCore)
             {
-                // 核心区：秒杀所有特感
-                SDKHooks_TakeDamage(ent, attacker, attacker, 900000.0, DMG_BLAST);
+                // 核心区：Tank 按开关走秒杀或 tank_damage（v1.9.0 恢复 cvar 语义——
+                // v1.8.18 分层后变成死声明）；其他特感一律秒杀
+                if (isTank)
+                {
+                    float tankDmg = g_cvArt6TankKill.BoolValue
+                        ? 900000.0 : g_cvArt6TankDamage.FloatValue;
+                    SDKHooks_TakeDamage(ent, attacker, attacker, tankDmg, DMG_BLAST);
+                }
+                else
+                    SDKHooks_TakeDamage(ent, attacker, attacker, 900000.0, DMG_BLAST);
             }
             else if (inShockwave)
             {
@@ -4516,7 +4945,7 @@ void V1_Detonate(int client, const float target[3], float radius)
                     continue;
 
                 float dist = SquareRoot(dist2);
-                float innerR  = 80.0;  // v1.8.7: 硬编码80u秒杀区
+                float innerR  = g_cvArt6SurvInner.FloatValue;  // v1.9.0: 读 cvar（默认 80，v1.8.7 硬编码值）
                 float dmgIn   = g_cvArt6SurvDmgIn.FloatValue;
                 float dmgOut  = g_cvArt6SurvDmgOut.FloatValue;
 
