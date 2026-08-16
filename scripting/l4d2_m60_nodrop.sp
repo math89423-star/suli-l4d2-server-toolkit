@@ -1,27 +1,30 @@
 // ============================================================================
-// L4D2 M60 NoDrop — 防止 M60 空弹后被引擎自动丢弃
+// L4D2 M60 NoDrop + AmmoPile — M60 空弹不丢弃 + M60/GL 可通过地图弹药堆补弹
 //
-// 原理（2026-08-20 对运行中 server_srv.so 反汇编验证）：
+// v1.0.0（2026-08-16）：M60 空弹不丢弃。
+//   原理（对运行中 server_srv.so 反汇编验证）：
 //   CRifle_M60::PrimaryAttack() 在 m_iClip1 == 0 时执行：
 //     CCSPlayer::DropWeapon(owner, weapon, true, NULL)
 //     + CBaseCombatCharacter::SwitchToNextBestWeapon(NULL)
 //     + CBaseEntity::SUB_StartFadeOut(...)
-//   整块丢弃逻辑。
-//   分支指令为 `0F 85 67 F9 FF FF`（jnz rel32，正常返回路径在 0x...67a）：
-//   clip != 0 → jnz 跳走（正常）；clip == 0 → 落入丢弃块。
-//   补丁：偏移 222 处字节 0x85 -> 0x8D（jnz -> jge）。clip 恒 >= 0，
-//   SF==OF 恒成立 → 跳转恒走正常返回路径 → 丢弃块永不执行。
-//   对 Windows 构建（0x75 jne 短跳）同样处理：0x75 -> 0xEB。
+//   分支指令 `0F 85 67 F9 FF FF`（jnz rel32）：clip != 0 → 跳走（正常）；
+//   clip == 0 → 落入丢弃块。补丁：偏移 222 处字节 0x85 -> 0x8D
+//   （jnz -> jge，clip 恒 >= 0 → 跳转恒走正常返回 → 丢弃块永不执行）。
+//   Windows 构建（0x75 jne 短跳）同样处理：0x75 -> 0xEB。
 //   应用前校验字节，版本更新导致偏移变化时只报错不打补丁（不写坏内存）。
 //
-// 移植自 LuxLuma 的 [L4D2] M60_NoDrop_AmmoPile_patch (GPLv3)。
-// 去掉了 ammo pile 补丁（CWeaponAmmoSpawn::Use）与弹药量 cvar 部分：
-// 本服 M60 后备弹药由 l4d2_ammo_set (AmmoSets, hotgunammo 192) 管理，
-// 弹药补充由商店体系负责（见 l4d2_shop），地图 ammo pile 是否给 M60 补弹
-// 后续如需再单独处理。
+// v1.1.0（2026-08-16）：弹药堆补丁（用户拍板，GPT 调研 + 本机反汇编双重确认）——
+//   CWeaponAmmoSpawn::Use() 按武器 ID 排除 M60/GL 给弹：
+//     weapon->GetWeaponID(); cmp $0x15(%eax) /* GL=21 */ je reject;
+//     cmp $0x25(%eax) /* M60=37 */ je reject;
+//   补丁：偏移 81/101 处字节 0x15/0x25 -> 0xFF（武器 ID 永不匹配 → 排除失效，
+//   弹药堆正常给弹）。+ ammo_m60_max 设非零（cvar sm_m60_ammo_max 默认 192，
+//   与 AmmoSets hotgunammo 一致）——否则 M60 reserve 上限 0，给了也被吞；
+//   GL 引擎上限 ammo_grenadelauncher_max 已是 30 不动。
 //
-// 保留了 Lux 的「地面 0 发 M60 拾取保护」：手动丢出的空 M60 在地面暂时
-// 显示 1 发（否则引擎拾取处理异常），玩家拾取瞬间减回 0 发。
+// 移植自 LuxLuma 的 [L4D2] M60_NoDrop_AmmoPile_patch (GPLv3)。
+// 保留了「地面 0 发 M60 拾取保护」：手动丢出的空 M60 在地面暂时显示 1 发
+// （否则引擎拾取处理异常），玩家拾取瞬间减回 0 发。
 // ============================================================================
 
 #include <sourcemod>
@@ -32,21 +35,28 @@
 #pragma newdecls required
 
 #define GAMEDATA "l4d2_m60_nodrop"
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "1.1.0"
 
 Address g_addrM60Drop = Address_Null;
 int g_iM60DropOffset = -1;
 int g_iM60DropOriginalByte = -1;
 
+// v1.1.0: 弹药堆补丁状态
+Address g_addrAmmoUse = Address_Null;
+int g_iAmmoGLOffset = -1, g_iAmmoGLOriginal = -1;
+int g_iAmmoM60Offset = -1, g_iAmmoM60Original = -1;
+
 ConVar g_cvEnable;
+ConVar g_cvAmmoPile;      // v1.1.0: 弹药堆补丁开关
+ConVar g_cvM60AmmoMax;    // v1.1.0: ammo_m60_max 值
 
 bool g_bM60AddedClip[2049];
 int g_iM60Ref[2049];
 
 public Plugin myinfo = {
-    name = "L4D2 M60 NoDrop",
+    name = "L4D2 M60 NoDrop + AmmoPile",
     author = "claude (adapted from LuxLuma)",
-    description = "M60 空弹不丢弃（patch CRifle_M60::PrimaryAttack）+ 地面 0 发 M60 拾取保护",
+    description = "M60 空弹不丢弃（patch CRifle_M60::PrimaryAttack）+ M60/GL 弹药堆补弹（patch CWeaponAmmoSpawn::Use）+ 地面 0 发 M60 拾取保护",
     version = PLUGIN_VERSION,
     url = ""
 };
@@ -54,6 +64,9 @@ public Plugin myinfo = {
 public void OnPluginStart()
 {
     g_cvEnable = CreateConVar("sm_m60_nodrop", "1", "M60 空弹不丢弃补丁开关（0=禁用；运行时改需 reload 生效）", FCVAR_NOTIFY);
+    g_cvAmmoPile = CreateConVar("sm_m60_ammopile", "1", "M60/GL 地图弹药堆补弹补丁开关（0=禁用；运行时改需 reload 生效）", FCVAR_NOTIFY);
+    g_cvM60AmmoMax = CreateConVar("sm_m60_ammo_max", "192", "引擎 ammo_m60_max（M60 reserve 上限；0=引擎默认无后备）", FCVAR_NOTIFY);
+    g_cvM60AmmoMax.AddChangeHook(OnM60AmmoMaxChanged);
     AutoExecConfig(true, "l4d2_m60_nodrop");
 
     Handle hGamedata = LoadGameConfigFile(GAMEDATA);
@@ -62,10 +75,14 @@ public void OnPluginStart()
 
     if (g_cvEnable.BoolValue)
         Patch_M60_Drop(hGamedata);
+    if (g_cvAmmoPile.BoolValue)
+        Patch_AmmoPile(hGamedata);
 
     delete hGamedata;
 
-    RegAdminCmd("sm_m60nodrop_status", CmdStatus, ADMFLAG_ROOT, "显示 M60 NoDrop 补丁状态（当前内存字节）");
+    RegAdminCmd("sm_m60nodrop_status", CmdStatus, ADMFLAG_ROOT, "显示 M60 NoDrop / 弹药堆补丁状态（当前内存字节）");
+
+    ApplyM60AmmoMax();   // 热加载立即生效（正常流程 OnConfigsExecuted 也会执行）
 
     // late load：给已在线的玩家补挂拾取保护钩子
     for (int i = 1; i <= MaxClients; i++)
@@ -115,6 +132,72 @@ void Patch_M60_Drop(Handle hGamedata)
         offset, byte, byte == 0x75 ? "0xEB" : "0x8D");
 }
 
+// v1.1.0: 弹药堆补丁 —— CWeaponAmmoSpawn::Use 按武器 ID 排除 M60/GL 给弹
+// （cmp $0x15 GL / cmp $0x25 M60 → je reject）。把两个比较立即数改成 0xFF，
+// 武器 ID 永不匹配 → 排除判断失效 → 弹药堆对 M60/GL 正常给弹。
+// 已对本机 server_srv.so (9309) 反汇编验证偏移 81/101 字节 = 0x15/0x25。
+void Patch_AmmoPile(Handle hGamedata)
+{
+    Address patch = GameConfGetAddress(hGamedata, "CWeaponAmmoSpawn::Use");
+    if (patch == Address_Null)
+    {
+        LogError("[M60NoDrop] 找不到 CWeaponAmmoSpawn::Use 签名，弹药堆补丁未应用（服务器版本可能已更新）");
+        return;
+    }
+
+    int offGL = GameConfGetOffset(hGamedata, "Use_NadeLauncher_Patch");
+    int offM60 = GameConfGetOffset(hGamedata, "Use_M60_Patch");
+    if (offGL == -1 || offM60 == -1)
+    {
+        LogError("[M60NoDrop] gamedata 缺少弹药堆偏移，补丁未应用");
+        return;
+    }
+
+    Address aGL = patch + view_as<Address>(offGL);
+    Address aM60 = patch + view_as<Address>(offM60);
+    int bGL = LoadFromAddress(aGL, NumberType_Int8);
+    int bM60 = LoadFromAddress(aM60, NumberType_Int8);
+    if (bGL != 0x15 || bM60 != 0x25)
+    {
+        LogError("[M60NoDrop] 弹药堆偏移字节不符（GL 0x%02X 预期 0x15 / M60 0x%02X 预期 0x25），补丁未应用（服务器版本可能已更新）",
+            bGL, bM60);
+        return;
+    }
+
+    g_addrAmmoUse = patch;
+    g_iAmmoGLOffset = offGL;
+    g_iAmmoGLOriginal = bGL;
+    g_iAmmoM60Offset = offM60;
+    g_iAmmoM60Original = bM60;
+
+    StoreToAddress(aGL, 0xFF, NumberType_Int8);
+    StoreToAddress(aM60, 0xFF, NumberType_Int8);
+
+    PrintToServer("[M60NoDrop] CWeaponAmmoSpawn::Use 弹药堆补丁已应用 (GL 0x%02X->0xFF @%d, M60 0x%02X->0xFF @%d)",
+        bGL, offGL, bM60, offM60);
+}
+
+public void OnConfigsExecuted()
+{
+    ApplyM60AmmoMax();
+}
+
+void OnM60AmmoMaxChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+    ApplyM60AmmoMax();
+}
+
+void ApplyM60AmmoMax()
+{
+    ConVar cvar = FindConVar("ammo_m60_max");
+    if (cvar == null)
+    {
+        LogError("[M60NoDrop] 找不到引擎 cvar ammo_m60_max");
+        return;
+    }
+    cvar.IntValue = g_cvM60AmmoMax.IntValue;
+}
+
 public void OnPluginEnd()
 {
     if (g_addrM60Drop != Address_Null)
@@ -122,6 +205,15 @@ public void OnPluginEnd()
         StoreToAddress(g_addrM60Drop, g_iM60DropOriginalByte, NumberType_Int8);
         PrintToServer("[M60NoDrop] CRifle_M60::PrimaryAttack 已还原 (0x%02X)", g_iM60DropOriginalByte);
         g_addrM60Drop = Address_Null;
+    }
+
+    if (g_addrAmmoUse != Address_Null)
+    {
+        StoreToAddress(g_addrAmmoUse + view_as<Address>(g_iAmmoGLOffset), g_iAmmoGLOriginal, NumberType_Int8);
+        StoreToAddress(g_addrAmmoUse + view_as<Address>(g_iAmmoM60Offset), g_iAmmoM60Original, NumberType_Int8);
+        PrintToServer("[M60NoDrop] CWeaponAmmoSpawn::Use 已还原 (GL 0x%02X / M60 0x%02X)",
+            g_iAmmoGLOriginal, g_iAmmoM60Original);
+        g_addrAmmoUse = Address_Null;
     }
 }
 
@@ -186,13 +278,24 @@ static bool IsValidEntRef(int iEntRef)
 Action CmdStatus(int client, int args)
 {
     if (g_addrM60Drop == Address_Null)
+        ReplyToCommand(client, "[M60NoDrop] NoDrop 补丁未应用（gamedata 缺失/字节校验失败，见日志）");
+    else
     {
-        ReplyToCommand(client, "[M60NoDrop] 补丁未应用（gamedata 缺失/字节校验失败，见日志）");
-        return Plugin_Handled;
+        int b = LoadFromAddress(g_addrM60Drop, NumberType_Int8);
+        ReplyToCommand(client, "[M60NoDrop] NoDrop：偏移 %d 字节 0x%02X（预期 0xEB 或 0x8D）", g_iM60DropOffset, b);
     }
 
-    int b = LoadFromAddress(g_addrM60Drop, NumberType_Int8);
-    ReplyToCommand(client, "[M60NoDrop] 已应用：偏移 %d，当前字节 0x%02X（预期 0xEB 或 0x8D）",
-        g_iM60DropOffset, b);
+    if (g_addrAmmoUse == Address_Null)
+        ReplyToCommand(client, "[M60NoDrop] 弹药堆补丁未应用（gamedata 缺失/字节校验失败，见日志）");
+    else
+    {
+        int bGL = LoadFromAddress(g_addrAmmoUse + view_as<Address>(g_iAmmoGLOffset), NumberType_Int8);
+        int bM60 = LoadFromAddress(g_addrAmmoUse + view_as<Address>(g_iAmmoM60Offset), NumberType_Int8);
+        ReplyToCommand(client, "[M60NoDrop] 弹药堆：GL 偏移 %d 字节 0x%02X / M60 偏移 %d 字节 0x%02X（预期 0xFF）",
+            g_iAmmoGLOffset, bGL, g_iAmmoM60Offset, bM60);
+    }
+
+    ConVar cvar = FindConVar("ammo_m60_max");
+    ReplyToCommand(client, "[M60NoDrop] ammo_m60_max = %d", cvar != null ? cvar.IntValue : -1);
     return Plugin_Handled;
 }

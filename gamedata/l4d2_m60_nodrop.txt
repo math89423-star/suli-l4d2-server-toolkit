@@ -8,6 +8,10 @@
 			{
 				"signature"	"CRifle_M60::PrimaryAttack"
 			}
+			"CWeaponAmmoSpawn::Use"
+			{
+				"signature"	"CWeaponAmmoSpawn::Use"
+			}
 		}
 		"Signatures"
 		{
@@ -16,6 +20,11 @@
 				"library"	"server"
 				"linux"		"@_ZN10CRifle_M6013PrimaryAttackEv"
 			}
+			"CWeaponAmmoSpawn::Use"
+			{
+				"library"	"server"
+				"linux"		"@_ZN16CWeaponAmmoSpawn3UseEP11CBaseEntityS1_8USE_TYPEf"
+			}
 		}
 		"Offsets"
 		{
@@ -23,6 +32,16 @@
 			{
 				"linux"		"222"
 				"windows"	"271"
+			}
+			"Use_NadeLauncher_Patch"
+			{
+				"linux"		"81"
+				"windows"	"75"
+			}
+			"Use_M60_Patch"
+			{
+				"linux"		"101"
+				"windows"	"92"
 			}
 		}
 	}
