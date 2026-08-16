@@ -342,7 +342,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.11.0"
+#define PLUGIN_VERSION "1.11.1"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -509,11 +509,11 @@ ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2�
 #define ART3_BREAK_PARTICLE  "boomer_explosion"
 #define ART3_CHASE_DURATION  8.0      // 吸引实体存活秒数（控场时长）
 
-#define SHOP_SLOTS      25      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）；v1.8.0: 24→25（火力支援IV-AGM导弹）——⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
+#define SHOP_SLOTS      23      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）；v1.8.0: 24→25（火力支援IV-AGM导弹）——⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
 
 #define MELEE_POOL_COUNT   12
 
-#define WALLHACK_SLOT       11      // g_ShopTable 槽位（= 透视特感）；v1.7.1: 12→11（v1.7.0 删复活币行使透视滑到 11）
+#define WALLHACK_SLOT       9      // g_ShopTable 槽位（= 透视特感）；v1.7.1: 12→11（v1.7.0 删复活币行使透视滑到 11）
 #define WALLHACK_DURATION   180.0   // v1.8.2: 3 分钟（2026-08-03 用户改回，原 v1.8.1 定稿 300=5 分钟）
 // v1.0.10: 生效期间不可重复购买 → WALLHACK_CAP（900s 续费封顶）已删除
 
@@ -592,9 +592,7 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "电击器",      "weapon_defibrillator",             4375,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3500）
     { "医疗包",      "weapon_first_aid_kit",             3750,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3000）
     { "激光瞄准",    "weapon_upgradepack_laser_sight",   1500,  0,  0 },   // v1.7.96: 用户定稿 1500（原 3500）
-    { "M60 轻机枪",  "weapon_rifle_m60",                 5000,  0,  0 },   // v1.7.96: 用户定稿 5000
     { "电锯",        "weapon_chainsaw",                  3500,  0,  0 },   // v1.8.6: 降价 5000→3500
-    { "榴弹发射器",  "weapon_grenade_launcher",          6500,  0,  0 },   // v1.7.96: 用户定稿 6500（原 8000）
     // v1.7.0: "复活币 8500" 商品已删除（复活体系改为积分复活，见 si_hud v1.12.0）
     // v1.7.1: 删除后透视特感滑到槽 11，WALLHACK_SLOT 已同步改 11
     { "透视特感",    "wallhack",                         5000,  0,  3 },   // v1.8.6: 涨价 4000→5000
