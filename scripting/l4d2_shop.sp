@@ -9,6 +9,11 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.3（2026-08-16）：**关闭火力支援全部 PrintHintText（用户拍板）**——
+ * 新 HUD（instructor hint 感叹号）接管屏幕中央后，删除瞄准阶段教学提示
+ * （"[商店] 左键确认轰炸，右键取消" + priming），操作说明并入购买聊天
+ * 消息；火力支援流程 PrintHintText 清零（透视特感商品的不动）。
+ *
  * v1.10.2（2026-08-16）：**修复感叹号堆叠（用户实测）**——每秒重建 hint 时
  * 客户端不自动关旧实例：旧感叹号不消失、新的往下挤、一屏堆叠。根因：
  * "Serverside Hint" 模板关闭只认 instructor_server_hint_stop 且 hint_name
@@ -300,7 +305,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.2"
+#define PLUGIN_VERSION "1.10.3"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -2618,23 +2623,10 @@ void ArtStartDesignate(int client, int slot, int price)
     g_hArtAimTimer[client] = CreateTimer(ART_TICK_INT, Timer_ArtAim,
         GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 
-    PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分）。",
+    // v1.10.3: 操作说明并入聊天（新 HUD 感叹号体系接管屏幕中央，用户拍板
+    // 关闭火力支援 PrintHintText——含瞄准教学，连同 priming 一起删除）
+    PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分）。\x05左键射击确认轰炸，右键取消",
         g_ShopTable[slot].name, price);
-
-    // v1.0.9: 购买后屏幕中央 textprint 教学（菜单描述已去掉"左键射击"字样）。
-    // priming（记忆 l4d2-printhinttext-priming-bug）：先空格占位，0.1s 后替换成真消息
-    PrintHintText(client, " ");
-    CreateTimer(0.1, Timer_ArtTeach, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
-}
-
-// v1.0.9: 购买火炮后的教学提示（左键确认 / 右键取消），带剩余有效期
-public Action Timer_ArtTeach(Handle timer, int userid)
-{
-    int client = GetClientOfUserId(userid);
-    if (client <= 0 || !IsClientInGame(client)) return Plugin_Stop;
-    PrintHintText(client, "[商店] 左键确认轰炸，右键取消（%.0f 秒内有效）",
-        g_cvArtTargetTime.FloatValue);
-    return Plugin_Stop;
 }
 
 // 退出瞄准指示：清理标记/心跳（v1.7.95: 无武器切换，无需恢复武器），可退款
