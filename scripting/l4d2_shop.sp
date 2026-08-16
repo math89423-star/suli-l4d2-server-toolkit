@@ -342,7 +342,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.11.1"
+#define PLUGIN_VERSION "1.11.2"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -509,7 +509,7 @@ ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2�
 #define ART3_BREAK_PARTICLE  "boomer_explosion"
 #define ART3_CHASE_DURATION  8.0      // 吸引实体存活秒数（控场时长）
 
-#define SHOP_SLOTS      23      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）；v1.8.0: 24→25（火力支援IV-AGM导弹）——⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
+#define SHOP_SLOTS      25      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）；v1.8.0: 24→25（火力支援IV-AGM导弹）——⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
 
 #define MELEE_POOL_COUNT   12
 
@@ -632,6 +632,10 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // 见 ShopAmmoRefill）；表尾追加不动 WALLHACK_SLOT 11；价格 800 默认（用户可调）
     // v1.8.6: 移入其他类（cat 2→3），涨价 800→4500
     , { "弹药补充",    "ammo_refill",                     4500,  0,  3 }
+    // v1.11.2: 武器盲盒（用户拍板 2026-08-17——替代下架的 M60/榴弹；表尾追加不动 WALLHACK_SLOT）
+    // 轻盒 3000：SMG×3/单喷×2/scout/猎枪 + M60 彩蛋 5%；重盒 5500：连喷×2/AR×4/连狙/awp + M60/榴弹彩蛋各 5%
+    , { "轻武器盲盒",  "weapon_box_light",                 3000,  0,  0 }
+    , { "重武器盲盒",  "weapon_box_heavy",                 5500,  0,  0 }
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -1705,6 +1709,26 @@ void ShopBuy(int client, int slot)
         return;
     }
 
+    // v1.11.2: 武器盲盒——加权随机开武器，直接发放（GivePlayerItem 即时入包）
+    if (StrEqual(g_ShopTable[slot].classname, "weapon_box_light")
+        || StrEqual(g_ShopTable[slot].classname, "weapon_box_heavy"))
+    {
+        char picked[32];
+        PickWeaponBoxItem(g_ShopTable[slot].classname, picked, sizeof(picked));
+        int ent = GivePlayerItem(client, picked);
+        if (ent == -1)
+        {
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            PrintToChat(client, "\x04[商店]\x01 盲盒开箱失败，积分已退回");
+            return;
+        }
+        EquipPlayerWeapon(client, ent);
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：开出 \x05%s\x01",
+            g_ShopTable[slot].name, price, SH_GetWallet(client), picked);
+        return;
+    }
+
     // v1.7.80: 火炮支援1/2/3/4——进入瞄准指示（射击确认轰炸）。
     // 不 spawn 实体；扣款已在上游完成，取消/超时/死亡/断线由 ArtEndDesignate 退款。
     // v1.7.98: 支援2 = 油桶/烟花模型池；v1.1.0: 支援3 = 胆汁瓶雨（kind=3）；
@@ -1824,7 +1848,7 @@ int Ammo_ClipMax(const char[] cls)
     if (StrEqual(cls, "weapon_rifle_desert"))
         return 60;
     if (StrEqual(cls, "weapon_rifle_m60"))
-        return 254;                                  // 服务器配置（l4d2_m60_ammo sm_m60_clip 254）
+        return 150;                                  // 服务器配置（l4d2_m60_ammo sm_m60_clip 150）
     if (StrEqual(cls, "weapon_hunting_rifle"))
         return 15;
     if (StrEqual(cls, "weapon_sniper_military"))
@@ -1856,7 +1880,7 @@ int Ammo_ReserveMax(const char[] cls)
         || StrEqual(cls, "weapon_rifle_ak47") || StrEqual(cls, "weapon_rifle_desert"))
         return 540;   // 官方 360 → 服务器配置 540 (assaultammo)
     if (StrEqual(cls, "weapon_rifle_m60"))
-        return 192;   // 官方 150 → 服务器配置 192 (hotgunammo)
+        return 600;   // 服务器配置 600 (hotgunammo，ammo_m60_max)
     if (StrEqual(cls, "weapon_hunting_rifle") || StrEqual(cls, "weapon_sniper_military")
         || StrEqual(cls, "weapon_sniper_scout") || StrEqual(cls, "weapon_sniper_awp"))
         return 225;   // 官方 180 → 服务器配置 225 (huntingrifleammo)
@@ -1866,7 +1890,7 @@ int Ammo_ReserveMax(const char[] cls)
         || StrEqual(cls, "weapon_autoshotgun") || StrEqual(cls, "weapon_shotgun_spas"))
         return 270;   // 官方 72 → 服务器配置 270 (autoshotgunammo)
     if (StrEqual(cls, "weapon_grenade_launcher"))
-        return 30;    // 服务器配置 30 (grenadelauncherammo)
+        return 40;    // 服务器配置 40 (grenadelauncherammo)
     return 0;         // 电锯无后备弹药
 }
 
@@ -1889,37 +1913,43 @@ int AmmoRefill_GetPrice(int client, char[] weaponTag, int maxLen)
         || StrEqual(cls, "weapon_smg_mp5"))
     {
         strcopy(weaponTag, maxLen, "SMG");
-        return 3500;
+        return 2000;   // v1.11.2: 3500-1500
     }
 
-    // AR 系（4 把步枪 + M60）
+    // AR 系（4 把步枪；M60 单独定价）
     if (StrEqual(cls, "weapon_rifle") || StrEqual(cls, "weapon_rifle_sg552")
-        || StrEqual(cls, "weapon_rifle_ak47") || StrEqual(cls, "weapon_rifle_desert")
-        || StrEqual(cls, "weapon_rifle_m60"))
+        || StrEqual(cls, "weapon_rifle_ak47") || StrEqual(cls, "weapon_rifle_desert"))
     {
         strcopy(weaponTag, maxLen, "AR");
-        return 5000;
+        return 3500;   // v1.11.2: 5000-1500
+    }
+
+    // v1.11.2: M60 专属补弹价（用户拍板 6000；原并入 AR 档）
+    if (StrEqual(cls, "weapon_rifle_m60"))
+    {
+        strcopy(weaponTag, maxLen, "M60");
+        return 6000;
     }
 
     // 单喷（2 把泵动霰弹枪）
     if (StrEqual(cls, "weapon_pumpshotgun") || StrEqual(cls, "weapon_shotgun_chrome"))
     {
         strcopy(weaponTag, maxLen, "单喷");
-        return 5500;
+        return 4000;   // v1.11.2: 5500-1500
     }
 
     // 连喷（2 把自动霰弹枪）
     if (StrEqual(cls, "weapon_autoshotgun") || StrEqual(cls, "weapon_shotgun_spas"))
     {
         strcopy(weaponTag, maxLen, "连喷");
-        return 6500;
+        return 5000;   // v1.11.2: 6500-1500
     }
 
     // 连狙（半自动狙击步枪）
     if (StrEqual(cls, "weapon_sniper_military"))
     {
         strcopy(weaponTag, maxLen, "连狙");
-        return 7000;
+        return 5500;   // v1.11.2: 7000-1500
     }
 
     // 栓狙（3 把栓动狙击步枪）
@@ -1927,16 +1957,65 @@ int AmmoRefill_GetPrice(int client, char[] weaponTag, int maxLen)
         || StrEqual(cls, "weapon_sniper_awp"))
     {
         strcopy(weaponTag, maxLen, "栓狙");
-        return 8500;
+        return 7000;   // v1.11.2: 8500-1500
     }
 
-    // 榴弹发射器 / 电锯 / 其他特殊武器 → 表定价
+    // 榴弹发射器 → 专属补弹价（v1.11.2 用户拍板 7000）；电锯/其他 → 表定价
     if (StrEqual(cls, "weapon_grenade_launcher"))
+    {
         strcopy(weaponTag, maxLen, "榴弹");
+        return 7000;
+    }
     else if (StrEqual(cls, "weapon_chainsaw"))
         strcopy(weaponTag, maxLen, "电锯");
 
     return 4500;   // 未知武器回退表定价
+}
+
+// v1.11.2: 武器盲盒加权随机——轻盒：M60 彩蛋 5% / SMG×3 各 8% / 单喷×2 各 12% /
+// scout 23% / 猎枪 24%；重盒：M60 5% / 榴弹 5% / 连喷×2 各 13% / AR×4 各 9% /
+// 连狙 14% / awp 14%（两盒权重合计均 100）
+void PickWeaponBoxItem(const char[] box, char[] picked, int maxLen)
+{
+    if (StrEqual(box, "weapon_box_light"))
+    {
+        char items[8][32] = {
+            "weapon_rifle_m60", "weapon_smg", "weapon_smg_silenced", "weapon_smg_mp5",
+            "weapon_pumpshotgun", "weapon_shotgun_chrome", "weapon_sniper_scout", "weapon_hunting_rifle"
+        };
+        int weights[8] = { 5, 8, 8, 8, 12, 12, 23, 24 };
+        PickWeightedItem(items, weights, 8, picked, maxLen);
+    }
+    else
+    {
+        char items[10][32] = {
+            "weapon_rifle_m60", "weapon_grenade_launcher",
+            "weapon_autoshotgun", "weapon_shotgun_spas",
+            "weapon_rifle", "weapon_rifle_sg552", "weapon_rifle_ak47", "weapon_rifle_desert",
+            "weapon_sniper_military", "weapon_sniper_awp"
+        };
+        int weights[10] = { 5, 5, 13, 13, 9, 9, 9, 9, 14, 14 };
+        PickWeightedItem(items, weights, 10, picked, maxLen);
+    }
+}
+
+void PickWeightedItem(char items[][32], const int[] weights, int count, char[] picked, int maxLen)
+{
+    int total = 0;
+    for (int i = 0; i < count; i++)
+        total += weights[i];
+    int roll = GetRandomInt(1, total);
+    int acc = 0;
+    for (int i = 0; i < count; i++)
+    {
+        acc += weights[i];
+        if (roll <= acc)
+        {
+            strcopy(picked, maxLen, items[i]);
+            return;
+        }
+    }
+    strcopy(picked, maxLen, items[count - 1]);
 }
 
 int ShopAmmoRefill(int client)
@@ -2052,27 +2131,14 @@ void ShopCategoryMenu(int client, int cat)
         // v1.8.21: 弹药补充按当前主武器枪种动态定价——菜单显示实际价+枪种标签
         char itemName[64];
         strcopy(itemName, sizeof(itemName), g_ShopTable[i].name);
-        bool ammoBlocked = false;    // v1.8.21: M60/榴弹持有时弹药补充不可用
         if (StrEqual(g_ShopTable[i].classname, "ammo_refill"))
         {
             char ammoTag[16];
             price = AmmoRefill_GetPrice(client, ammoTag, sizeof(ammoTag));
             ammoSig = price;   // v1.8.22: 记录动态价签名
             Format(itemName, sizeof(itemName), "%s[%s]", g_ShopTable[i].name, ammoTag);
-            int w = GetPlayerWeaponSlot(client, 0);
-            if (w > 0 && IsValidEntity(w))
-            {
-                char wcls[32];
-                GetEntityClassname(w, wcls, sizeof(wcls));
-                if (StrEqual(wcls, "weapon_rifle_m60") || StrEqual(wcls, "weapon_grenade_launcher"))
-                    ammoBlocked = true;
-            }
         }
-        if (ammoBlocked)
-        {
-            Format(line, sizeof(line), "%s [该武器不可补弹]", itemName);
-        }
-        else if (i == WALLHACK_SLOT && g_bWallhack[client])
+        if (i == WALLHACK_SLOT && g_bWallhack[client])
         {
             // v1.0.10: 生效期间不可重复购买 → 标签去掉"可续费"
             Format(line, sizeof(line), "%s (%d分) [透视生效中]", itemName, price);
