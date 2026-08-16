@@ -3080,8 +3080,11 @@ void Art_SolveTarget(int client, int kind, ArtTargetInfo info)
     info.skyVisible = openAbove;
     info.environment = Art_ClassifyEnvironment(info.clearance, openAbove, info.covered);
 
-    // 拒绝级：真实净空 <600 且上方非开阔（保持 v1.7.80 用户拍板；基准已修正）
-    if (info.clearance > 0.0 && info.clearance < ART_CEIL_LOW && !openAbove)
+    // 拒绝级：真实净空 <600 且上方非开阔（保持 v1.7.80 用户拍板；基准已修正）。
+    // ⚠ v1.9.0-fix2: kind==6（AGM）跳过此检查——AGM 是斜向俯冲投送，投送能力由
+    // Attack Corridor 决定，低净空（楼梯间/挑檐/巷道）只要走廊 clear 就可投送；
+    // 净空仅用于其半径分档（Art_PickParams）。任务书 §11.2 实测落实。
+    if (kind != 6 && info.clearance > 0.0 && info.clearance < ART_CEIL_LOW && !openAbove)
     {
         info.failReason = ART_FAIL_TOO_LOW;
         return;
@@ -4401,14 +4404,27 @@ public Action Timer_V1KillEnt(Handle timer, any ref)
 // ART_FAIL_NO_ATTACK_CORRIDOR 明确拒绝（不再靠随机 heuristic 偶尔成功）。
 // ============================================================================
 
-#define ART6_CORRIDOR_DIRS     8       // 走廊采样方向数（45° 步进）
-#define ART6_CORRIDOR_DIST     1200.0  // 走廊起点水平距离（u）
+#define ART6_CORRIDOR_DIRS     16      // 走廊采样方向数（22.5° 步进；v1.9.0-fix1: 8→16，
+                                        // 城市街道方向任意，45° 间隔容易全斜插进建筑）
+#define ART6_CORRIDOR_DIST     900.0   // 走廊起点水平距离（u；v1.9.0-fix1: 1200→900，
+                                        // 贴近原 V1_DIVE_OFFSET，起点不易落在周边楼房上）
 #define ART6_CORRIDOR_END_FREE 300.0   // 末端容差：距落点水平 ≤300u 内的命中
                                         // 视为"接近地面的斜插段"不算阻挡
+#define ART6_CORRIDOR_HIGH_IGNORE 1000.0  // v1.9.0-fix4: 命中点高于落点 ≥1000u 且
+                                        // 命中面是水平顶（法线朝下）→ 忽略——L4D2 地图
+                                        // 常在高空放隐形防飞出顶棚（BSP world，c5m2 公园
+                                        // 实测：16 方向全被半径 708u/高 1796u 的圆形顶棚挡）
+                                        // 这类结构防玩家不防导弹，斜插穿过视觉无碍
 
-// 走廊 trace 专用 filter：忽略玩家/特感/武器/弹丸/可动物理件（罐子/油桶），
-// 只把世界几何 + func_* + prop_static + prop_dynamic（含门/集装箱等大件）
-// 当阻挡——宁可保守拒绝，也不让导弹穿模建筑。
+// 走廊 trace 专用 filter：忽略玩家/特感/武器/弹丸/可动物理件/动态装饰
+// （prop_dynamic：路灯/招牌/树/车/门——城市小物件太多，碰一个就 blocked 会
+// 把窄街全拒；v1.9.0-fix1 实测 c5m2 8 方向全被 prop_dynamic 挡）。
+// v1.9.0-fix3: 再忽略 func_brush——隐形防飞顶墙/触发墙/装饰 brush（c4m2 z=972
+// 头顶隐形实体同款）会把开阔场景（公园）的走廊全挡（实测 c5m2 公园 16 方向全
+// blocked）；L4D2 建筑外墙是 world BSP 几何，func_brush 多为门/隐形墙。
+// 只把 world 几何 + prop_static 当阻挡（厚墙/建筑/桥面/岩石）。
+// ⚠ 已知限制：prop_dynamic 门 / func_brush 墙不再挡走廊——导弹可能穿模
+// （prop_dynamic_override solid=0 飞行无碰撞，仅视觉瑕疵），任务书 §28.5 允许。
 public bool Art_TraceFilterCorridor(int entity, int contentsMask, any data)
 {
     if (entity >= 1 && entity <= MaxClients)
@@ -4423,11 +4439,18 @@ public bool Art_TraceFilterCorridor(int entity, int contentsMask, any data)
         return true;
     if (StrEqual(cls, "prop_physics") || StrEqual(cls, "prop_physics_override"))
         return true;                          // 可动物理件（罐子/油桶/车残骸）不挡
-    return false;                             // 其余（world/func_*/prop_static/prop_dynamic）参与命中
+    if (StrEqual(cls, "prop_dynamic") || StrEqual(cls, "prop_dynamic_override"))
+        return true;                          // 动态装饰不挡（见上）
+    if (StrContains(cls, "func_") == 0)
+        return true;                          // v1.9.0-fix3: func_brush/隐形墙不挡（见上）
+    return false;                             // 其余（world/prop_static）参与命中
 }
 
-// 单条走廊检测：起点（高空斜上方）→ 落点。末端 300u 容差内命中地面/近地
-// 结构不算阻挡（导弹斜插末段必然接近地面）。
+// 单条走廊检测：起点（高空斜上方）→ 落点。命中判定（v1.9.0-fix4 组合规则）：
+// ① 末端 300u 水平容差内命中 → 放行（导弹斜插末段必然接近地面）
+// ② 命中点高于落点 ≥1000u 且命中面为水平顶（法线 z<-0.5）→ 放行
+//    （隐形防飞出顶棚/高空装饰——防玩家不防导弹，c5m2 公园实测 hDist=708 恒定）
+// ③ 其余（垂直墙/低空结构/隧道）→ 阻挡
 bool Art_CorridorClear(const float start[3], const float target[3])
 {
     Handle tr = TR_TraceRayFilterEx(start, target, MASK_SOLID,
@@ -4439,14 +4462,37 @@ bool Art_CorridorClear(const float start[3], const float target[3])
         TR_GetEndPosition(hit, tr);
         float dx = hit[0] - target[0];
         float dy = hit[1] - target[1];
-        if (SquareRoot(dx * dx + dy * dy) < ART6_CORRIDOR_END_FREE)
-            clear = true;
+        float hDist = SquareRoot(dx * dx + dy * dy);
+        float hitH = hit[2] - target[2];
+        if (g_cvArtDebug.IntValue >= 3)
+        {
+            char cls[64] = "world";
+            int entHit = TR_GetEntityIndex(tr);
+            if (entHit > 0)
+                GetEntityClassname(entHit, cls, sizeof(cls));
+            LogMessage("[artillery] corridor HIT cls=%s hDist=%.0f hitH=%.0f start=(%.0f %.0f %.0f)",
+                cls, hDist, hitH, start[0], start[1], start[2]);
+        }
+        if (hDist < ART6_CORRIDOR_END_FREE)
+        {
+            clear = true;                     // ① 末端容差
+        }
+        else if (hitH >= ART6_CORRIDOR_HIGH_IGNORE)
+        {
+            float normal[3];
+            TR_GetPlaneNormal(tr, normal);
+            // ② 高空水平面忽略（v1.9.0-fix5: 上表面 normal.z>0 也放行——斜插射线
+            // 从上方命中顶棚的上表面，实测 c5m2 公园顶棚 normal=+1；垂直墙
+            // |normal.z|<0.5 仍挡）
+            if (FloatAbs(normal[2]) >= 0.5)
+                clear = true;
+        }
     }
     delete tr;
     return clear;
 }
 
-// 8 方向采样：0°/45°/.../315°，起点 = 落点 + dir×1200 + diveHeight 高。
+// 16 方向采样：0°/22.5°/.../337.5°，起点 = 落点 + dir×900 + diveHeight 高。
 // 找到第一条 clear 走廊即返回（简单版：不打分选优）。全 blocked → false。
 bool Art_FindAGMCorridor(const float target[3], float start[3], int &corridorIndex)
 {
@@ -4456,7 +4502,7 @@ bool Art_FindAGMCorridor(const float target[3], float start[3], int &corridorInd
 
     for (int i = 0; i < ART6_CORRIDOR_DIRS; i++)
     {
-        float ang = DegToRad(45.0 * float(i));
+        float ang = DegToRad(22.5 * float(i));
         float s[3];
         s = target;
         s[0] += Cosine(ang) * ART6_CORRIDOR_DIST;
@@ -5012,6 +5058,7 @@ void V1_Detonate(int client, const float target[3], float radius)
     // 特感走 specialspawner SS_PauseSpawning；小僵尸走 l4d2_max_common MC_PauseCommon
     // （不直接改 z_common_limit——max_common 每秒重算会立刻覆盖回去，暂停失效）。
     // 两个 native 都是可选绑定：对应插件未加载则静默跳过（AGM 清场功能不受影响）。
+    // v1.9.0-fix5: 调用后回读 cvar 确认实际生效（诊断"假暂停"）。
     float pauseSeconds = g_cvArt6PauseSpawn.FloatValue;
     if (pauseSeconds > 0.0)
     {
@@ -5021,6 +5068,9 @@ void V1_Detonate(int client, const float target[3], float radius)
         {
             SS_PauseSpawning(pauseSeconds);
             LogMessage("[V1] paused special infected spawning for %.1f seconds", pauseSeconds);
+            ConVar cvNoSpecials = FindConVar("director_no_specials");
+            if (cvNoSpecials != null)
+                LogMessage("[V1] verify: director_no_specials=%d", cvNoSpecials.IntValue);
             paused = true;
         }
 
@@ -5028,6 +5078,11 @@ void V1_Detonate(int client, const float target[3], float radius)
         {
             MC_PauseCommon(pauseSeconds);
             LogMessage("[V1] paused common infected spawning for %.1f seconds", pauseSeconds);
+            ConVar cvNoMobs = FindConVar("director_no_mobs");
+            ConVar cvCommonLimit = FindConVar("z_common_limit");
+            if (cvNoMobs != null && cvCommonLimit != null)
+                LogMessage("[V1] verify: director_no_mobs=%d z_common_limit=%d",
+                    cvNoMobs.IntValue, cvCommonLimit.IntValue);
             paused = true;
         }
 

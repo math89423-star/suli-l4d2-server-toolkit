@@ -27,7 +27,7 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "1.3"
+#define PLUGIN_VERSION "1.5"
 
 ConVar g_hEnabled;
 ConVar g_hLeniency;
@@ -216,8 +216,17 @@ Action Timer_CheckCommons(Handle timer)
         return Plugin_Continue;
 
     // v1.4: 暂停期间跳过动态更新（保持 z_common_limit 0 + director_no_mobs 1）
+    // v1.5: 暂停期间每秒状态日志（诊断"假暂停"：cvar 实际值 + 场上小僵尸数量）
     if (g_bPaused)
+    {
+        if (g_hCommonLimit != null && g_hNoMobs != null)
+            LogMessage("[MaxCommon] pause active: z_common_limit=%d director_no_mobs=%d field_common=%d",
+                g_hCommonLimit.IntValue, g_hNoMobs.IntValue, CountCommonInfected());
+        else
+            LogMessage("[MaxCommon] pause active but cvar handle null! limit=%d nomobs=%d",
+                g_hCommonLimit != null, g_hNoMobs != null);
         return Plugin_Continue;
+    }
 
     // Update dynamic limit every tick (player count may have changed)
     UpdateCommonLimit();

@@ -1196,6 +1196,13 @@ void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
 	if (!client || !IsClientInGame(client) || GetClientTeam(client) != 3)
 		return;
 
+	// v2.5.4: 暂停期间特感出生 = 暂停被突破（诊断"假暂停"：director 或其他源仍在刷）
+	if (g_bSpawningPaused) {
+		int zClass = GetEntProp(client, Prop_Send, "m_zombieClass");
+		LogMessage("[SS] PAUSE VIOLATION: SI spawned during pause client=%N class=%d fake=%d",
+			client, zClass, IsFakeClient(client));
+	}
+
 	if (GetEntProp(client, Prop_Send, "m_zombieClass") != 8)
 		g_fActionTimes[client] = GetEngineTime();
 	else
