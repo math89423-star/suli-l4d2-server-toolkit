@@ -283,7 +283,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "2.5.1",
+	version = "2.5.2",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -1956,15 +1956,14 @@ void SettleWaveClearScore(float totalCountdown) {
 		}
 
 		// v2.5.1 时间倍率（用户设计）: 从特感刷新播报(波次开始)起算 1.5×,
-		// 每秒 -0.015, 下限 1.0（≈30s 回 1×）——清剿越快奖励越高
+		// 每秒 -0.015, 下限 1.0（≈30s 回 1×）——清剿越快奖励越高。
+		// v2.5.2: 倍率只计入得分, 播报不再标注括号内容（用户拍板, 保持播报简洁）。
 		timeMult = g_cClearTimeMultStart.FloatValue
 			- g_cClearTimeMultDecay.FloatValue * (GetEngineTime() - g_fWaveStartTime);
 		if (timeMult < 1.0)
 			timeMult = 1.0;
-		if (timeMult > 1.0) {
+		if (timeMult > 1.0)
 			score = RoundToNearest(float(score) * timeMult);
-			Format(tankTag, sizeof(tankTag), "%s(清剿×%.1f) ", tankTag, timeMult);
-		}
 	}
 
 	if (score > 0) {
