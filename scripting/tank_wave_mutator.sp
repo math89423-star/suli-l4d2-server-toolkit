@@ -37,6 +37,7 @@
 //     【后方】（全队平均朝向/中心，用户："做一个fallback，就是前后刷新"）
 //   · 距离 600→500→400 逐级缩短 + 向下 trace 找地面（防卡墙/落地）；无 LOS 要求
 //   · 仍找不到地面点才放弃该只（日志区分 fallback 成功/失败原因）
+// v2.6.5: fallback 距离档位 600/500/400 → 800/600/450（用户拍板，拉开前后距离）
 #pragma semicolon 1
 #pragma newdecls required
 
@@ -44,7 +45,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.6.4"
+#define PLUGIN_VERSION "2.6.5"
 
 // 配置常量
 #define MUTATION_CHANCE 0.10        // 10% 突变概率
@@ -60,7 +61,10 @@
 #define TANK_SPAWN_ANGLE_MIN 60.0   // 夹角下限（60° 保证两只间距 ≥800u 不互卡）
 #define TANK_SPAWN_ANGLE_MAX 120.0  // 夹角上限（防侧翼包夹）
 // v2.6.4: 前后刷新 fallback（用户定稿）——三角形无解时第一只前方、第二只后方
-#define TANK_FALLBACK_DIST 600.0    // 前后基准距离（逐级 -100 缩短，防卡墙）
+// v2.6.5: 距离档位 800 → 600 → 450（用户拍板，替代 600→500→400）
+#define TANK_FALLBACK_DIST_1 800.0   // 首档：尽量拉开前后距离
+#define TANK_FALLBACK_DIST_2 600.0
+#define TANK_FALLBACK_DIST_3 450.0   // 末档：窄段保底
 // v2.6.0: 卡住看护（用户定稿）——位置长时间几乎不动 → 重定位
 #define TANK_STUCK_MOVE   40.0      // 单次检查（2s）移动 < 此值视为"没动"
 #define TANK_STUCK_CHECKS 4         // 连续 4 次没动（8s）→ 判定卡住 → 重定位
@@ -682,9 +686,10 @@ bool SpawnTankFallback(int n, float spawnPos[3]) {
     }
 
     float dir = (n % 2 == 0) ? 1.0 : -1.0;   // 第一只前方、第二只后方
+    float tiers[3] = { TANK_FALLBACK_DIST_1, TANK_FALLBACK_DIST_2, TANK_FALLBACK_DIST_3 };
 
     for (int i = 0; i < 3; i++) {
-        float dist = (TANK_FALLBACK_DIST - i * 100.0) * dir;
+        float dist = tiers[i] * dir;
         float start[3];
         start[0] = center[0] + fwd[0] * dist;
         start[1] = center[1] + fwd[1] * dist;
