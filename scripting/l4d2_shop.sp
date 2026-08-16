@@ -342,7 +342,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.11.3"
+#define PLUGIN_VERSION "1.11.4"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -1491,6 +1491,7 @@ public void SH_OnClientRespawned(int client)
                 if (ent != -1)
                 {
                     EquipPlayerWeapon(client, ent);
+                    ApplyReserveAmmo(client, ent);   // v1.11.4: 复活直发同样不走拾取，同步备弹
                     LogMessage("[respawn-gear] %N primary RANDOM=%s ent=%d", client, picks[idx], ent);
                 }
                 else
@@ -1742,6 +1743,7 @@ void ShopBuy(int client, int slot)
             return;
         }
         EquipPlayerWeapon(client, ent);
+        ApplyReserveAmmo(client, ent);   // v1.11.4: 盲盒直发不走拾取，手动同步备弹
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：开出 \x05%s\x01",
             g_ShopTable[slot].name, price, SH_GetWallet(client), picked);
         return;
@@ -2034,6 +2036,23 @@ void PickWeightedItem(char items[][32], const int[] weights, int count, char[] p
         }
     }
     strcopy(picked, maxLen, items[count - 1]);
+}
+
+// v1.11.4: 直接发放（GivePlayerItem）的武器不走拾取路径，AmmoSets 不会给备弹——
+// 手动按 Ammo_ReserveMax 表同步后备弹药（m_iAmmo 真值 + m_iExtraPrimaryAmmo 镜像，HUD 即时刷新）
+void ApplyReserveAmmo(int client, int weapon)
+{
+    char cls[32];
+    GetEntityClassname(weapon, cls, sizeof(cls));
+    int resMax = Ammo_ReserveMax(cls);
+    if (resMax <= 0)
+        return;
+    int ammoType = GetEntProp(weapon, Prop_Send, "m_iPrimaryAmmoType");
+    if (ammoType == -1)
+        return;
+    SetEntProp(client, Prop_Send, "m_iAmmo", resMax, _, ammoType);
+    SetEntProp(weapon, Prop_Send, "m_iExtraPrimaryAmmo", resMax);
+    LogMessage("[shop-box] reserve sync %N %s -> %d (ammoType %d)", client, cls, resMax, ammoType);
 }
 
 int ShopAmmoRefill(int client)
