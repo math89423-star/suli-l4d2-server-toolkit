@@ -9,6 +9,8 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.5（2026-08-16）：**AGM 预警期文案带秒数（用户拍板）**——"导弹来袭预警 %d 秒！"（T-8~T-4），T-3 起切"导弹发射倒计时：3/2/1 秒！"。
+ *
  * v1.10.4（2026-08-16）：**AGM 预警文案与发射音效对齐（用户拍板）**——
  * 发射音效在倒计时 3 秒时才响（overpass_jets.wav），"导弹发射倒计时"
  * 不该从预警一开始就显示（8s 时导弹根本没发射）→ T-8~T-4 显示"导弹来袭
@@ -311,7 +313,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.4"
+#define PLUGIN_VERSION "1.10.5"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -3383,11 +3385,15 @@ public Action Timer_ArtWarn(Handle timer)
         // v1.10.4: AGM 发射音效在 T-3 才响（overpass_jets.wav）→ "导弹发射
         // 倒计时"只显示 3/2/1（与音效同步）；T-8~T-4 显示"导弹来袭预警！"
         // （用户拍板：不该从预警一开始就显示"发射倒计时"）
+        // v1.10.5: 预警期文案也带剩余秒数（用户拍板"导弹来袭预警 %d 秒！"）
         char warnBuf[128];
         if (g_iArtWarnKind == 6)
         {
             if (remain > 3)
-                Art_WarnHintShow("导弹来袭预警！", ART_WARN_HINT_ICON, 0);
+            {
+                Format(warnBuf, sizeof(warnBuf), "导弹来袭预警 %d 秒！", remain);
+                Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
+            }
             else
             {
                 Format(warnBuf, sizeof(warnBuf), "导弹发射倒计时：%d 秒！", remain);
