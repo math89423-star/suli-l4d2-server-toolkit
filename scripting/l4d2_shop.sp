@@ -9,6 +9,11 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.8（2026-08-16）：**商品名恢复"火力支援X-"前缀（用户拍板）**——
+ * v1.10.7 直白化把数字前缀也删了，用户要求保留：火力支援II-汽油弹 /
+ * 火力支援I-胆汁雨 / 火力支援III-榴弹雨 / 火力支援IV-AGM导弹；
+ * HUD 预警文案保持简洁（不带前缀）。classname/kind/价格全不动。
+ *
  * v1.10.7（2026-08-16）：**商品名与 HUD 名直白化（用户拍板）**——火力支援
  * 商品名改 汽油弹（II-地狱烈火）/ 胆汁雨（I-绿色雨幕）/ 榴弹雨（III-区域
  * 轰炸）/ AGM导弹（IV），去掉"火力支援X-文艺名"前缀，路人一眼看懂；
@@ -325,7 +330,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.7"
+#define PLUGIN_VERSION "1.10.8"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -587,16 +592,18 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // v1.8.5: 范围收紧20% + 频率降低 + 价格调整：绿色雨幕6500/地狱烈火10000/区域轰炸14500
     // v1.10.7: 商品名直白化（用户拍板"去掉文艺描述，路人能一眼看懂"）——
     // 汽油弹/胆汁雨/榴弹雨/AGM导弹（classname/kind/价格全不动）
-    { "汽油弹",      "artillery2",                 10000,   0,  4 },  // v1.8.5: 涨价 8500→10000
-    { "胆汁雨",      "artillery3",             6500,  0,  4 }   // v1.8.5: 涨价 4500→6500
+    // v1.10.8: 保留"火力支援X-"数字前缀（用户拍板不能丢）——
+    // 火力支援II-汽油弹 / 火力支援I-胆汁雨 / 火力支援III-榴弹雨 / 火力支援IV-AGM导弹
+    { "火力支援II-汽油弹", "artillery2",                 10000,   0,  4 },  // v1.8.5: 涨价 8500→10000
+    { "火力支援I-胆汁雨", "artillery3",             6500,  0,  4 }   // v1.8.5: 涨价 4500→6500
     // v1.3.0: 支援V-混合轰炸 → v1.4.0 转正定稿「火力支援III-区域轰炸」5500/30s
     // （罐+榴弹 1:1；原火力支援I-炮击 artillery + IV-榴弹雨 artillery4 已禁用，表行删除）
-    , { "榴弹雨",      "artillery5",               14500,  0,  4 }   // v1.8.5: 涨价 10000→14500（改为全榴弹）
+    , { "火力支援III-榴弹雨", "artillery5",               14500,  0,  4 }   // v1.8.5: 涨价 10000→14500（改为全榴弹）
     // v1.8.0: 支援IV-AGM导弹（artillery6）——仿 BF5 V1 小队增援：单发导弹俯冲 + 一次
     // 瞬爆清场。与 I/II/III 的"持续落罐"机制不同，走独立 V1_Launch 路径（不进
     // Art_LaunchBarrage）。素材全为原版（models/missiles/f18_agm65maverick.mdl +
     // gen_rockblast_posZ/gas_explosion_main 粒子），零客户端分发。
-    , { "AGM导弹",    "artillery6",                  18000,  0,  4 }   // v1.8.4: 定稿价 18000
+    , { "火力支援IV-AGM导弹", "artillery6",                  18000,  0,  4 }   // v1.8.4: 定稿价 18000
     // v1.4.0: 新增商品（用户定稿；表尾追加不动透视特感槽位 12）——
     // 马格南 2000（武器栏）、燃烧弹包/高爆弹包 500（升级包走现有
     // ShopSpawn 通用生成路径，与激光瞄准同类）
