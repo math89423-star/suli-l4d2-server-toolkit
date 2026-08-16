@@ -45,13 +45,13 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.6.5"
+#define PLUGIN_VERSION "2.7.0"
 
 // 配置常量
-#define MUTATION_CHANCE 0.10        // 10% 突变概率
-#define FORCE_TANK_WAVES 5          // 连续5波无倒地触发强制双Tank
-#define FORCE_TANK_NO_SPAWN 11      // 连续11波无Tank触发保底单Tank（第12波必刷）
-#define TANK_COOLDOWN_WAVES 3       // Tank波后冷静期（9→3）
+#define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
+#define FORCE_TANK_WAVES 8          // 连续8波完美清缴（无倒地/死亡）触发强制双Tank（v2.7.0: 5→8）
+#define FORCE_TANK_NO_SPAWN 14      // 连续14波无Tank触发保底单Tank（第15波必刷; v2.7.0: 11→14）
+#define TANK_COOLDOWN_WAVES 4       // Tank波后冷静期（v2.7.0: 3→4）
 #define MAX_TRACKED_TANKS 4         // 最多跟踪的 Tank 数量
 // v2.4.0: 就近生成 —— 突变 Tank 生成后必须在幸存者活跃模拟范围内，否则引擎
 // 不 tick 其 AI（待命站桩），且远离流程会被导演判定掉队自动清除（"被系统处死"）。
@@ -166,8 +166,10 @@ public void SS_OnWaveRest(float totalCountdown) {
     // 返回后抽取冷静期（rest = Random(ss_rest_min/max)）——本函数对
     // ss_rest_min/max 的修改即作用于本波冷静期。
     // v2.5.0: 冷静期倍率（用户设计：下一波是 Tank → 冷静期 ×1.5）。
-    // 基准与 specialspawner cfg 同步（ss_rest_min/max = 25/35）。
-    float baseMin = 25.0, baseMax = 35.0;
+    // 基准与 specialspawner cfg 同步（ss_rest_min/max = 20/30, v2.7.0 由 25/35
+    // 同步下调——specialspawner v2.6.0 冷静期已改 20-30, 此处硬编码必须一致,
+    // 否则每波 REST 会把 cfg 值覆盖回旧值）。
+    float baseMin = 20.0, baseMax = 30.0;
     float scale = (g_hCvarRestScale != null) ? g_hCvarRestScale.FloatValue : 1.5;
     ConVar hRestMin = FindConVar("ss_rest_min");
     ConVar hRestMax = FindConVar("ss_rest_max");
