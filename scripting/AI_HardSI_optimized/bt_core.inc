@@ -424,13 +424,16 @@ stock void BT_ApplyMovement(int client, int &buttons) {
 // 2) 再叠加 BT 累积输出（Add/Remove）。
 // 非决策帧也调用本函数（沿用上次决策的累积输出 + 控制声明），
 // 从而"决策降频、控制输出每帧应用"，消除 Valve/BT 交替接管抖动。
+// v5.23.1 FIX: **ATTACK 类永不清理** —— 引擎发起技能（Hunter 扑击 press /
+// Charger 冲锋 / 引擎能力触发）依赖 Valve AI 自己按下 IN_ATTACK 的时机，
+// 清理它会剥夺引擎技能触发窗口（实机：Hunter 近距离按了不扑、Charger 触发
+// 困难）。ATTACK 的"接管"只通过 BT_AddButton 加键表达，不通过清理。
 stock void BT_ApplyControlFrame(int client, int &buttons) {
     int mask = g_iBTControlMask[client];
     if (mask & _:BTCTRL_MOVE) {
+        // 只清移动类：导航相关。意图明确 = BT 接管移动（走走停停）。
+        // 注意：不包含 IN_SPEED（冲刺键）—— 由 BT Add 表达。
         buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
-    }
-    if (mask & _:BTCTRL_ATTACK) {
-        buttons &= ~(IN_ATTACK | IN_ATTACK2);
     }
     if (mask & _:BTCTRL_DUCK) {
         buttons &= ~IN_DUCK;
@@ -438,6 +441,14 @@ stock void BT_ApplyControlFrame(int client, int &buttons) {
     if (mask & _:BTCTRL_JUMP) {
         buttons &= ~IN_JUMP;
     }
+    BT_ApplyMovement(client, buttons);
+}
+
+// v5.23.1: 非决策帧轻量应用 —— 只重放 BT 上次的 Add/Remove 按键，
+// **不清理 Valve 输入、不覆盖视角**。恢复引擎 AI 的技能触发 press
+// 与原生导航（该帧 Valve 输入原样通过），同时保持 BT 的持续意图
+// （Hold 静止靠 RemoveButton 重放、走位靠 AddButton 重放）。
+stock void BT_ApplyControlLite(int client, int &buttons) {
     BT_ApplyMovement(client, buttons);
 }
 

@@ -143,7 +143,7 @@ ConVar g_cvSsExtraSize;
 // Fixed baseline captured once at startup — NOT read from the mutable ConVar
 // each time. Otherwise AdjustSpawnSize feeds its own output back as input,
 // converging irreversibly to the minimum clamp (4) on the first low-player event.
-float g_fCfgBaseSpawnSize = 6.0;  // overridden from ss_spawn_size in OnPluginStart
+float g_fCfgBaseSpawnSize = 10.0;  // overridden from ss_spawn_size in OnPluginStart（用户设计: 4人基准=10，公式=人数×2.5 最少10）
 
 // ============================================================================
 // ConVars
@@ -269,6 +269,8 @@ float PinSpawnTiming()
     float prev = (g_cvSsTimeMin != null) ? g_cvSsTimeMin.FloatValue : min;
     if (g_cvSsTimeMin != null) g_cvSsTimeMin.SetFloat(interval);
     if (g_cvSsTimeMax != null) g_cvSsTimeMax.SetFloat(interval);
+    // v5.24 诊断：打印钉值来源（排查 55.0 播报）
+    LogMessage("[si_comp] PinSpawnTiming: min=%.1f max=%.1f interval=%.1f prev=%.1f", min, max, interval, prev);
 
     AdjustSpawnSize();  // re-scale per current survivor count
 

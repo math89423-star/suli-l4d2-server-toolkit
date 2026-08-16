@@ -38,6 +38,7 @@ int g_iNextTankCount = 0;           // 下一波Tank数量（1=突变, 2=强制�
 int g_iTanks[MAX_TRACKED_TANKS];    // 当前 Tank 波生成的 Tank client 索引
 int g_iTankCount = 0;               // 当前活跃 Tank 数量
 Handle g_hTankMonitor = null;       // Tank 状态监控定时器
+ConVar g_hCvarRestScale = null;     // v2.5.0: Tank 波前冷静期倍率
 
 public Plugin myinfo = {
     name = "Tank Wave Mutator",
@@ -54,6 +55,11 @@ public void OnPluginStart() {
 
     // 换图重置
     HookEvent("round_start", Event_RoundStart);
+
+    // v2.5.0: Tank 波前冷静期倍率（用户设计：下一波是 Tank → 冷静期 ×1.5）
+    g_hCvarRestScale = CreateConVar("tank_wave_rest_scale", "1.5",
+        "Tank 波前冷静期倍率（ss_rest_min/max 基准 × 本值；1.0 = 不放大）",
+        FCVAR_NONE, true, 1.0, true, 3.0);
 
     LogMessage("[Tank Mutator] Plugin loaded. Mutation: %.0f%%, Force: %d waves, Cooldown: %d waves",
                MUTATION_CHANCE * 100.0, FORCE_TANK_WAVES, TANK_COOLDOWN_WAVES);
@@ -105,7 +111,17 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
 // ============ specialspawner forward 监听 ============
 
 public void SS_OnWaveRest(float totalCountdown) {
-    // 波次清缴结束，进入 REST 冷静期，totalCountdown = REST时长 + 下波间隔
+    // 波次清缴结束，进入 REST 冷静期。specialspawner v5.25 起在本函数
+    // 返回后抽取冷静期（rest = Random(ss_rest_min/max)）——本函数对
+    // ss_rest_min/max 的修改即作用于本波冷静期。
+    // v2.5.0: 冷静期倍率（用户设计：下一波是 Tank → 冷静期 ×1.5）。
+    // 基准与 specialspawner cfg 同步（ss_rest_min/max = 25/35）。
+    float baseMin = 25.0, baseMax = 35.0;
+    float scale = (g_hCvarRestScale != null) ? g_hCvarRestScale.FloatValue : 1.5;
+    ConVar hRestMin = FindConVar("ss_rest_min");
+    ConVar hRestMax = FindConVar("ss_rest_max");
+    if (hRestMin != null) hRestMin.SetFloat(baseMin);
+    if (hRestMax != null) hRestMax.SetFloat(baseMax);
     // 此时判定下一波是否为 Tank 波，如果是则提前预警
 
     // 首波保护：第一波必定不是 Tank
@@ -155,21 +171,27 @@ public void SS_OnWaveRest(float totalCountdown) {
 
     if (shouldSpawnTank) {
         g_bNextWaveIsTank = true;
-        int countdown = RoundToNearest(totalCountdown);
 
+        // v2.5.0: 下一波是 Tank → 冷静期 ×scale（specialspawner 在 forward
+        // 返回后抽取 rest，此修改即生效于本波冷静期）
+        if (hRestMin != null) hRestMin.SetFloat(baseMin * scale);
+        if (hRestMax != null) hRestMax.SetFloat(baseMax * scale);
+
+        // 预警秒数由 specialspawner 播报（"X 秒后下一波"，已含倍率），
+        // 此处不再报具体秒数（v2.5.0: totalCountdown 在 forward 时尚未确定）
         if (doubleTank) {
             g_iNextTankCount = 2;
             LogMessage("[Tank Mutator] DOUBLE TANK WAVE predicted! Reason: %s", reason);
             PrintToChatAll("\x04☠ 警告：下一波将刷新 \x03双倍 TANK\x01！");
-            PrintCenterTextAll("☠ 警告：下一波双倍 TANK 来袭！%d 秒后", countdown);
+            PrintCenterTextAll("☠ 警告：下一波双倍 TANK 来袭！");
         } else {
             g_iNextTankCount = 1;
             LogMessage("[Tank Mutator] TANK WAVE predicted! Reason: %s", reason);
             PrintToChatAll("\x04☠ 警告：下一波将刷新 TANK！\x01");
-            PrintCenterTextAll("☠ 警告：下一波 TANK 来袭！%d 秒后", countdown);
+            PrintCenterTextAll("☠ 警告：下一波 TANK 来袭！");
         }
 
-        PrintToChatAll("\x04[Tank Mutator]\x01 做好准备，还有 \x05%d\x01 秒", countdown);
+        PrintToChatAll("\x04[Tank Mutator]\x01 做好准备！");
 
         // Tank 波后进入 N 波冷静期，计数器归零
         g_iTankCooldown = TANK_COOLDOWN_WAVES;

@@ -185,7 +185,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "5.23.0",
+    version = "5.24.0",
     url = "github.com/breezyplease"
 };
 
@@ -494,37 +494,42 @@ public Action:OnPlayerRunCmd(int client, int &buttons, int &impulse,
         buttons &= ~IN_DUCK;
     }
 
-    // --- v5.22: Think Rate != Control Rate（云端审查任务书 §2.4）---
-    // 决策（跑树）降频到 TICK_INTERVAL 帧一次；但控制输出（按键/视角/移动
-    // 接管掩码）每帧应用 —— 非决策帧沿用上次决策的累积输出与控制声明。
-    // 原版非决策帧直接 Plugin_Continue 把整帧交还 Valve AI → "BT 帧 / Valve
-    // 帧"交替接管（BT 要埋伏、Valve 向前跑；BT 绕侧、Valve 直冲）。
-    // 现在非决策帧也执行 BT_ApplyControlFrame：被 BT 接管的输入类别清掉
-    // Valve 原始意图，BT 输出连续生效，消除两套脑子抢方向盘的抖动。
+    // --- v5.23.2: 帧策略回退（实机决定性结论）---
+    // 实机对照：v5.23.1 非决策帧持续注入 BT 上次按键（IN_ATTACK 恒 1）时
+    // Hunter 扑击失效（贴近 80u 走位不扑、267u 攻击序列在按但引擎不发起）。
+    // L4D2 引擎 bot 的技能（扑击/冲锋）由引擎 AI 在自己的按键序列帧里发起，
+    // 持续注入破坏该链路。回退为 v5.22 语义：决策帧 BT 输出、非决策帧完全
+    // 交还引擎（Valve AI 原样执行），保留 v5.23 的掩码清理（ATTACK 不清理）、
+    // 树修复与技能状态机。"控制输出每帧应用"在 L4D2 引擎 bot 上不可行。
     g_iTickCounter[client]++;
-    if (g_iTickCounter[client] >= TICK_INTERVAL) {
-        g_iTickCounter[client] = 0;
-
-        // Skip if not bound to a BT
-        if (!BT_IsBound(client)) {
-            return Plugin_Continue;
+    if (g_iTickCounter[client] < TICK_INTERVAL) {
+        // 非决策帧：完全交还引擎（Tank 的 jump/duck 抑制已在函数开头每帧做）
+        if (GetInfectedClass(client) == L4D2Infected_Tank) {
+            return Plugin_Changed;
         }
+        return Plugin_Continue;
+    }
+    g_iTickCounter[client] = 0;
 
-        // Reset BT movement accumulators (含 v5.22 控制掩码)
-        BT_ResetMovement(client);
-
-        // v5.18: 齐射状态机（内部 0.5s 节流，每 SI 调用无妨）
-        Wave_EvaluateSync();
-
-        // Set tank aggression mode on blackboard (cached handle, no FindConVar per tick)
-        BB_SetBool(client, "tank_aggro", g_hCvarTankAggroBhop != null && GetConVarBool(g_hCvarTankAggroBhop));
-
-        // Execute Behavior Tree
-        // The BT modifies buttons/angles via BT_AddButton/BT_RemoveButton/BT_SetAimAngles.
-        BT_Tick(client);
+    // Skip if not bound to a BT
+    if (!BT_IsBound(client)) {
+        return Plugin_Continue;
     }
 
-    // --- 每帧：应用当前 BT 控制状态（决策帧 = 本帧新输出；非决策帧 = 上次输出）---
+    // Reset BT movement accumulators (含 v5.22 控制掩码)
+    BT_ResetMovement(client);
+
+    // v5.18: 齐射状态机（内部 0.5s 节流，每 SI 调用无妨）
+    Wave_EvaluateSync();
+
+    // Set tank aggression mode on blackboard (cached handle, no FindConVar per tick)
+    BB_SetBool(client, "tank_aggro", g_hCvarTankAggroBhop != null && GetConVarBool(g_hCvarTankAggroBhop));
+
+    // Execute Behavior Tree
+    // The BT modifies buttons/angles via BT_AddButton/BT_RemoveButton/BT_SetAimAngles.
+    BT_Tick(client);
+
+    // 决策帧：应用掩码清理（MOVE/DUCK/JUMP；ATTACK 不清理）+ Add/Remove + 视角
     BT_ApplyControlFrame(client, buttons);
     BT_ApplyAngles(client, angles);
 

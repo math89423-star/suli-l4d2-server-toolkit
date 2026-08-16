@@ -108,16 +108,23 @@
 
 ## 未解决 / 后续关注
 
+0. **【勘误】Tank 投石"按=假成功"实际存在**（v5.23 交付时误判为"无此问题"）：
+   `rockCluster Cooldown(5.0)` 在按键时刻武装（bt_tank.inc:708），而真实释放事件
+   `L4D_TankRock_OnRelease`（826-853）只做瞄准校正未接入冷却 → 投石动画 ~1s 导致
+   引擎冷却内提前按键被吞，实际投石频率约砍半。修复方案见
+   `/tmp/next-round/tank-review-plan.md` P1-1（照搬 Charger/Smoker Try+事件确认+退避模式，
+   只改 bt_tank.inc 不动 AI_HardSI.sp）。另 P1-2：协同拳依赖 `m_hasVisibleThreats`
+   （BT 接管下失真，bt_tank.inc:525）大概率静默失效，需换 pin 直测 trace LOS。
 1. **Boomer FIRE 事件**：`L4D_ActivateAbility_Boomer_Post` 在目标 left4dhooks 版本是否稳定触发
    待实机观察（不触发则退化为 HIT 兜底+退避，不劣于 v5.6）
 2. **Smoker 无"舌头飞行中"标志**：目标横跳躲舌时会产生 1.2s 空按周期（0.5s 退避节流），观感不佳时
    后续可 hook `L4D_ActivateAbility_Smoker_Post` 区分"已发射未命中"
 3. **Spitter 竞态**：超时判定与 ability_spit 同帧先后时，残留标记由下次尝试消费——事件证明真实吐出，
    语义正确仅时间戳略晚（与 Boomer v5.6 同款）
-4. **Tank 未改**（任务书 §18 建议最后）：近战簇 Cooldown(1.5)/投石簇 Cooldown(5.0) 已对齐引擎
-   真实冷却（z_tank_attack_interval/z_tank_throw_interval），无"按=假成功"问题，待下一轮
+4. **Tank 本轮未改**（任务书 §18 建议最后）：近战簇 Cooldown(1.5) 与引擎对齐无误（见上条勘误，
+   投石才是真正缺口）
 5. **调试能力**：现有 `ai_debug`（0/1）仅 root 分支级；任务书 §19 的 0/1/2/3 分级 + Branch ID 统计
-   未实施（本轮未列入，建议下轮）
+   未实施（设计已就绪 `/tmp/next-round/debug-system-design.md`，建议下轮 P0）
 
 ## 部署
 

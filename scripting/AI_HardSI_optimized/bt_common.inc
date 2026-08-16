@@ -21,11 +21,55 @@
 // 注意：本函数定义在文件头部 —— 被 ACT_MoveToTarget/ACT_ErraticApproach
 // 等前置 action 调用，SourcePawn 单遍编译需要先定义。
 // ============================================================================
-#define STUCK_CHECK_INTERVAL 0.75
+#define STUCK_CHECK_INTERVAL 0.4   // v5.25: 0.75→0.4 —— 顶墙 0.75s 才反应太慢（撞墙观感明显）
 #define STUCK_MOVE_THRESHOLD 20.0
 #define STUCK_DETOUR_TIME_MIN 1.5
 #define STUCK_DETOUR_TIME_MAX 2.5
-#define STUCK_JUMP_ROUNDS 3    // 连续 3 轮（~2.25s）无位移 → 跳一下翻障碍
+#define STUCK_JUMP_ROUNDS 3    // 连续 3 轮（~1.2s）无位移 → 跳一下翻障碍
+
+// ============================================================================
+// v5.25: 远近分流瞄准（导航层整改核心 —— 任务书 §14 路线 A）
+// 远距离移动时【不覆盖视角】：Valve/NextBot 原生导航需要自由视角来沿
+// navmesh 找路绕障碍；我们把视角强制朝目标 = 剥夺其找路能力 = 直线撞墙。
+// 本函数：距离 > closeDist 时不设置视角（交还 Valve 导航），
+// ≤ closeDist 时才把视角对准目标（攻击/瞄准需要精确朝向）。
+// 返回 true = 已接管视角（近距离），false = 未接管（远处，Valve 自由导航）。
+// ============================================================================
+stock bool BT_AimIfNear(int client, int target, float closeDist = 600.0) {
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return false;
+    float sPos[3], tPos[3];
+    GetClientAbsOrigin(client, sPos);
+    GetClientAbsOrigin(target, tPos);
+    if (GetVectorDistance(sPos, tPos) > closeDist) return false;
+    float dir[3], ang[3];
+    MakeVectorFromPoints(sPos, tPos, dir);
+    GetVectorAngles(dir, ang);
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    return true;
+}
+
+// ============================================================================
+// v5.25: 前瞻避障 —— 前方探测 + 左右选通（StuckDetour 的撞前预判版）
+// 返回 true = 前方近处有障碍（≤ probeDist 命中且非目标实体），
+// 调用方应停止直线前进 / 交给绕行。
+// ============================================================================
+stock bool BT_ObstacleAhead(int client, float probeDist = 120.0) {
+    float pos[3], ang[3], fwd[3], end[3];
+    GetClientAbsOrigin(client, pos);
+    GetClientEyeAngles(client, ang);
+    ang[0] = 0.0;
+    GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+    end[0] = pos[0] + fwd[0] * probeDist;
+    end[1] = pos[1] + fwd[1] * probeDist;
+    end[2] = pos[2] + 20.0;
+    TR_TraceRayFilter(pos, end, MASK_PLAYERSOLID, RayType_EndPoint, TerrainTraceFilter, client);
+    if (!TR_DidHit()) return false;
+    int ent = TR_GetEntityIndex();
+    // 命中目标本人不算障碍；其它实体（墙/箱/车/门）算
+    if (ent == client) return false;
+    if (ent > 0 && ent <= MaxClients && IsClientInGame(ent)) return false;  // 其它玩家不挡
+    return true;
+}
 
 stock bool BT_StuckDetour(int client) {
     float now = GetGameTime();
@@ -72,12 +116,21 @@ stock bool BT_StuckDetour(int client) {
         float dy = myPos[1] - BB_GetFloat(client, "_stuck_pos1", myPos[1]);
         float moved = SquareRoot(dx * dx + dy * dy);
         if (moved < STUCK_MOVE_THRESHOLD) {
-            // 停滞 → 开始绕行（随机方向，绝对 yaw 固化）
+            // 停滞 → 开始绕行（v5.25: 方向由左右探测决定，走通的一侧；
+            // 原版随机 ±90° —— 随机方向可能仍贴墙（如右侧是墙却选了右转））
             bool goLeft = (GetRandomInt(0, 1) == 0);
-            BB_SetBool(client, "_stuck_detour", true);
-            BB_SetBool(client, "_stuck_left", goLeft);
             float ang[3];
             GetClientEyeAngles(client, ang);
+            // 左右各探测 300u（水平）：选择通畅侧，两侧都通则保持随机
+            bool leftClear = !Terrain_HorzTraceHit(client, -90.0, 300.0);
+            bool rightClear = !Terrain_HorzTraceHit(client, 90.0, 300.0);
+            if (leftClear && !rightClear) {
+                goLeft = true;
+            } else if (rightClear && !leftClear) {
+                goLeft = false;
+            }
+            BB_SetBool(client, "_stuck_detour", true);
+            BB_SetBool(client, "_stuck_left", goLeft);
             BB_SetFloat(client, "_stuck_yaw", ang[1] + (goLeft ? -90.0 : 90.0));
             BB_SetFloat(client, "_stuck_until", now + GetRandomFloat(STUCK_DETOUR_TIME_MIN, STUCK_DETOUR_TIME_MAX));
             // v5.6: 连续 3 轮停滞 → 追加一次跳跃（几何缝/铁丝网/矮台阶靠
@@ -885,14 +938,10 @@ BT_Status ACT_AcquirePinnableTarget(int client) {
 // direction the SI was facing, often away from survivors.
 BT_Status ACT_StrafeRandom(int client) {
     // Face the blackboard target while strafing
+    // v5.25: 远近分流 —— 远处交还 Valve 导航（不覆盖视角），近处才瞄准
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
-        float sPos[3], tPos[3], dir[3], ang[3];
-        GetClientAbsOrigin(client, sPos);
-        GetClientAbsOrigin(target, tPos);
-        MakeVectorFromPoints(sPos, tPos, dir);
-        GetVectorAngles(dir, ang);
-        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        BT_AimIfNear(client, target, 800.0);   // v5.25: 守位常用 300-600u，800 余量
     }
 
     float now = GetGameTime();
@@ -922,13 +971,13 @@ BT_Status ACT_MoveToTarget(int client) {
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
         return BT_FAILURE;
     }
-    // Face the target
+    // Face the target (v5.25: 远近分流 —— 远距离不覆盖视角，交还 Valve 导航)
     float sPos[3], tPos[3], dir[3], ang[3];
     GetClientAbsOrigin(client, sPos);
     GetClientAbsOrigin(target, tPos);
     MakeVectorFromPoints(sPos, tPos, dir);
     GetVectorAngles(dir, ang);
-    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_AimIfNear(client, target, 600.0);   // v5.25: 近处才接管瞄准
     // Move forward
     BT_AddButton(client, IN_FORWARD);
     BT_StuckDetour(client);   // v5.2: 顶墙时追加横移键斜插绕行
@@ -957,7 +1006,7 @@ BT_Status ACT_StrafeApproach(int client) {
         BT_RemoveButton(client, IN_MOVELEFT);
     }
 
-    // ---- 前进组件：朝黑板 target 走 ----
+    // ---- 前进组件：朝黑板 target 走（v5.25: 远近分流）----
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
         float sPos[3], tPos[3], dir[3], ang[3];
@@ -965,7 +1014,7 @@ BT_Status ACT_StrafeApproach(int client) {
         GetClientAbsOrigin(target, tPos);
         MakeVectorFromPoints(sPos, tPos, dir);
         GetVectorAngles(dir, ang);
-        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        BT_AimIfNear(client, target, 600.0);   // v5.25
     }
     BT_AddButton(client, IN_FORWARD);
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
@@ -1053,7 +1102,7 @@ BT_Status ACT_StrafeMoveToTarget(int client) {
     GetClientAbsOrigin(target, tPos);
     MakeVectorFromPoints(sPos, tPos, dir);
     GetVectorAngles(dir, ang);
-    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_AimIfNear(client, target, 600.0);   // v5.25: 远近分流
     BT_AddButton(client, IN_FORWARD);
 
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
@@ -1451,7 +1500,7 @@ BT_Status ACT_HugWall(int client) {
         GetClientAbsOrigin(target, tPos);
         MakeVectorFromPoints(sPos, tPos, dir);
         GetVectorAngles(dir, ang);
-        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        BT_AimIfNear(client, target, 600.0);   // v5.25: 远近分流
     }
 
     // Hug the wall: strafe toward the blocked side

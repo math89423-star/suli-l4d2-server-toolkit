@@ -353,7 +353,7 @@ Action Timer_PauseCleanup(Handle timer) {
 
 public void OnPluginStart() {
 	g_cSILimit	= 					CreateConVar("ss_si_limit",				"12",						"同时存在的最大特感数量", _, true, 1.0, true, 48.0);
-	g_cSpawnSize = 					CreateConVar("ss_spawn_size",			"4",						"一次产生多少只特感", _, true, 1.0, true, 32.0);
+	g_cSpawnSize = 					CreateConVar("ss_spawn_size",			"10",					"一次产生多少只特感（基准=4人时数量；用户设计=人数×2.5 最少10）", _, true, 1.0, true, 32.0);
 	g_cSpawnLimits[SI_SMOKER] = 	CreateConVar("ss_smoker_limit",			"2",						"同时存在的最大smoker数量", _, true, 0.0, true, 32.0);
 	g_cSpawnLimits[SI_BOOMER] = 	CreateConVar("ss_boomer_limit",			"2",						"同时存在的最大boomer数量", _, true, 0.0, true, 32.0);
 	g_cSpawnLimits[SI_HUNTER] = 	CreateConVar("ss_hunter_limit",			"4",						"同时存在的最大hunter数量", _, true, 0.0, true, 32.0);
@@ -1789,7 +1789,20 @@ Action tmrClearCheck(Handle timer) {
 // 旧 v2.1.0 tier 覆盖有个遗留坑: g_iCurrentPressureTier 默认 T2 → 走
 // GetRestRangeByTier(2) 的 12-15s, cfg 设计值 25-35s 从未生效（记忆库
 // l4d2-rest-tier-override-bug）。清理后回归设计值。
+// v5.24: PostRest 下限归零后播报 = 冷静期本身（25-35s），与"冷静期=下一波
+// 间隔"的用户预期一致（旧 20-25s 波间隔钉值是 12-18s 冷静期时代的配套）。
+// v5.25: 冷静期抽取移到 SS_OnWaveRest 通知之后 —— tank_wave_mutator 在
+// forward 里判定"下一波是否 Tank"并可能把 ss_rest_min/max ×1.5（用户设计：
+// Tank 波前冷静期 37.5-52.5s）。先通知后抽取才能让倍率作用于本波。
 void EnterRest() {
+	// 1) 先通知（tank_wave_mutator 判定下一波 + 可能调整 ss_rest cvar ×1.5）。
+	//    参数传 0.0 占位：当前消费者（tank_mutator/si_comp）不使用该值，
+	//    播报在 rest 抽取后重新计算，保证数字精确。
+	Call_StartForward(g_fwdOnWaveRest);
+	Call_PushFloat(0.0);
+	Call_Finish();
+
+	// 2) 抽取冷静期（读调整后的 cvar：非 Tank 25-35s / Tank 波 ×1.5）
 	float rest = Math_GetRandomFloat(g_cRestMin.FloatValue, g_cRestMax.FloatValue);
 	if (rest < 1.0)
 		rest = 1.0;
@@ -1801,9 +1814,10 @@ void EnterRest() {
 
 	// v2.2.0 触发 REST forward（传入总倒计时秒数，供外部插件预警）
 	float totalCountdown = rest + GetPostRestInterval();
-	Call_StartForward(g_fwdOnWaveRest);
-	Call_PushFloat(totalCountdown);
-	Call_Finish();
+	// v5.24 诊断：打印播报构成（定位播报异常时使用；稳定后可移除）
+	LogMessage("[SS] REST countdown: rest=%.1f postRest=%.1f total=%.1f (spawnTimeMax=%.1f avgRest=%.1f)",
+		rest, GetPostRestInterval(), totalCountdown, g_fSpawnTimeMax,
+		(g_cRestMin.FloatValue + g_cRestMax.FloatValue) * 0.5);
 
 	int total = RoundToNearest(totalCountdown);
 	PrintToChatAll("\x04[特感]\x01 波次清剿完毕，\x05%d\x01 秒后下一波", total);
@@ -1812,11 +1826,16 @@ void EnterRest() {
 // 冷静期后的下一波间隔 = 波间隔钉值 − 平均冷静时长（冷静期吃掉波间隔前段,
 // 总波周期仍 ≈ 钉值 40-55, 不会"休息完再等满 40-55"）。si_comp 每波把
 // ss_time_min/max 钉为随机(40,55), g_fSpawnTimeMax 即当前钉值。
+// v5.24 FIX: 下限 clamp 10.0→0.0 —— 2026-08-16 压力系统清理后冷静期回归
+// 设计值 25-35s（旧 tier 时代 12-18s 的配套波间隔 20-25s 已错位：冷静期 +
+// PostRest 播报出 43s，与"冷静期最大 35s"的预期矛盾）。现在冷静期本身
+// 25-35s 已是完整缓冲，结束后立即进入下一波计时（PostRest 仅当波间隔钉值
+// > 冷静期均值时才补剩余差额，< 时归零），播报回到 25-35s。
 float GetPostRestInterval() {
 	float avgRest = (g_cRestMin.FloatValue + g_cRestMax.FloatValue) * 0.5;
 	float interval = g_fSpawnTimeMax - avgRest;
-	if (interval < 10.0)
-		interval = 10.0;
+	if (interval < 0.0)
+		interval = 0.0;
 	if (interval > 45.0)
 		interval = 45.0;
 	return interval;

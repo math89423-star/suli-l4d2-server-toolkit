@@ -274,6 +274,33 @@ BT_Status ChargerAct_TryCharge(int client) {
         SI_SignalAttack(client);
     }
 
+    // v5.25: 前方直线通路探测 —— 冲锋是直线冲撞，前方 600u 有墙/障碍时
+    // 引擎要么拒绝要么撞墙（用户反馈"Charger 依然会撞墙"）。按 ATTACK 前
+    // 探测自身→目标方向：命中世界几何（非目标实体）→ 不冲，短退避
+    // 交还走位分支（绕行/接近），通路畅通才尝试冲锋。
+    int target = BB_GetInt(client, "target", -1);
+    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+        float sPos[3], tPos[3], fwd[3], end[3];
+        GetClientAbsOrigin(client, sPos);
+        GetClientAbsOrigin(target, tPos);
+        MakeVectorFromPoints(sPos, tPos, fwd);
+        float dist = NormalizeVector(fwd, fwd);
+        float probe = (dist < 600.0) ? dist * 0.8 : 600.0;   // 近距探到目标身前
+        end[0] = sPos[0] + fwd[0] * probe;
+        end[1] = sPos[1] + fwd[1] * probe;
+        end[2] = sPos[2] + 30.0;
+        TR_TraceRayFilter(sPos, end, MASK_PLAYERSOLID, RayType_EndPoint, LOS_TraceFilter, client);
+        if (TR_DidHit()) {
+            int ent = TR_GetEntityIndex();
+            // 命中目标本人 = 通路畅通；命中其它实体（墙/箱/车/门/其它玩家）=
+            // 直线被挡 → 不冲（短退避防每 tick 重探，走位分支接管绕行）
+            if (ent != target) {
+                SI_AbilityBackoff(client, "_charger", now, GetRandomFloat(0.4, 0.8));
+                return BT_FAILURE;
+            }
+        }
+    }
+
     // 持续按住 ATTACK + FORWARD（对准上一节点设定的目标方向），直到确认/超时
     BT_AddButton(client, IN_ATTACK);
     BT_AddButton(client, IN_FORWARD);

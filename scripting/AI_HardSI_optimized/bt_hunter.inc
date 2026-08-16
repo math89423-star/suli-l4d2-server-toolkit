@@ -552,25 +552,29 @@ BT_Status HunterAct_SprintApproach(int client) {
     }
 
     // Forward movement — face target ±cached offset, or the point BEHIND it
+    // v5.25: 远近分流 —— 远处（>600u）不覆盖视角，交还 Valve 导航找路
+    // （防直线撞墙）；近处保留绕后/偏移瞄准逻辑。
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
         float sPos[3], tPos[3], dir[3], ang[3];
         GetClientAbsOrigin(client, sPos);
         GetClientAbsOrigin(target, tPos);
-        MakeVectorFromPoints(sPos, tPos, dir);
-        GetVectorAngles(dir, ang);
-        if (BB_GetBool(client, "_flank_behind", false)) {
-            // 绕后跑位：aim 目标后方 300u 的地面点 → 跑更大弧线绕到背后
-            float behind[3];
-            behind[0] = tPos[0] + dir[0] * 300.0;
-            behind[1] = tPos[1] + dir[1] * 300.0;
-            behind[2] = tPos[2];
-            MakeVectorFromPoints(sPos, behind, dir);
+        if (GetVectorDistance(sPos, tPos) <= 600.0) {
+            MakeVectorFromPoints(sPos, tPos, dir);
             GetVectorAngles(dir, ang);
-        } else {
-            ang[1] += BB_GetFloat(client, "_aim_offset", 0.0);
+            if (BB_GetBool(client, "_flank_behind", false)) {
+                // 绕后跑位：aim 目标后方 300u 的地面点 → 跑更大弧线绕到背后
+                float behind[3];
+                behind[0] = tPos[0] + dir[0] * 300.0;
+                behind[1] = tPos[1] + dir[1] * 300.0;
+                behind[2] = tPos[2];
+                MakeVectorFromPoints(sPos, behind, dir);
+                GetVectorAngles(dir, ang);
+            } else {
+                ang[1] += BB_GetFloat(client, "_aim_offset", 0.0);
+            }
+            BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
         }
-        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
     BT_AddButton(client, IN_FORWARD);
 
@@ -595,11 +599,14 @@ BT_Status HunterAct_CrouchApproach(int client) {
         GetClientAbsOrigin(client, sPos);
         GetClientAbsOrigin(target, tPos);
         dist = GetVectorDistance(sPos, tPos);
-        MakeVectorFromPoints(sPos, tPos, dir);
-        GetVectorAngles(dir, ang);
-        // v5.11: 蹲伏接近时也加 ±20° 偏移，不再只有横移
-        ang[1] += GetRandomFloat(-20.0, 20.0);
-        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        // v5.25: 远近分流 —— 远处交还 Valve 导航（防直线撞墙），近处瞄准
+        if (dist <= 600.0) {
+            MakeVectorFromPoints(sPos, tPos, dir);
+            GetVectorAngles(dir, ang);
+            // v5.11: 蹲伏接近时也加 ±20° 偏移，不再只有横移
+            ang[1] += GetRandomFloat(-20.0, 20.0);
+            BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        }
     }
 
     // Lateral strafe — change direction every 0.3-0.8s（加快横移切换）
@@ -679,7 +686,8 @@ BT_Status HunterAct_WideGaussOffset(int client) {
 // ============================================================================
 
 BT_Status HunterAct_OverheadOffset(int client) {
-    if (GetRandomFloat(0.0, 1.0) > 0.3) return BT_SUCCESS;
+    // v5.25: 过顶扑概率 30%→40%（用户设计："先越过幸存者扑到身后，再回头扑杀"）
+    if (GetRandomFloat(0.0, 1.0) > 0.4) return BT_SUCCESS;
 
     int target = BB_GetInt(client, "target", -1);
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
@@ -706,6 +714,54 @@ BT_Status HunterAct_OverheadOffset(int client) {
 }
 
 // ============================================================================
+// v5.25: 扑击节奏控制（用户设计：连续扑太变态，每次扑击停顿 0.4s）
+// ============================================================================
+// 条件：距上次扑击 ≥ ai_hunter_pounce_interval（默认 0.4s）才允许发起新扑。
+// 冷却中 FAIL → 攻击分支整支 FAIL → selector 落走位/接近分支（0.4s 缓冲），
+// 不引入 Cooldown 节点（避免 v5.9/v5.10 的"冷却期反复选中=站桩"历史问题）。
+static ConVar s_hPounceInterval = null;   // 缓存句柄（每 tick 热路径）
+
+BT_Status HunterCond_PounceReady(int client) {
+    if (s_hPounceInterval == null) s_hPounceInterval = FindConVar("ai_hunter_pounce_interval");
+    float interval = (s_hPounceInterval != null) ? s_hPounceInterval.FloatValue : 0.4;
+    if (interval <= 0.0) return BT_SUCCESS;   // 0 = 不限制（纯引擎冷却）
+    float last = BB_GetFloat(client, "_hunter_last_pounce", 0.0);
+    return (GetGameTime() - last >= interval) ? BT_SUCCESS : BT_FAILURE;
+}
+
+// 动作：记录本次扑击时刻（插在攻击序列末尾）
+BT_Status HunterAct_MarkPounce(int client) {
+    BB_SetFloat(client, "_hunter_last_pounce", GetGameTime());
+    return BT_SUCCESS;
+}
+
+// ============================================================================
+// v5.25: 扇形随机扑击角度（用户设计："扑击不是直线，左右扇形内随机角度"）
+// ============================================================================
+// 在 SnapAim 之后调用：把当前瞄准（黑板目标方向）再叠加 ±spread 均匀随机
+// （ai_hunter_pounce_spread，默认 30°）—— 扑击弹道落在目标方向左右扇形内。
+// 读累加器（同 v5.21 FIX：不读 EyeAngles，避免覆盖前面节点刚算好的瞄准）。
+static ConVar s_hPounceSpread = null;
+
+BT_Status HunterAct_SectorOffset(int client) {
+    if (s_hPounceSpread == null) s_hPounceSpread = FindConVar("ai_hunter_pounce_spread");
+    float spread = (s_hPounceSpread != null) ? s_hPounceSpread.FloatValue : 30.0;
+    if (spread <= 0.0) return BT_SUCCESS;
+
+    float ang[3];
+    if (g_bBT_AnglesSet[client]) {
+        ang[0] = g_fBT_Angles[client][0];
+        ang[1] = g_fBT_Angles[client][1];
+        ang[2] = g_fBT_Angles[client][2];
+    } else {
+        GetClientEyeAngles(client, ang);
+    }
+    ang[1] += GetRandomFloat(-spread, spread);   // 扇形均匀随机（左右）
+    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    return BT_SUCCESS;
+}
+
+// ============================================================================
 // Tree builder
 // ============================================================================
 
@@ -722,8 +778,14 @@ stock int BT_CreateHunterTree() {
     // 已确认扑击射程无 cvar（全硬编码），第 111 行记录 1000 是 v4.0.1 实战
     // 验证值。500 门控让 500-1000u 全部扑击分支不可达（观感"远处根本不会扑"），
     // 现恢复 1000，并把引擎 ready_range 一起抬到 1000 消除两者不一致。
-    // v5.21: 1000→1500 —— 用户要求从更远处就扑击，提升攻击性
-    float fPounceRange = 1500.0;
+    // v5.24: fallback 1500→1000 —— 攻击门控必须 ≤ 引擎有效扑击射程。
+    // 引擎扑击射程无 cvar 全硬编码，v4.0.1 实测有效 ≈1000u；v5.21 的 1500
+    // 门控在 1000-1500u 段持续按 IN_ATTACK = 引擎扑不出（v5.3 同款教训：
+    // "扑不出 → 扑空 → 逃跳 → 再扑"循环）。Jockey 对照：leap 门控 450 对齐
+    // 引擎有效 250-400u + 余量。Hunter 门控 1000 = 引擎射程 + 0 余量。
+    // "更早扑击"的意图由 crouchPrep(≤1000 蹲) + hunter_pounce_ready_range=1500
+    // （引擎更早进入准备）承接，不再靠超射程按键。
+    float fPounceRange = 1000.0;
     float fStraightRange = 200.0;
     ConVar hCvar = FindConVar("ai_fast_pounce_proximity");
     if (hCvar != null) fPounceRange = GetConVarFloat(hCvar);
@@ -791,18 +853,22 @@ stock int BT_CreateHunterTree() {
     // 全扑击分支不可达）+ 距离改 target 口径；攻击瞄准改黑板目标
     // v5.23: 补可扑性守卫 —— 挂边/倒地/被控目标不可扑，扑上去是空转浪费
     // （任务书 §4/§17.2：Acquire→Validate→LOS→Range→Execute 统一链）
-    int narrowPounceSeq = BT_CreateSequence(7,
+    // v5.24: 删 IsDucking —— Jockey 对照改造：攻击分支不再要求蹲姿
+    // （站立即可扑，与 Jockey leap 同构）；蹲仅是 crouchPrep 的隐蔽准备态
+    int narrowPounceSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_IsDucking),
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(800.0),  // longer range in corridors
         BT_CreateCondition(CND_TargetIsPinnable)
     );
-    int narrowAttackSeq = BT_CreateSequence(3,
+    int narrowAttackSeq = BT_CreateSequence(6,
+        BT_CreateCondition(HunterCond_PounceReady),  // v5.25: 扑击节奏（0.4s）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
+        BT_CreateAction(HunterAct_SectorOffset),      // v5.25: 扇形随机角度
         BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(HunterAct_MarkPounce),        // v5.25: 记录扑击时刻
         BT_CreateAction(ACT_SignalAttack)
     );
     // v5.9 FIX: 移除 Cooldown 包裹 —— v4.0.3 的 Cooldown(1.0) 制造了和 v5.7
@@ -821,39 +887,43 @@ stock int BT_CreateHunterTree() {
         BT_CreateRollStrategy(3)
     );
     // Strategy 0: Wide flank pounce — wider Gaussian spread (±25°, harder to dodge)
-    int openStrat0_WidePounce = BT_CreateSequence(8,
+    // v5.24: 删 IsDucking（同 narrowPounceSeq）
+    int openStrat0_WidePounce = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea),
         BT_CreateStrategyIs(0),
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_IsDucking),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
         BT_CreateCondition(CND_TargetIsPinnable)  // v5.23: 同 pounceInnerSeq —— 同时拒挂边/倒地/被控
     );
-    int widePounceAttack = BT_CreateSequence(3,
+    int widePounceAttack = BT_CreateSequence(5,
+        BT_CreateCondition(HunterCond_PounceReady),  // v5.25: 扑击节奏（0.4s）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(HunterAct_WideGaussOffset),
-        BT_CreateAction(ACT_QueueLunge)
+        BT_CreateAction(HunterAct_SectorOffset),      // v5.25: 扇形随机角度（替换 WideGauss）
+        BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(HunterAct_MarkPounce)         // v5.25: 记录扑击时刻
     );
     // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
     BT_AddChild(openStrat0_WidePounce, widePounceAttack);
 
     // Strategy 1: Erratic pounce — standard Gauss offset + unpredictable approach
-    int openStrat1_ErraticPounce = BT_CreateSequence(8,
+    // v5.24: 删 IsDucking（同 narrowPounceSeq）
+    int openStrat1_ErraticPounce = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea),
         BT_CreateStrategyIs(1),
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_IsDucking),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
         BT_CreateCondition(CND_TargetIsPinnable)  // v5.23: 同 pounceInnerSeq —— 同时拒挂边/倒地/被控
     );
-    int erraticPounceAttack = BT_CreateSequence(3,
+    int erraticPounceAttack = BT_CreateSequence(5,
+        BT_CreateCondition(HunterCond_PounceReady),  // v5.25: 扑击节奏（0.4s）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(ACT_GaussianAimOffset),
-        BT_CreateAction(ACT_QueueLunge)
+        BT_CreateAction(HunterAct_SectorOffset),      // v5.25: 扇形随机角度（替换 Gauss）
+        BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(HunterAct_MarkPounce)         // v5.25: 记录扑击时刻
     );
     // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
     BT_AddChild(openStrat1_ErraticPounce, erraticPounceAttack);
@@ -877,9 +947,10 @@ stock int BT_CreateHunterTree() {
     BT_AddChild(semiApproachSeq, semiHugAction);
 
     // --- Standard fast pounce ---
-    int fastPounceSeq = BT_CreateSequence(2,
-        BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_IsDucking)
+    // v5.24: 删 IsDucking —— 站立即可扑（同 narrowPounceSeq 对照改造）。
+    // 引擎扑击不依赖蹲姿（玩家 Hunter 站立按攻击即扑）；蹲姿仅为隐蔽接近态。
+    int fastPounceSeq = BT_CreateSequence(1,
+        BT_CreateCondition(CND_OnGround)
     );
 
     // v5.18 功能 2：加挂边/倒地守卫 —— ACT_AcquireClosestTarget 底层
@@ -901,26 +972,30 @@ stock int BT_CreateHunterTree() {
     // 站桩 bug：冷却期内前置条件满足但 Cooldown FAIL → 整支 FAIL → selector
     // 反复选中分支7又反复 FAIL = 站着不动。引擎自带扑击冷却（z_lunge_interval
     // 默认 0.5s），插件侧不需要再锁。直接合并攻击序列到 fastPounceSeq。
-    int attackActionSeq = BT_CreateSequence(5,
+    int attackActionSeq = BT_CreateSequence(7,
+        BT_CreateCondition(HunterCond_PounceReady),  // v5.25: 扑击节奏（0.4s）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(HunterAct_OverheadOffset),
-        BT_CreateAction(ACT_GaussianAimOffset),
+        BT_CreateAction(HunterAct_OverheadOffset),   // v5.25: 40% 过顶扑（越到身后）
+        BT_CreateAction(HunterAct_SectorOffset),     // v5.25: 扇形随机角度（替换 Gauss）
         BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(HunterAct_MarkPounce),       // v5.25: 记录扑击时刻
         BT_CreateAction(ACT_SignalAttack)
     );
 
     // --- v3.3: Close-range direct pounce (no Gauss offset, faster reaction) ---
-    int closePounceSeq = BT_CreateSequence(6,
+    // v5.24: 删 IsDucking（同 narrowPounceSeq）
+    int closePounceSeq = BT_CreateSequence(5,
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_IsDucking),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fStraightRange),
         BT_CreateCondition(CND_TargetIsPinnable)   // v5.18: 同 pounceInnerSeq
     );
-    int closeAttackSeq = BT_CreateSequence(2,
+    int closeAttackSeq = BT_CreateSequence(4,
+        BT_CreateCondition(HunterCond_PounceReady),  // v5.25: 扑击节奏（0.4s）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(ACT_QueueLunge)
+        BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(HunterAct_MarkPounce)         // v5.25: 记录扑击时刻
     );
     // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
     BT_AddChild(closePounceSeq, closeAttackSeq);
@@ -1001,18 +1076,20 @@ stock int BT_CreateHunterTree() {
     // 防"已被控"，挂边/倒地目标仍会扑空转。替换后契合"反聚堆分散扑"语义：
     // 协同分配的目标若已被控/倒地/挂边则跳过本分支，落到其它扑击/走位分支
     // （任务书 §4/§17.2 统一 Acquire→Validate→LOS→Range→Execute 链）
-    int coordPounceSeq = BT_CreateSequence(7,
+    // v5.24: 删 IsDucking（同 narrowPounceSeq）
+    int coordPounceSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_IsDucking),
         BT_CreateIsModeAny(4, 6),
         BT_CreateAction(ACT_AcquireCoordTarget),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
         BT_CreateCondition(CND_TargetIsPinnable)  // v5.23: 替换 Inverter(IsTargetPinned)，同时拒挂边/倒地/被控
     );
-    int coordPounceAttack = BT_CreateSequence(2,
+    int coordPounceAttack = BT_CreateSequence(4,
+        BT_CreateCondition(HunterCond_PounceReady),  // v5.25: 扑击节奏（0.4s）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
-        BT_CreateAction(ACT_QueueLunge)
+        BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(HunterAct_MarkPounce)         // v5.25: 记录扑击时刻
     );
     // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
     BT_AddChild(coordPounceSeq, coordPounceAttack);
@@ -1027,18 +1104,20 @@ stock int BT_CreateHunterTree() {
     // 挂边/被控，扑上去是空转。CND_TargetIsPinnable 同时拒三种状态；若枪手
     // 已被控则跳过本分支（合理：优先维持压制，不打重复控制）
     // （任务书 §4/§17.2：Acquire→Validate→LOS→Range→Execute 统一链）
+    // v5.24: 删 IsDucking（同 narrowPounceSeq）
     // ==========================================
-    int disruptionSeq = BT_CreateSequence(6,
+    int disruptionSeq = BT_CreateSequence(5,
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_IsDucking),
         BT_CreateAction(ACT_AcquireThreatTarget),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
         BT_CreateCondition(CND_TargetIsPinnable)
     );
-    int disruptionAttack = BT_CreateSequence(3,
+    int disruptionAttack = BT_CreateSequence(5,
+        BT_CreateCondition(HunterCond_PounceReady),  // v5.25: 扑击节奏（0.4s）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_QueueLunge),
+        BT_CreateAction(HunterAct_MarkPounce),        // v5.25: 记录扑击时刻
         BT_CreateAction(ACT_SignalAttack)
     );
     // v5.9: 移除 Cooldown，直接合并（同 narrowPounceSeq 修复）
@@ -1050,28 +1129,33 @@ stock int BT_CreateHunterTree() {
     BT_AddChild(fastPounceSeq, pounceInnerSeq);
     BT_AddChild(fastPounceSeq, attackActionSeq);
 
-    // Root selector — priority order (v5.23):
-    //   1. Escape after miss (safety first)
-    //   2. Wall pounce when airborne near wall [v5.16]
-    //   3. Evasive jump when being aimed at [v5.12]
-    //   4. Harasser mode — DISABLED [v5.21]（纯攻击性 AI，不再保距等待）
-    //   5. High-ground positioning (tactical advantage)
-    //   6. Narrow corridor → straight pounce
-    //   6.5. mode 4/6 分散扑（防 dogpile）[v4.0]
-    //   6.6. 枪线扰乱 → 扑火力输出者 [v5.0]
-    //   7a. Open area → roll strategy token
-    //   7b. Open + strat0 → wide flank pounce (±35° Gauss)
-    //   7c. Open + strat1 → erratic pounce (standard ±15° Gauss)
-    //   7d. Open + strat2 → falls through to standard fast pounce
-    //   8. Semi open → hug wall approach
-    //   9. Close range (≤200) → direct pounce (no Gauss, faster) [v3.3]
-    //   10. Standard fast pounce (ducking + LOS + inRange → pounce with Gauss)
-    //   11. Flow 前方 → 蹲守埋伏（路线感知战术分支）[v5.18]
-    //   12. Flow 后方 → 绕行抢位（路线感知战术分支）[v5.18]
-    //   13. In range + not ducking → crouch to prepare pounce [v3.3]
-    //   14. Far away → SPRINT full speed toward target [v3.3]
-    //   15. In range + ducking + no LOS → crouch approach with forward movement [v3.3]
-    //   16. Last resort → wander
+    // Root selector — priority order (v5.24):
+    //   0. 骑乘中（零输出，引擎管骑乘）[v5.24]
+    //   (1. Escape after miss —— v5.24 REMOVED：用户要求"连续扑不带停"，
+    //      扑空落地直接重扑；逃跳+3s 冷却 = "扑完顿一下"主因)
+    //   1. Wall pounce when airborne near wall [v5.16]
+    //   2. Evasive jump when being aimed at [v5.12]
+    //   3. Harasser mode — DISABLED [v5.21]（纯攻击性 AI，不再保距等待）
+    //   4. High-ground positioning (tactical advantage)
+    //   5. Narrow corridor → straight pounce
+    //   5.5. mode 4/6 分散扑（防 dogpile）[v4.0]
+    //   5.6. 枪线扰乱 → 扑火力输出者 [v5.0]
+    //   6a. Open area → roll strategy token
+    //   6b. Open + strat0 → wide flank pounce (±35° Gauss)
+    //   6c. Open + strat1 → erratic pounce (standard ±15° Gauss)
+    //   6d. Open + strat2 → falls through to standard fast pounce
+    //   7. Semi open → hug wall approach
+    //   8. Close range (≤200) → direct pounce (no Gauss, faster) [v3.3]
+    //   9. Standard fast pounce (LOS + inRange → pounce with Gauss)
+    //   10. Flow 前方 → 蹲守埋伏（路线感知战术分支）[v5.18]
+    //   11. Flow 后方 → 绕行抢位（路线感知战术分支）[v5.18]
+    //   12. In range + not ducking → crouch to prepare pounce [v3.3]
+    //   13. Far away → SPRINT full speed toward target [v3.3]
+    //   14. In range + ducking + no LOS → crouch approach with forward movement [v3.3]
+    //   15. Last resort → wander
+    //
+    // v5.24: 攻击分支不再要求蹲姿（站立即可扑，Jockey 对照改造）；
+    // 门控 1000 = 引擎有效射程（v5.21 的 1500 超射程白按）。
     //
     // v5.23 P0 FIX: 战术分支（11/12）移到 crouchPrep（13）、sprint（14）之前
     // —— 原顺序 sprintApproachSeq（OnGround + >400u，动作恒 RUNNING）排在
@@ -1079,15 +1163,14 @@ stock int BT_CreateHunterTree() {
     // 战术分支必须优先于泛用接近分支（§5.2）：
     // 能扑就扑 → 够不到先走路线战术 → 才退泛用接近（蹲伏准备/冲刺/蹲爬）。
     //
-    // The sprint→crouch→pounce flow (13→10 or 14→13→10):
-    //   Tick N:   Hunter far away → branch 14 (sprint) activates, runs toward target
-    //   Tick N+1: Entered pounce range → branch 13 (crouchPrep) fires, presses DUCK
-    //   Tick N+2: FL_DUCKING set → branch 10 (fastPounce) fires, POUNCES!
+    // v5.24: 攻击分支不再要求蹲姿 → sprint→crouch→pounce 流程简化为
+    // sprint→pounce：冲刺接近 → 进 1000u 站立直接扑（无 LOS 时蹲爬找角度）。
+    // crouchPrep 保留为隐蔽接近的可选姿态，不再 gate 攻击。
     // ==========================================
     // v5.18 功能 1：flow 路线感知（两支）
     // ------------------------------------------
-    // a) 已在前方 → 蹲守（Hunter 蹲着不动最难被发现，且蹲姿是扑击前置态，
-    //    玩家一进射程 branch 10 立刻接管扑出去 —— 埋伏与攻击天然衔接）
+    // a) 已在前方 → 蹲守（Hunter 蹲着不动最难被发现，玩家一进射程攻击分支
+    //    立刻接管扑出去 —— 埋伏与攻击天然衔接）
     // b) 落在后方 → 朝 flow 增大方向绕行抢位，而不是从背后直线追
     //    （从后方追 = 全队枪线正对，白给）
     // 两支都排在扑击分支之后：能扑就扑，够不到才走路线逻辑。
@@ -1110,13 +1193,23 @@ stock int BT_CreateHunterTree() {
     );
 
     int root = BT_Create(BTN_SELECTOR);
-    BT_AddChild(root, missEscSeq);              // 1. escape after miss
-    BT_AddChild(root, wallPounceSeq);           // 2. v5.16: wall pounce when airborne
-    BT_AddChild(root, evasiveJumpSeq);          // 3. v5.12: evasive jump when aimed at
-    // 4. v5.21: 骚扰模式已禁用（方案 C 纯攻击性 AI）—— Hunter 不再保持距离等待发起者
-    BT_AddChild(root, highPounceSeq);           // 5. high-ground positioning
-    BT_AddChild(root, narrowPounceSeq);         // 6. v3.2: narrow → straight pounce
-    BT_AddChild(root, coordPounceSeq);          // 6.5. v4.0: mode 4/6 分散扑（防 dogpile）
+    // v5.24: 骑乘守卫置顶 —— 扑中后树零输出（引擎管骑乘动画），
+    // 消除骑乘中落 wander 乱按 IN_FORWARD 造成的"顿"。
+    int rideSeq = BT_CreateSequence(2,
+        BT_CreateCondition(CND_IsPinningSurvivor),
+        BT_CreateAction(ACT_HoldVictim)
+    );
+    BT_AddChild(root, rideSeq);                 // 0. v5.24: 骑乘中（零输出，引擎管理）
+    // v5.24: missEsc 逃跳已从 root 移除（用户要求"连续扑不带停"）——
+    // 原行为：扑空落地贴脸 → 逃跳跳开 + 3s 冷却 → 跑回再扑 = 明显停顿。
+    // 现扑空落地后直接由攻击分支重扑（引擎 z_lunge_interval=0.5s 为节奏下限）。
+    // BT_AddChild(root, missEscSeq);            // 1. (v5.24 removed) escape after miss
+    BT_AddChild(root, wallPounceSeq);           // 1. v5.16: wall pounce when airborne
+    BT_AddChild(root, evasiveJumpSeq);          // 2. v5.12: evasive jump when aimed at
+    // 3. v5.21: 骚扰模式已禁用（方案 C 纯攻击性 AI）—— Hunter 不再保持距离等待发起者
+    BT_AddChild(root, highPounceSeq);           // 4. high-ground positioning
+    BT_AddChild(root, narrowPounceSeq);         // 5. v3.2: narrow → straight pounce
+    BT_AddChild(root, coordPounceSeq);          // 5.5. v4.0: mode 4/6 分散扑（防 dogpile）
     BT_AddChild(root, disruptionSeq);           // 6.6. v5.0: 枪线扰乱 → 扑火力输出者
     BT_AddChild(root, openStrategyRoll);        // 7a. v3.5: open → roll token
     BT_AddChild(root, openStrat0_WidePounce);   // 7b. v3.5: open strat0 → wide pounce
@@ -1147,12 +1240,17 @@ public Hunter_OnModuleStart() {
     // reload 时引擎 cvar 常驻 → 存在性判断防重复创建告警。
     ConVar hCvar = FindConVar("ai_fast_pounce_proximity");
     if (hCvar == null) {
-        hCvar = CreateConVar("ai_fast_pounce_proximity", "1500",
-            "Hunter 扑击距离门控（v5.21: 增加到 1500u，从更远处就扑击）",
+        // v5.24: 默认 1500→1000 —— 对齐引擎有效扑击射程（v4.0.1 实测）。
+        // 超射程门控 = 1000-1500u 持续按无效 IN_ATTACK（v5.3 同款教训）。
+        hCvar = CreateConVar("ai_fast_pounce_proximity", "1000",
+            "Hunter 扑击距离门控（v5.24: 1000u = 引擎有效射程实测值）",
             FCVAR_NONE, true, 100.0, true, 3000.0);
-    } else if (hCvar.FloatValue < 1500.0) {
-        // v5.21: 增加扑击距离到 1500u，让 Hunter 更激进
-        hCvar.SetFloat(1500.0);
+    } else if (hCvar.FloatValue < 1000.0) {
+        // v5.24: 门槛 1500→1000（引擎射程对齐）
+        hCvar.SetFloat(1000.0);
+    } else if (hCvar.FloatValue > 1000.0) {
+        // v5.24: 现存 1500 运行值（v5.21 遗留）收敛回引擎射程 1000
+        hCvar.SetFloat(1000.0);
     }
     hCvar = FindConVar("ai_straight_pounce_proximity");
     if (hCvar == null) {
@@ -1160,8 +1258,21 @@ public Hunter_OnModuleStart() {
             "Hunter 近距离直扑距离（无 Gauss 偏移）",
             FCVAR_NONE, true, 50.0, true, 1000.0);
     }
+    // v5.25: 扑击节奏 + 扇形角度 cvar（用户设计微调）
+    if (FindConVar("ai_hunter_pounce_interval") == null) {
+        CreateConVar("ai_hunter_pounce_interval", "0.4",
+            "Hunter 每次扑击后的停顿秒数（0 = 不限制，纯引擎冷却）",
+            FCVAR_NONE, true, 0.0, true, 3.0);
+    }
+    if (FindConVar("ai_hunter_pounce_spread") == null) {
+        CreateConVar("ai_hunter_pounce_spread", "30.0",
+            "Hunter 扑击扇形随机角度（±度，0 = 直线瞄准）",
+            FCVAR_NONE, true, 0.0, true, 60.0);
+    }
     SetConVarInt(FindConVar("hunter_committed_attack_range"), 10000);
-    // v5.21: 1000→1500 —— 与 BT 门控 fPounceRange 对齐，让 Hunter 从更远处就准备扑击
+    // v5.24: ready_range 保持 1500（引擎"更早进入扑击准备"= 提前蹲伏走位），
+    // 与 BT 攻击门控 1000（引擎有效射程）分工：1500u 内引擎开始准备、
+    // ≤1000u 插件才按 IN_ATTACK —— 消除超射程白按。
     SetConVarInt(FindConVar("hunter_pounce_ready_range"), 1500);
     SetConVarInt(FindConVar("hunter_leap_away_give_up_range"), 0);
     SetConVarInt(FindConVar("hunter_pounce_max_loft_angle"), 0);
