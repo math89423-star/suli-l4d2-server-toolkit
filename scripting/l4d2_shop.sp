@@ -342,7 +342,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.11.5"
+#define PLUGIN_VERSION "1.11.6"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -1807,7 +1807,13 @@ void ShopBuy(int client, int slot)
         return;
     }
 
-    // 落点：玩家面前 70 单位（购买时刻的方向）
+    // v1.11.6: 全部商品改直接入手（用户拍板）——手持类（汽油桶/瓦斯罐/煤气罐/烟花）
+    // 直接抱手上；已抱着物品时购买 → 掉落地面；其余 GivePlayerItem 直发
+    // （武器同步备弹；GivePlayerItem 失败才地面兜底，防丢商品）
+    char cls[64];
+    strcopy(cls, sizeof(cls), g_ShopTable[slot].classname);
+
+    // 落点：玩家面前 70 单位（购买时刻的方向；仅兜底掉落用）
     float pos[3], ang[3], fwd[3];
     GetClientEyePosition(client, pos);
     GetClientEyeAngles(client, ang);
@@ -1816,9 +1822,44 @@ void ShopBuy(int client, int slot)
     pos[1] += fwd[1] * 70.0;
     pos[2] -= 20.0;
 
-    ShopSpawn(g_ShopTable[slot].classname, pos);   // v1.7.93: 可爆炸类商品直接生成 prop_physics
+    if (IsCarryablePropClass(cls))
+    {
+        if (IsCarryingProp(client))
+        {
+            // 已抱着物品 → 不能同时抱两个，掉落地面
+            ShopSpawn(cls, pos);
+            PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），你正抱着物品，已放在你面前",
+                g_ShopTable[slot].name, price, SH_GetWallet(client));
+        }
+        else
+        {
+            int ent = CreateEntityByName(cls);
+            if (ent == -1)
+            {
+                SH_AddWallet(client, price);
+                g_iShopBought[client][slot]--;
+                PrintToChat(client, "\x04[商店]\x01 \x05%s\x01 发放失败，积分已退回", g_ShopTable[slot].name);
+                return;
+            }
+            DispatchSpawn(ent);
+            EquipPlayerWeapon(client, ent);
+            PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），已抱在手上",
+                g_ShopTable[slot].name, price, SH_GetWallet(client));
+        }
+        return;
+    }
 
-    PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），物品已放在你面前",
+    int ent = GivePlayerItem(client, cls);
+    if (ent == -1)
+    {
+        // GivePlayerItem 失败 → 地面生成兜底（防丢商品）
+        ShopSpawn(cls, pos);
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），已放在你面前",
+            g_ShopTable[slot].name, price, SH_GetWallet(client));
+        return;
+    }
+    ApplyReserveAmmo(client, ent);   // 武器直发同步备弹（非武器类 Ammo_ReserveMax=0 自动跳过）
+    PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），已直接入手",
         g_ShopTable[slot].name, price, SH_GetWallet(client));
 }
 
@@ -2016,6 +2057,28 @@ void PickWeightedItem(char items[][32], const int[] weights, int count, char[] p
         }
     }
     strcopy(picked, maxLen, items[count - 1]);
+}
+
+// v1.11.6: 手持类道具（可抱在手上的实体；L4D2 一次只能抱一个）
+bool IsCarryablePropClass(const char[] cls)
+{
+    return StrEqual(cls, "weapon_gascan")
+        || StrEqual(cls, "weapon_propanetank")
+        || StrEqual(cls, "weapon_oxygentank")
+        || StrEqual(cls, "weapon_fireworkcrate")
+        || StrEqual(cls, "weapon_cola_bottles")
+        || StrEqual(cls, "weapon_gnome");
+}
+
+// 玩家当前是否正抱着手持类道具（活动武器为手持类）
+bool IsCarryingProp(int client)
+{
+    int active = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+    if (active <= 0 || !IsValidEntity(active))
+        return false;
+    char cls[32];
+    GetEntityClassname(active, cls, sizeof(cls));
+    return IsCarryablePropClass(cls);
 }
 
 // v1.11.4: 直接发放（GivePlayerItem）的武器不走拾取路径，AmmoSets 不会给备弹——
