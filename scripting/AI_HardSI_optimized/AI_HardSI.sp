@@ -468,6 +468,9 @@ public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast)
             g_iTankBhopChain[client] = 0;
             g_fTankLastGround[client] = 0.0;
             g_fTankLastPunchJump[client] = 0.0;
+            // v5.35: 记录出生时刻 —— TankCond_SpawnPush 用它强制出生推进
+            // （用户："一刷新出来就要主动贴近生还者队伍"）
+            BB_SetFloat(client, "_tank_spawn_at", GetGameTime());
         }
     }
 

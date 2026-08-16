@@ -790,10 +790,30 @@ stock int BT_CreateTankTree() {
     BT_AddChild(attackSelector, BT_CreateAction(ACT_MoveToTarget)); // 7. v5.1: ← 冷却期走位逼近
 
     // ==========================================
+    // v5.35: 出生推进（用户："Tank 刷新远一点，但一刷新就要主动贴近队伍"）
+    // 生成后 3s 内强制向最近幸存者推进（AcquireClosestTarget + MoveToTarget，
+    // MoveToTarget 走 v5.25 远近分流 → 远处 Valve 导航绕障碍逼近，不直线撞墙）。
+    // 3s 后条件 FAIL → 正常走 targetSelector/attackSelector 战术。
+    // ==========================================
+    int spawnPushSeq = BT_CreateSequence(3,
+        BT_CreateCondition(TankCond_SpawnPush),     // 出生 3s 内
+        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_MoveToTarget)            // RUNNING：持续推进
+    );
+
+    // ==========================================
     // Root
     // ==========================================
-    int root = BT_CreateSequence(2, targetSelector, attackSelector);
+    int root = BT_CreateSequence(3, spawnPushSeq, targetSelector, attackSelector);
     return root;
+}
+
+// v5.35: 出生推进条件 —— 距生成时刻 < 3s（生成时刻由 AI_HardSI.sp
+// Event_PlayerSpawn 的 Tank case 写入黑板 _tank_spawn_at）
+BT_Status TankCond_SpawnPush(int client) {
+    float spawnAt = BB_GetFloat(client, "_tank_spawn_at", 0.0);
+    if (spawnAt <= 0.0) return BT_FAILURE;
+    return (GetGameTime() - spawnAt < 3.0) ? BT_SUCCESS : BT_FAILURE;
 }
 
 public Tank_OnModuleStart() {
