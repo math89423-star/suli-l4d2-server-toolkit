@@ -342,7 +342,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.11.4"
+#define PLUGIN_VERSION "1.11.5"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -1417,43 +1417,6 @@ int ShopSpawn(const char[] cls, float pos[3])
 
 // v1.7.72: 近战盲盒——生成指定近战武器（melee_script_name keyvalue 必须
 // 在 DispatchSpawn 前；trace 落地面 + glow 与 ShopSpawn 一致）
-int SpawnMelee(const char[] meleeName, float pos[3])
-{
-    int ent = CreateEntityByName("weapon_melee");
-    if (ent == -1)
-        return -1;
-
-    // v1.7.77 FIX: 只用 melee_script_name keyvalue（v1.7.76 加的双保险
-    // SetEntPropString m_MeleeWeaponName 在 spawn 前不存在该 prop →
-    // 抛异常：不生成 + 购买后菜单不重开，日志实锤 "Property not found"）
-    DispatchKeyValue(ent, "melee_script_name", meleeName);
-    LogMessage("[melee-box] spawn melee=%s ent=%d", meleeName, ent);
-
-    float from[3], to[3];
-    from = pos;
-    from[2] += 60.0;
-    Handle tr = TR_TraceRayFilterEx(from, view_as<float>({ 90.0, 0.0, 0.0 }),
-        MASK_SOLID, RayType_Infinite, ShopTraceFilter, ent);
-    if (TR_DidHit(tr))
-    {
-        TR_GetEndPosition(to, tr);
-        to[2] += 5.0;
-    }
-    else
-    {
-        to = from;
-    }
-    delete tr;
-
-    DispatchSpawn(ent);
-    TeleportEntity(ent, to, NULL_VECTOR, NULL_VECTOR);
-
-    SetEntProp(ent, Prop_Send, "m_iGlowType", 3);
-    SetEntProp(ent, Prop_Send, "m_nGlowRange", 800);
-    SetEntProp(ent, Prop_Send, "m_glowColorOverride", 50 | (255 << 8) | (50 << 16) | (255 << 24));
-
-    return ent;
-}
 
 // ============================================================================
 // v1.5.1: 复活套装 — 监听 si_hud v1.9.2 的 SH_OnClientRespawned 全局 forward
@@ -1694,14 +1657,7 @@ void ShopBuy(int client, int slot)
         else
             strcopy(picked, sizeof(picked), g_MeleePool[roll]);
 
-        float pos[3], ang[3], fwd[3];
-        GetClientEyePosition(client, pos);
-        GetClientEyeAngles(client, ang);
-        GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
-        pos[0] += fwd[0] * 70.0;
-        pos[1] += fwd[1] * 70.0;
-        pos[2] -= 20.0;
-
+        // v1.11.5: 直接入手（不再地面生成）——近战/电锯 EquipPlayerWeapon 即装到手上
         int ent;
         if (isChainsaw)
         {
@@ -1709,12 +1665,18 @@ void ShopBuy(int client, int slot)
             if (ent != -1)
             {
                 DispatchSpawn(ent);
-                TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
+                EquipPlayerWeapon(client, ent);
             }
         }
         else
         {
-            ent = SpawnMelee(picked, pos);
+            ent = CreateEntityByName("weapon_melee");
+            if (ent != -1)
+            {
+                DispatchKeyValue(ent, "melee_script_name", picked);
+                DispatchSpawn(ent);
+                EquipPlayerWeapon(client, ent);
+            }
         }
         if (ent <= 0)
         {
@@ -1746,6 +1708,24 @@ void ShopBuy(int client, int slot)
         ApplyReserveAmmo(client, ent);   // v1.11.4: 盲盒直发不走拾取，手动同步备弹
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05%s\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：开出 \x05%s\x01",
             g_ShopTable[slot].name, price, SH_GetWallet(client), picked);
+        return;
+    }
+
+    // v1.11.5: 马格南——直接入手（不走地面生成；直发路径同步备弹）
+    if (StrEqual(g_ShopTable[slot].classname, "weapon_pistol_magnum"))
+    {
+        int ent = GivePlayerItem(client, "weapon_pistol_magnum");
+        if (ent == -1)
+        {
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            PrintToChat(client, "\x04[商店]\x01 马格南发放失败，积分已退回");
+            return;
+        }
+        EquipPlayerWeapon(client, ent);
+        ApplyReserveAmmo(client, ent);
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05马格南\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）",
+            price, SH_GetWallet(client));
         return;
     }
 
