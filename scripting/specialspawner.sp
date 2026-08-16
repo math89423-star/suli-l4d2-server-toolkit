@@ -283,7 +283,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "2.5.2",
+	version = "2.5.3",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -323,12 +323,17 @@ int Native_MarkWaveTank(Handle plugin, int numParams) {
 // seconds: 暂停秒数（调用时重置计时器，最后一次调用生效）
 // 用途: 火力支援 AGM 导弹爆炸后暂停刷新 20 秒，给玩家喘息时间
 // v2.4.3: director_no_specials 是 cheat 无法用，改用主动清理（每秒杀新刷特感）
+// v2.5.3: **director_no_specials 实测非 cheat**（SM 1.12 RCON 可直设，2026-08-16
+// 实锤）——v2.4.3 判断错误。暂停时直接设 1 真停导演特感（+ 每秒清理兜底），
+// 恢复时还原原值。此前"假暂停"根因：只拦了本插件波次，导演特感照刷，
+// 且清理对 ghost 特感无效（14:23/14:29 两次暂停 cleanup killed=0）。
 int Native_PauseSpawning(Handle plugin, int numParams) {
 	float seconds = GetNativeCell(1);
 	if (seconds <= 0.0) {
 		g_bSpawningPaused = false;
 		delete g_hPauseTimer;
 		delete g_hPauseCleanupTimer;
+		SS_RestoreDirectorSpecials();
 		LogMessage("[SS] Spawning pause CLEARED (external)");
 		return 0;
 	}
@@ -338,16 +343,47 @@ int Native_PauseSpawning(Handle plugin, int numParams) {
 	delete g_hPauseCleanupTimer;
 	g_hPauseTimer = CreateTimer(seconds, Timer_UnpauseSpawning, _, TIMER_FLAG_NO_MAPCHANGE);
 	g_hPauseCleanupTimer = CreateTimer(1.0, Timer_PauseCleanup, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
-	LogMessage("[SS] Spawning PAUSED for %.1f seconds (external, active cleanup)", seconds);
+	SS_PauseDirectorSpecials();
+	LogMessage("[SS] Spawning PAUSED for %.1f seconds (external, director_no_specials + active cleanup)", seconds);
 	return 0;
+}
+
+// v2.5.3: 暂停导演特感刷新——director_no_specials=1（记录原值，恢复时还原）。
+// 只影响导演的原生特感生成；specialspawner 波次由 g_bSpawningPaused 拦截；
+// Tank 波/玩家特感不受影响。
+int g_iDirectorSpecialsPrev = -1;   // -1 = 未记录
+
+void SS_PauseDirectorSpecials() {
+	ConVar cv = FindConVar("director_no_specials");
+	if (cv == null)
+		return;
+	g_iDirectorSpecialsPrev = cv.IntValue;
+	cv.IntValue = 1;
+	LogMessage("[SS] director_no_specials %d -> 1 (pause)", g_iDirectorSpecialsPrev);
+}
+
+void SS_RestoreDirectorSpecials() {
+	ConVar cv = FindConVar("director_no_specials");
+	if (cv == null)
+		return;
+	if (g_iDirectorSpecialsPrev >= 0) {
+		cv.IntValue = g_iDirectorSpecialsPrev;
+		LogMessage("[SS] director_no_specials -> %d (restore)", g_iDirectorSpecialsPrev);
+	} else {
+		cv.IntValue = 0;
+		LogMessage("[SS] director_no_specials -> 0 (restore, no prior value)");
+	}
+	g_iDirectorSpecialsPrev = -1;
 }
 
 // v2.4.0 计时器回调：暂停时间到，恢复刷新
 // v2.4.3: 停止主动清理 timer
+// v2.5.3: 同时还原 director_no_specials
 Action Timer_UnpauseSpawning(Handle timer) {
 	g_hPauseTimer = null;
 	g_bSpawningPaused = false;
 	delete g_hPauseCleanupTimer;
+	SS_RestoreDirectorSpecials();
 	LogMessage("[SS] Spawning pause EXPIRED, resuming normal spawn");
 	return Plugin_Stop;
 }
@@ -530,6 +566,8 @@ public void OnPluginStart() {
 
 public void OnPluginEnd() {
 	TweakSettings(true);
+	// v2.5.3: reload/卸载时还原导演特感刷新（防暂停中 reload 残留 director_no_specials=1）
+	SS_RestoreDirectorSpecials();
 	// v2.0.0: 三态生命周期清理（含跨批状态；TIMER_FLAG_NO_MAPCHANGE 会随换图取消，此处兜底）
 	ResetLifecycle();
 	g_bInSpawnTime = false;
@@ -1974,8 +2012,12 @@ void SettleWaveClearScore(float totalCountdown) {
 					SH_AddWallet(i, score);
 			}
 		}
-		LogMessage("[SS] Clear score: tier=%s score=%d downDeaths=%d/%d base=%d tank=%s next=%ds (timeMult=%.2f)",
-			tier, score, g_iWaveDownDeaths, g_iWaveBase, g_bWaveHadTank ? 1 : 0, total, timeMult);
+		// v2.5.3 FIX: LogMessage 格式串参数不匹配（v2.5.0-2.5.2: downDeaths=%d/%d 缺
+		// 第二个值 + tank=%s 传 int）→ 每次结算抛 "String formatted incorrectly"
+		// 异常 → 函数中断 → 剿灭播报永远不显示（分已入账）。8 格式符 ↔ 8 参数。
+		LogMessage("[SS] Clear score: tier=%s score=%d downDeaths=%d/%d base=%d tank=%d next=%ds (timeMult=%.2f)",
+			tier, score, g_iWaveDownDeaths, g_iWaveBase, g_iWaveBase,
+			g_bWaveHadTank ? 1 : 0, total, timeMult);
 		PrintToChatAll("\x04[特感]\x01 本波次剿灭完成，\x03%s%s\x01全体 \x05+%d\x01 分，下一波来袭 \x05%d\x01 秒",
 			tankTag, tier, score, total);
 	} else {
