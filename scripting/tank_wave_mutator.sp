@@ -2,6 +2,7 @@
 // Tank 波次突变系统：10% 随机突变 + 连续5波无倒地强制双Tank + 连续11波无Tank强制单Tank + Tank波后3波冷静期
 // v2.2.0: Tank 波强制清缴条件 = Tank 死亡（挂起 specialspawner 清缴判定）
 // v2.3.0: 新增11波无Tank保底（第12波必刷单Tank，冷静期波不计数）+ 冷静期 9→3 波
+// v2.4.0: 就近生成修复 —— 多次采样取 ≥450u 里最近点，确保 Tank 在引擎激活范围（防待命站桩+掉队被清）
 #pragma semicolon 1
 #pragma newdecls required
 
@@ -9,7 +10,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.3.0"
+#define PLUGIN_VERSION "2.4.0"
 
 // 配置常量
 #define MUTATION_CHANCE 0.10        // 10% 突变概率
@@ -17,6 +18,10 @@
 #define FORCE_TANK_NO_SPAWN 11      // 连续11波无Tank触发保底单Tank（第12波必刷）
 #define TANK_COOLDOWN_WAVES 3       // Tank波后冷静期（9→3）
 #define MAX_TRACKED_TANKS 4         // 最多跟踪的 Tank 数量
+// v2.4.0: 就近生成 —— 突变 Tank 生成后必须在幸存者活跃模拟范围内，否则引擎
+// 不 tick 其 AI（待命站桩），且远离流程会被导演判定掉队自动清除（"被系统处死"）。
+#define TANK_SPAWN_MIN_DIST 450.0   // 最近生成距离（<此值贴脸不公平，拒绝）
+#define TANK_SPAWN_SAMPLES  12      // 采样次数（取 ≥MIN 里最近的点）
 
 // specialspawner native 声明
 native void SS_HoldClearing(bool hold);
@@ -222,20 +227,56 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
             break;
         }
 
-        // 使用 left4dhooks 寻找合适的 Tank 生成位置（zombieClass 8 = Tank）
+        // v2.4.0: 多次采样取最近的合法生成点（≥MIN_DIST 避免贴脸，取最近确保引擎立即激活）
+        float refPos[3];
+        GetClientAbsOrigin(client, refPos);
+
         float spawnPos[3], spawnAng[3] = {0.0, 0.0, 0.0};
-        if (!L4D_GetRandomPZSpawnPosition(client, 8, 10, spawnPos)) {
-            LogMessage("[Tank Mutator] Tank #%d spawn failed: no valid spawn position", n + 1);
+        float bestPos[3];
+        float bestDist = -1.0;
+        int validCount = 0;
+
+        for (int attempt = 0; attempt < TANK_SPAWN_SAMPLES; attempt++) {
+            float candidate[3];
+            if (L4D_GetRandomPZSpawnPosition(client, 8, 5, candidate)) {
+                float dist = GetVectorDistance(refPos, candidate);
+                validCount++;
+
+                // 优先选 ≥MIN_DIST 里最近的；如果全部 <MIN_DIST（罕见），取最远的（相对不贴脸）
+                if (dist >= TANK_SPAWN_MIN_DIST) {
+                    if (bestDist < 0.0 || dist < bestDist) {
+                        bestDist = dist;
+                        bestPos[0] = candidate[0];
+                        bestPos[1] = candidate[1];
+                        bestPos[2] = candidate[2];
+                    }
+                } else if (bestDist < 0.0) {
+                    // 暂无合格点，记录这个偏近的候选（fallback）
+                    bestDist = dist;
+                    bestPos[0] = candidate[0];
+                    bestPos[1] = candidate[1];
+                    bestPos[2] = candidate[2];
+                }
+            }
+        }
+
+        if (validCount == 0) {
+            LogMessage("[Tank Mutator] Tank #%d spawn failed: no valid spawn position after %d attempts",
+                       n + 1, TANK_SPAWN_SAMPLES);
             continue;
         }
+
+        spawnPos[0] = bestPos[0];
+        spawnPos[1] = bestPos[1];
+        spawnPos[2] = bestPos[2];
 
         // 直接生成 Tank
         int tank = L4D2_SpawnTank(spawnPos, spawnAng);
         if (tank > 0 && IsClientInGame(tank)) {
             g_iTanks[spawned] = tank;
             spawned++;
-            LogMessage("[Tank Mutator] Tank #%d spawned at (%.1f, %.1f, %.1f), client: %d",
-                       n + 1, spawnPos[0], spawnPos[1], spawnPos[2], tank);
+            LogMessage("[Tank Mutator] Tank #%d spawned at (%.1f, %.1f, %.1f), dist=%.0f, client: %d",
+                       n + 1, spawnPos[0], spawnPos[1], spawnPos[2], bestDist, tank);
         } else {
             LogMessage("[Tank Mutator] Tank #%d spawn failed: invalid entity", n + 1);
         }

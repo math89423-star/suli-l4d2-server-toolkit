@@ -332,7 +332,7 @@ stock int BT_CreateSpitterTree() {
         BT_CreateSpitReady(),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(900.0),  // v5.8: pressure-scaled spit range
+        BT_CreateIsTargetInRange(900.0),  // 距离门控（固定距离）
         BT_CreateAction(SpitterAct_Spit)
     );
 
@@ -425,7 +425,7 @@ stock int BT_CreateSpitterTree() {
         BT_CreateSpitReady(),
         BT_CreateAction(ACT_AcquirePinTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(900.0),  // v5.8: pressure-scaled spit range
+        BT_CreateIsTargetInRange(900.0),  // 距离门控（固定距离）
         BT_CreateAction(SpitterAct_Spit)
     );
 
@@ -451,7 +451,7 @@ stock int BT_CreateSpitterTree() {
         BT_CreateSpitReady(),
         BT_CreateAction(SpitterAct_FindPinnedTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(900.0),  // v5.8: pressure-scaled spit range
+        BT_CreateIsTargetInRange(900.0),  // 距离门控（固定距离）
         BT_CreateAction(SpitterAct_Spit)
     );
 
@@ -464,7 +464,7 @@ stock int BT_CreateSpitterTree() {
         BT_CreateSpitReady(),
         BT_CreateAction(SpitterAct_FindBoomedTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(900.0),  // v5.8: pressure-scaled spit range
+        BT_CreateIsTargetInRange(900.0),  // 距离门控（固定距离）
         BT_CreateAction(SpitterAct_PredictiveSpit)
     );
 
@@ -480,7 +480,7 @@ stock int BT_CreateSpitterTree() {
         BT_CreateSpitReady(),
         BT_CreateAction(ACT_AcquireClusterTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(900.0),  // v5.8: pressure-scaled spit range
+        BT_CreateIsTargetInRange(900.0),  // 距离门控（固定距离）
         BT_CreateAction(SpitterAct_PredictiveSpit)
     );
 
@@ -497,7 +497,7 @@ stock int BT_CreateSpitterTree() {
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateSpitReady(),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(900.0),  // v5.8: pressure-scaled spit range
+        BT_CreateIsTargetInRange(900.0),  // 距离门控（固定距离）
         BT_CreateAction(SpitterAct_PredictiveSpit)
     );
 

@@ -360,7 +360,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_IsHarasser),
         BT_CreateInverter(BT_CreateCondition(CND_HarasserReleased)),
         BT_CreateSequence(2,
-            BT_CreateAction(ACT_AcquireClosestTarget),
+            BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
             BT_CreateAction(JockeyAct_HarasserRide)
         )
     );
@@ -406,7 +406,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateInverter(BT_CreateIsTargetInRange(400.0)),   // still far
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(ACT_FlankApproach)
     );
     int ledgeLeap = BT_CreateSequence(6,
@@ -414,7 +414,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(400.0),                       // close enough
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
 
@@ -424,7 +424,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateInverter(BT_CreateIsTargetInRange(350.0)),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(ACT_HugWall)
     );
     int narrowLeap = BT_CreateSequence(6,
@@ -432,7 +432,7 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(350.0),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
 
@@ -450,14 +450,14 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsNotTargetInRange(400.0),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(ACT_CircleFlank)
     );
     int openS0_Leap = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(400.0),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
     // Strat 1: Erratic leap — zigzag approach → leap from varied angle
@@ -466,14 +466,14 @@ stock int BT_CreateJockeyTree() {
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsNotTargetInRange(350.0),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(ACT_ErraticApproach)
     );
     int openS1_Leap = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateCondition(CND_OnGround), BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(350.0),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(JockeyAct_AlternatingHop)  // v5.7: 移除 Cooldown(1.2)
     );
 
@@ -502,7 +502,7 @@ stock int BT_CreateJockeyTree() {
 
     // Approach: always strafe while closing in
     int strafeApproach = BT_CreateSequence(2,
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateAction(ACT_StrafeMoveToTarget)
     );
 
@@ -519,7 +519,7 @@ stock int BT_CreateJockeyTree() {
     int closeRangeStrafe = BT_CreateSequence(5,
         BT_CreateIsInRange(300.0),
         BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可骑)
         BT_CreateCondition(JockeyCond_CloseStrafeTimeout),
         BT_CreateAction(ACT_StrafeApproach)
     );

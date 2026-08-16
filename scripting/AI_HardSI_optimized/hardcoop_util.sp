@@ -1115,6 +1115,43 @@ stock bool SI_IsPinnable(int client) {
 	return !GetEntProp(client, Prop_Send, "m_isIncapacitated");
 }
 
+// v5.19: 最近的【可扑/可骑】生还者（优先站立未控，兜底任意存活）
+// 用途：Jockey/Hunter/Charger 等扑咬类目标选择——倒地者不可扑骑，持续锁定
+// 倒地者会原地跳（Jockey "倒地后徘徊" bug，2026-08-15 修复）。优先可扑者 →
+// 存在站立目标时不锁倒地者；全倒地时退回最近存活者（树自然 FAIL）。
+stock int GetClosestPinnableSurvivor(const float referencePos[3], int excludeSurvivor = -1) {
+	float survivorPos[3];
+	int closestPinnable = -1;
+	int closestAny = -1;
+	float distPinnable = -1.0;
+	float distAny = -1.0;
+
+	for (int client = 1; client <= MaxClients; client++) {
+		if (!IsSurvivor(client) || !IsPlayerAlive(client) || client == excludeSurvivor)
+			continue;
+
+		GetClientAbsOrigin(client, survivorPos);
+		float d = GetVectorDistance(referencePos, survivorPos);
+
+		// 跟踪最近的【任意】存活者（兜底）
+		if (distAny < 0.0 || d < distAny) {
+			distAny = d;
+			closestAny = client;
+		}
+
+		// 跟踪最近的【可扑】者（优先）
+		if (SI_IsPinnable(client)) {
+			if (distPinnable < 0.0 || d < distPinnable) {
+				distPinnable = d;
+				closestPinnable = client;
+			}
+		}
+	}
+
+	// 优先返回可扑者；无可扑者时退回任意存活者（全倒地 = 无目标，树 FAIL）
+	return (closestPinnable > 0) ? closestPinnable : closestAny;
+}
+
 // 最近的挂边幸存者（Tank/Charger 的优先击落目标）
 stock int SI_GetHangingSurvivor(const float siPos[3], float maxDist = 0.0) {
 	int best = -1;

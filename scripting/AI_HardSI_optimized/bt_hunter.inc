@@ -183,7 +183,7 @@ BT_Status HunterAct_WallPounce(int client) {
     // 获取最近的幸存者作为目标
     int target = BB_GetInt(client, "target", -1);
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
-        target = ACT_AcquireClosestTarget(client);
+        target = ACT_AcquirePinnableTarget(client);  // v5.19: 优先站立目标
     }
 
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
@@ -744,7 +744,7 @@ stock int BT_CreateHunterTree() {
     //     BT_CreateCondition(CND_IsHarasser),
     //     BT_CreateInverter(BT_CreateCondition(CND_HarasserReleased)),
     //     BT_CreateSequence(2,
-    //         BT_CreateAction(ACT_AcquireClosestTarget),
+    //         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
     //         BT_CreateAction(HunterAct_HarasserApproach)
     //     )
     // );
@@ -778,7 +778,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
         BT_CreateCondition(CND_IsNarrowSpace),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(800.0)  // longer range in corridors
     );
@@ -808,7 +808,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateStrategyIs(0),
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
         BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
@@ -827,7 +827,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateStrategyIs(1),
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
         BT_CreateInverter(BT_CreateCondition(CND_IsTargetPinned))
@@ -849,7 +849,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
         BT_CreateCondition(CND_IsSemiOpen),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS))
     );
     int semiHugAction = BT_CreateSequence(2,
@@ -869,7 +869,7 @@ stock int BT_CreateHunterTree() {
     // 白扑一次。CND_TargetIsPinnable 同时覆盖"已被控"，语义包含原
     // CND_IsTargetPinned 反向闸，故替换而非叠加。
     int pounceInnerSeq = BT_CreateSequence(4,
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fPounceRange),
         BT_CreateCondition(CND_TargetIsPinnable)
@@ -895,7 +895,7 @@ stock int BT_CreateHunterTree() {
     int closePounceSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_OnGround),
         BT_CreateCondition(CND_IsDucking),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateIsTargetInRange(fStraightRange),
         BT_CreateCondition(CND_TargetIsPinnable)   // v5.18: 同 pounceInnerSeq
@@ -930,7 +930,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateInverter(BT_CreateIsInRange(400.0)),
         BT_CreateSequence(2,
-            BT_CreateAction(ACT_AcquireClosestTarget),
+            BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
             BT_CreateAction(HunterAct_SprintApproach)
         )
     );
@@ -952,7 +952,7 @@ stock int BT_CreateHunterTree() {
         BT_CreateCondition(CND_OnGround),
         BT_CreateInverter(BT_CreateCondition(CND_IsDucking)),
         BT_CreateIsInRange(fPounceRange),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateAction(ACT_Crouch)
     );
@@ -967,7 +967,7 @@ stock int BT_CreateHunterTree() {
     int crouchApproachSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_OnGround),
         BT_CreateIsInRange(600.0),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可扑)
         BT_CreateAction(HunterAct_CrouchApproach)
     );
 

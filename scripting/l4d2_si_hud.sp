@@ -809,7 +809,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.13.2"
+#define PLUGIN_VERSION "1.13.3"
 
 // ============================================================================
 // ConVar handles
@@ -1006,6 +1006,88 @@ public int Native_SH_AddWallet(Handle plugin, int numParams)
 {
     int client = GetNativeCell(1);
     return AddWallet(client, GetNativeCell(2));
+}
+
+// v1.13.3: SH_ShowMissileBanner(client, commonKills, siKills, witchKills, tankKills)
+// 导弹聚合击杀横幅——纯显示，不计分（计分已通过 player_death/infected_death 自动完成）
+// 问题：导弹一次杀多个 SI → 每个 SurvivorKilledSI 横幅瞬间被覆盖 → 感觉"没显示"
+// 方案：爆炸后显示一个聚合横幅"导弹清场 击杀 N"，覆盖所有单体横幅
+public int Native_SH_ShowMissileBanner(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+        return 0;
+    if (GetClientTeam(client) != 2)
+        return 0;
+
+    int commonKills = GetNativeCell(2);
+    int siKills     = GetNativeCell(3);
+    int witchKills  = GetNativeCell(4);
+    int tankKills   = GetNativeCell(5);
+
+    int totalKills = commonKills + siKills + witchKills + tankKills;
+    if (totalKills <= 0)
+        return 0;
+
+    if (!g_cvKillHintEnable.BoolValue)
+        return 0;
+
+    // 构建聚合横幅
+    char banner[256];
+    char detail[128] = "";
+
+    // 击杀分类明细（只显示非零项）
+    if (siKills > 0 || witchKills > 0 || tankKills > 0)
+    {
+        char parts[3][32];
+        int partCount = 0;
+        if (tankKills > 0)
+            Format(parts[partCount++], sizeof(parts[]), "TANK×%d", tankKills);
+        if (witchKills > 0)
+            Format(parts[partCount++], sizeof(parts[]), "WITCH×%d", witchKills);
+        if (siKills > 0)
+            Format(parts[partCount++], sizeof(parts[]), "特感×%d", siKills);
+
+        for (int i = 0; i < partCount; i++)
+        {
+            if (i > 0)
+                StrCat(detail, sizeof(detail), " ");
+            StrCat(detail, sizeof(detail), parts[i]);
+        }
+    }
+
+    // 主横幅：☠☠☠ 导弹清场 击杀 N
+    char skulls[64];
+    int skullCount = totalKills;
+    if (skullCount > 20) skullCount = 20;  // 封顶 20 个骷髅
+    for (int i = 0; i < skullCount; i++)
+        StrCat(skulls, sizeof(skulls), "☠");
+
+    if (strlen(detail) > 0)
+        Format(banner, sizeof(banner), "%s 导弹清场 击杀 %d\n%s", skulls, totalKills, detail);
+    else
+        Format(banner, sizeof(banner), "%s 导弹清场 击杀 %d", skulls, totalKills);
+
+    // 显示横幅（覆盖之前的单体击杀横幅）
+    KillHPHideTimer(client);
+    delete g_hHurtVictims[client];
+    PrintCenterText(client, banner);
+    g_hHPHideTimer[client] = CreateTimer(g_cvKillCardTime.FloatValue, Timer_HideHP,
+        GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+
+    // 播放单次击杀音效（连杀档位音效由 StackStreakKill 结算时自己播，不在此重复）
+    if (SoundCooldownOK(client))
+    {
+        char sound[PLATFORM_MAX_PATH];
+        if (tankKills > 0)
+            PickSound(sound, sizeof(sound), g_cvSoundTank, g_cvSoundSI);
+        else
+            g_cvSoundSI.GetString(sound, sizeof(sound));
+        if (strlen(sound) > 0)
+            PlayClientSound(client, sound);
+    }
+
+    return 0;
 }
 
 // ============================================================================
@@ -1246,6 +1328,7 @@ public void OnPluginStart()
     RegPluginLibrary("l4d2_si_hud_api");
     CreateNative("SH_GetWallet",      Native_SH_GetWallet);
     CreateNative("SH_AddWallet",      Native_SH_AddWallet);
+    CreateNative("SH_ShowMissileBanner", Native_SH_ShowMissileBanner);  // v1.13.3: 导弹聚合击杀横幅(纯显示)
     // v1.12.0: 复活币 natives（Get/AddReviveCoins/GetCoinMax/ReviveClient）已移除
     // v1.9.2: 复活完成全局 forward（l4d2_shop v1.5.1 监听发复活套装+满血）
     g_hFwdRespawned = CreateGlobalForward("SH_OnClientRespawned", ET_Ignore, Param_Cell);
@@ -2379,7 +2462,7 @@ public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroad
     // v1.7.56 (bug): 排除 Witch —— 引擎对 Witch 死亡也可能发 infected_death
     //（回退路径 g_iLastCommonEnt 此时 = Witch 实体），会误显示 "† 小僵尸"。
     int witchEnt = g_iLastCommonEnt[attacker];
-    if (witchEnt >= 1 && witchEnt < 2048)
+    if (witchEnt >= 1 && witchEnt < 2048 && IsValidEntity(witchEnt))
     {
         char cls[16];
         GetEntityClassname(witchEnt, cls, sizeof(cls));
@@ -2412,7 +2495,7 @@ public Action Event_InfectedDeath(Event event, const char[] name, bool dontBroad
         // the killer's last-hit common entity instead.
         int ent = g_iLastCommonEnt[attacker];
         int dmgPts = 0;
-        if (ent >= 1 && ent < 2048)
+        if (ent >= 1 && ent < 2048 && IsValidEntity(ent))
         {
             // v1.7.58: 防 witch 伤害分串台——last-ent 可能是 Witch 实体（打
             // witch 后未再碰小僵尸，实体已死索引未复用），其伤害分存在同一

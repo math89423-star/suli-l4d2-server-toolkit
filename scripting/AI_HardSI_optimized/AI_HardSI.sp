@@ -179,7 +179,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "5.8.0",
+    version = "5.20.0",
     url = "github.com/breezyplease"
 };
 
@@ -216,10 +216,6 @@ ConVar g_hCvarWaveSync        = null;  // 0=关（纯接力）1=开（接力+齐
 ConVar g_hCvarWaveSyncRatio   = null;
 ConVar g_hCvarWaveSyncTimeout = null;
 ConVar g_hCvarWaveSyncRange   = null;  // 判定"就位"的距离
-
-// v5.8: 压力系统集成 — AI 攻击性调制
-ConVar g_hCvarPressureAggression = null;
-float  g_fPressureAggression = 1.0;  // Default T3 baseline
 
 // ============================================================================
 // OnPluginStart
@@ -288,9 +284,6 @@ public OnPluginStart() {
 
     // v4.0: 战术模式 cvar（由 si_composition_manager 写入；未安装时保持 -1，模式分支全部走默认行为）
     g_hCvarActiveMode = FindConVar("si_comp_active_mode");
-
-    // v5.8: 压力系统懒绑定（pressure_tracker 可能后加载）
-    TryBindPressureTracker();
 
     // --- Build all Behavior Trees ---
     g_iBTHunterRoot  = BT_CreateHunterTree();
@@ -403,86 +396,6 @@ Action Timer_CheckPropVelocity(Handle timer, int entity) {
 }
 
 // ============================================================================
-// v5.8: Pressure tracker binding
-// ============================================================================
-public void OnAllPluginsLoaded()
-{
-    TryBindPressureTracker();
-}
-
-void TryBindPressureTracker()
-{
-    if (g_hCvarPressureAggression != null) return;  // already bound
-
-    g_hCvarPressureAggression = FindConVar("sm_pressure_aggression");
-    if (g_hCvarPressureAggression != null) {
-        g_fPressureAggression = g_hCvarPressureAggression.FloatValue;
-        HookConVarChange(g_hCvarPressureAggression, OnPressureAggressionChanged);
-        LogMessage("[AI_HardSI] Pressure tracker bound: aggression %.2f", g_fPressureAggression);
-    }
-}
-
-public void OnPressureAggressionChanged(ConVar convar, const char[] oldValue, const char[] newValue)
-{
-    float oldAggr = g_fPressureAggression;
-    g_fPressureAggression = convar.FloatValue;
-    if (FloatAbs(oldAggr - g_fPressureAggression) > 0.01) {
-        LogMessage("[AI_HardSI] Pressure aggression updated: %.2f → %.2f",
-            oldAggr, g_fPressureAggression);
-
-        // v5.8.1: 批量更新所有 SI 黑板（避免每 tick 重复写入）
-        for (int i = 1; i <= MaxClients; i++) {
-            if (IsBotInfected(i) && IsPlayerAlive(i) && BT_IsBound(i)) {
-                BB_SetFloat(i, "_pressure_aggr", g_fPressureAggression);
-            }
-        }
-    }
-}
-
-// ============================================================================
-// v5.8: Aggression scaling helpers
-// ============================================================================
-// These functions read aggression from blackboard (injected per-tick) and scale
-// thresholds dynamically. Higher aggression = more aggressive behavior:
-//   - Attack from further away (range ÷ aggr)
-//   - Retreat less (distance × aggr)
-//   - Shorter cooldowns (time × (2.0 - aggr))
-//
-// Usage in action nodes: float range = ScaleAttackRange(client, 500.0);
-
-// Scale attack range: higher aggression = attack from further away
-// Example: 500u base @ aggr=1.3 (T5) → 500/1.3=385u trigger distance (more aggressive)
-stock float ScaleAttackRange(int client, float baseRange)
-{
-    float aggr = BB_GetFloat(client, "_pressure_aggr", 1.0);
-    return baseRange / aggr;
-}
-
-// Scale retreat distance: higher aggression = retreat less
-// Example: 300u base @ aggr=1.3 (T5) → 300×1.3=390u (stay closer, more aggressive)
-stock float ScaleRetreatDistance(int client, float baseDistance)
-{
-    float aggr = BB_GetFloat(client, "_pressure_aggr", 1.0);
-    return baseDistance * aggr;
-}
-
-// Scale cooldown time: higher aggression = shorter cooldown
-// Example: 2.0s base @ aggr=1.3 (T5) → 2.0×(2.0-1.3)=1.4s (faster re-engagement)
-stock float ScaleCooldown(int client, float baseCooldown)
-{
-    float aggr = BB_GetFloat(client, "_pressure_aggr", 1.0);
-    return baseCooldown * (2.0 - aggr);
-}
-
-// Scale approach threshold: higher aggression = more willing to commit
-// Example: 孤立度阈值 600u @ aggr=1.3 → 600×1.3=780u (更激进选孤立目标)
-stock float ScaleApproachThreshold(int client, float baseThreshold)
-{
-    float aggr = BB_GetFloat(client, "_pressure_aggr", 1.0);
-    return baseThreshold * aggr;
-}
-
-// ============================================================================
 // Per-SI Module Start/End functions are defined in their respective bt_*.inc files.
 // These register custom cvars and modify vanilla game cvars.
 // The BT framework replaces only the decision logic, not the game tuning.
@@ -521,8 +434,6 @@ public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast)
 
     if (rootId >= 0) {
         BT_Bind(client, rootId);
-        // v5.8: 注入压力攻击性到黑板（spawn 时注入一次，cvar 变化时批量更新）
-        BB_SetFloat(client, "_pressure_aggr", g_fPressureAggression);
 
         // v5.13: 攻击发起者机制 —— 分配角色（发起者 or 骚扰者）
         AssignWaveRole(client);

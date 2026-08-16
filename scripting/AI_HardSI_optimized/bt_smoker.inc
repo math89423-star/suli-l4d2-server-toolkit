@@ -324,7 +324,7 @@ stock int BT_CreateSmokerTree() {
     int openS0_Pull = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(850.0),  // v5.8: pressure-scaled range
+        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
@@ -341,7 +341,7 @@ stock int BT_CreateSmokerTree() {
     int openS1_Pull = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(850.0),  // v5.8: pressure-scaled range
+        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
@@ -358,7 +358,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateCondition(CND_IsLedgeBetweenTarget),
         BT_CreateAction(SmokerAct_AcquireLedgeTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(850.0),  // v5.8: pressure-scaled range
+        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
@@ -369,7 +369,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(SmokerAct_AcquireNarrowTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(850.0),  // v5.8: pressure-scaled range
+        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
@@ -381,7 +381,7 @@ stock int BT_CreateSmokerTree() {
     int acquireTarget = BT_CreateAction(SmokerAct_AcquireTarget);
     int pullSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(850.0),  // v5.8: pressure-scaled range
+        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(ACT_Attack)
     );
@@ -419,7 +419,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateIsMode(3),
         BT_CreateAction(SmokerAct_AcquireBoomedTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange_Scaled(850.0),  // v5.8: pressure-scaled range
+        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
         BT_CreateAction(ACT_Attack)
     );
     int mode3Approach = BT_CreateSequence(4,
@@ -450,7 +450,7 @@ stock int BT_CreateSmokerTree() {
     int closeRangeStrafe = BT_CreateSequence(4,
         BT_CreateIsInRange(850.0),
         BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
-        BT_CreateAction(ACT_AcquireClosestTarget),
+        BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可拉)
         BT_CreateAction(ACT_StrafeApproach)
     );
 

@@ -33,7 +33,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.6.0"
+#define PLUGIN_VERSION "2.7.0"
 
 // Zombie class enum (matching left4dhooks)
 #define ZC_SMOKER  1
@@ -89,7 +89,7 @@ char g_sModeNames[SCM_MODE_COUNT][] = {
 };
 
 // ============================================================================
-// Mode complexity classification (v2.5.0 — pressure tier filtering)
+// Mode complexity classification（日志展示用；tier 过滤已随压力系统废弃 2026-08-16）
 // ============================================================================
 // 1 = SIMPLE   (easy to counter, few threat types, predictable)
 // 2 = MODERATE (mixed threats, standard challenge)
@@ -115,12 +115,6 @@ int    g_iClassLimit[SCM_CLASS_COUNT + 1];       // Hard caps from ss_*_limit
 float  g_fLastSpawnedTime[SCM_CLASS_COUNT + 1];  // Timestamp of last spawn per class
 
 Handle g_hModeTimer = INVALID_HANDLE;
-
-// ============================================================================
-// Pressure tier integration (v2.5.0 — tactical filtering)
-// ============================================================================
-ConVar g_cvPressureTier;      // sm_pressure_tier from pressure_tracker (lazy-bind)
-int    g_iPressureTier = 2;   // Default T2 Standard; updated on cvar change
 
 // Timing pin: we own ss_time_min and ss_time_max handles to pin both
 // to the same value each wave. ss_time_mode 1 then produces exactly that value
@@ -194,9 +188,6 @@ public void OnPluginStart()
 
     AutoExecConfig(true, "si_composition_manager");
 
-    // --- Lazy-bind pressure tracker (may load after us) ---
-    TryBindPressureTracker();
-
     // --- Read specialspawner limits ---
     ReadClassLimits();
 
@@ -230,42 +221,6 @@ public void OnPluginStart()
     // v2.3.9 实测结论（2026-08-04）：SourceMod 对 late-load 插件补发 OnMapStart
     // （重载后 active_mode 0→1 实证）→ 模式轮换定时器链由 OnMapStart 自动重建，
     // 无需热重载兜底。曾加的 late-load 重建块已撤（多余 + 会把钉值抓成基准）。
-}
-
-// ============================================================================
-// OnAllPluginsLoaded — retry pressure tracker binding
-// ============================================================================
-public void OnAllPluginsLoaded()
-{
-    TryBindPressureTracker();
-}
-
-// ============================================================================
-// TryBindPressureTracker — lazy-bind sm_pressure_tier ConVar
-// ============================================================================
-void TryBindPressureTracker()
-{
-    if (g_cvPressureTier != null) return;  // already bound
-
-    g_cvPressureTier = FindConVar("sm_pressure_tier");
-    if (g_cvPressureTier != null) {
-        g_iPressureTier = g_cvPressureTier.IntValue;
-        HookConVarChange(g_cvPressureTier, OnPressureTierChanged);
-        LogMessage("[SCM] Pressure tracker bound: tier T%d", g_iPressureTier);
-    }
-}
-
-// ============================================================================
-// OnPressureTierChanged — track tier changes
-// ============================================================================
-public void OnPressureTierChanged(ConVar convar, const char[] oldValue, const char[] newValue)
-{
-    int oldTier = g_iPressureTier;
-    g_iPressureTier = convar.IntValue;
-    if (oldTier != g_iPressureTier) {
-        LogMessage("[SCM] Pressure tier changed: T%d → T%d (tactical filter updated)",
-            oldTier, g_iPressureTier);
-    }
 }
 
 // ============================================================================
@@ -373,11 +328,10 @@ public void OnMapStart()
     // 换图后由 si_composition_manager.cfg 重新 exec（AutoExecConfig），
     // 无需等待 OnConfigsExecuted 的捕获时机。
 
-    // Retry pressure tracker binding (in case it loaded after OnPluginStart)
-    TryBindPressureTracker();
+    // Retry removed: pressure tracker binding (2026-08-16 压力系统废弃)
 
-    // Pick tier-appropriate starting mode (v2.5.0)
-    g_iCurrentMode = PickStartingMode();
+    // Pick random starting mode (2026-08-16: tier 过滤已随压力系统废弃)
+    g_iCurrentMode = GetRandomInt(0, SCM_MODE_COUNT - 1);
     g_bTankOverride = false;
     g_bTankAlive = false;
     PublishMode();      // v2.4: 战术指令下发（换图后 AI_HardSI 读到新模式）
@@ -486,29 +440,11 @@ public Action Timer_RotateMode(Handle timer)
 
 void RotateMode()
 {
-    // Refresh tier before rotation (v2.5.0)
-    if (g_cvPressureTier != null) {
-        g_iPressureTier = g_cvPressureTier.IntValue;
-    }
-
-    // Build weighted pool based on tier + complexity
+    // Build equal-weight pool without current mode (v2.7.0: tier 过滤已随压力系统废弃)
     ArrayList pool = new ArrayList();
     for (int m = 0; m < SCM_MODE_COUNT; m++) {
         if (m == g_iCurrentMode) continue;  // no repeat
-        int weight = GetModeWeightForTier(m, g_iPressureTier);
-        for (int w = 0; w < weight; w++) {
-            pool.Push(m);
-        }
-    }
-
-    // Fallback: if pool is empty (all excluded by tier), allow all other modes
-    if (pool.Length == 0) {
-        for (int m = 0; m < SCM_MODE_COUNT; m++) {
-            if (m != g_iCurrentMode) {
-                pool.Push(m);
-            }
-        }
-        LogMessage("[SCM] Tier T%d filter yielded empty pool, using all modes", g_iPressureTier);
+        pool.Push(m);
     }
 
     int newMode = pool.Get(GetRandomInt(0, pool.Length - 1));
@@ -523,8 +459,8 @@ void RotateMode()
             g_sModeNames[oldMode], g_sModeNames[newMode]);
     }
 
-    LogMessage("[SCM] Mode rotated (T%d): %s → %s [complexity %d→%d]",
-        g_iPressureTier, g_sModeNames[oldMode], g_sModeNames[newMode],
+    LogMessage("[SCM] Mode rotated: %s → %s [complexity %d→%d]",
+        g_sModeNames[oldMode], g_sModeNames[newMode],
         g_iModeComplexity[oldMode], g_iModeComplexity[newMode]);
 }
 
@@ -911,70 +847,4 @@ stock bool IsValidClient(int client)
 stock int GetInfectedClass(int client)
 {
     return GetEntProp(client, Prop_Send, "m_zombieClass");
-}
-
-// ============================================================================
-// v2.5.0: Tier-based tactical filtering helpers
-// ============================================================================
-
-// Returns spawn weight for a mode at the given pressure tier.
-// Weight 0 = excluded; higher = more likely to be selected.
-// Complexity: 1=SIMPLE, 2=MODERATE, 3=COMPLEX
-int GetModeWeightForTier(int modeIdx, int tier)
-{
-    int complexity = g_iModeComplexity[modeIdx];
-
-    switch (tier) {
-        case 1: {
-            // T1 Casual: SIMPLE strongly preferred, MODERATE rarely, COMPLEX excluded
-            if (complexity == 1) return 5;
-            if (complexity == 2) return 1;
-            return 0;
-        }
-        case 2: {
-            // T2 Standard: SIMPLE + MODERATE, no COMPLEX
-            if (complexity == 1) return 3;
-            if (complexity == 2) return 2;
-            return 0;
-        }
-        case 3: {
-            // T3 Challenge: all modes equally available
-            return 2;
-        }
-        case 4: {
-            // T4 Hard: MODERATE + COMPLEX, no SIMPLE
-            if (complexity == 1) return 0;
-            if (complexity == 2) return 2;
-            return 3;
-        }
-        case 5: {
-            // T5 Hell: COMPLEX strongly preferred, MODERATE rarely, SIMPLE excluded
-            if (complexity == 1) return 0;
-            if (complexity == 2) return 1;
-            return 5;
-        }
-    }
-    return 1;  // Unknown tier — all equal
-}
-
-// Pick a tier-appropriate starting mode (used at map start)
-int PickStartingMode()
-{
-    ArrayList pool = new ArrayList();
-    for (int m = 0; m < SCM_MODE_COUNT; m++) {
-        int weight = GetModeWeightForTier(m, g_iPressureTier);
-        for (int w = 0; w < weight; w++) {
-            pool.Push(m);
-        }
-    }
-
-    if (pool.Length == 0) {
-        // Fallback: any mode
-        delete pool;
-        return GetRandomInt(0, SCM_MODE_COUNT - 1);
-    }
-
-    int result = pool.Get(GetRandomInt(0, pool.Length - 1));
-    delete pool;
-    return result;
 }

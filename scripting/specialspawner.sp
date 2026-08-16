@@ -247,6 +247,8 @@ WavePhase
 
 // v2.4.0 刷新暂停计时器句柄
 Handle g_hPauseTimer;
+// v2.4.3 暂停期间主动清理 timer（每秒杀掉新刷的特感，因 director_no_specials 是 cheat 无法用）
+Handle g_hPauseCleanupTimer;
 
 // v1.7.0 参照者/flow 数组（全局持有——分批跨 timer 续刷需要存活）
 int
@@ -255,17 +257,11 @@ int
 float
 	g_fBatchFlows[MAXPLAYERS + 1];
 
-// v2.1.0 压力系统集成: 通知 pressure_tracker 波次开始/结束
-bool g_bPressureTrackerExists = false;
-ConVar g_cvPressureTier;          // sm_pressure_tier (1-5)
-ConVar g_cvPressureAggression;    // sm_pressure_aggression (0.7-1.3)
-int g_iCurrentPressureTier = 2;   // 当前压力段位 (默认T2)
-
 public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "2.4.0",
+	version = "2.4.4",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -291,28 +287,68 @@ int Native_HoldClearing(Handle plugin, int numParams) {
 // 暂停特感刷新 N 秒（外部插件调用，如火力支援 AGM 爆炸清场）
 // seconds: 暂停秒数（调用时重置计时器，最后一次调用生效）
 // 用途: 火力支援 AGM 导弹爆炸后暂停刷新 20 秒，给玩家喘息时间
+// v2.4.3: director_no_specials 是 cheat 无法用，改用主动清理（每秒杀新刷特感）
 int Native_PauseSpawning(Handle plugin, int numParams) {
 	float seconds = GetNativeCell(1);
 	if (seconds <= 0.0) {
 		g_bSpawningPaused = false;
 		delete g_hPauseTimer;
+		delete g_hPauseCleanupTimer;
 		LogMessage("[SS] Spawning pause CLEARED (external)");
 		return 0;
 	}
 
 	g_bSpawningPaused = true;
 	delete g_hPauseTimer;
+	delete g_hPauseCleanupTimer;
 	g_hPauseTimer = CreateTimer(seconds, Timer_UnpauseSpawning, _, TIMER_FLAG_NO_MAPCHANGE);
-	LogMessage("[SS] Spawning PAUSED for %.1f seconds (external)", seconds);
+	g_hPauseCleanupTimer = CreateTimer(1.0, Timer_PauseCleanup, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	LogMessage("[SS] Spawning PAUSED for %.1f seconds (external, active cleanup)", seconds);
 	return 0;
 }
 
 // v2.4.0 计时器回调：暂停时间到，恢复刷新
+// v2.4.3: 停止主动清理 timer
 Action Timer_UnpauseSpawning(Handle timer) {
 	g_hPauseTimer = null;
 	g_bSpawningPaused = false;
+	delete g_hPauseCleanupTimer;
 	LogMessage("[SS] Spawning pause EXPIRED, resuming normal spawn");
 	return Plugin_Stop;
+}
+
+// v2.4.3 计时器回调：暂停期间主动清理新刷的特感（director_no_specials 是 cheat 无法用）
+// 每秒遍历所有 bot 特感，杀掉导演刷新的（保留玩家控制的特感 + Tank）
+// Tank 排除：Tank 只应被实际伤害击杀，凭空清理会让玩家觉得诡异（还丢击杀分）
+Action Timer_PauseCleanup(Handle timer) {
+	if (!g_bSpawningPaused) {
+		g_hPauseCleanupTimer = null;
+		return Plugin_Stop;
+	}
+
+	int killed = 0;
+	for (int i = 1; i <= MaxClients; i++) {
+		if (!IsClientInGame(i) || !IsPlayerAlive(i))
+			continue;
+		if (GetClientTeam(i) != 3)
+			continue;
+		if (!IsFakeClient(i))
+			continue;  // 保留玩家控制的特感
+
+		// 排除 Tank（class 8）——只清理普通特感
+		int zClass = GetEntProp(i, Prop_Send, "m_zombieClass");
+		if (zClass == 8)
+			continue;
+
+		// 杀掉 bot 特感（导演刷新的）
+		ForcePlayerSuicide(i);
+		killed++;
+	}
+
+	if (killed > 0)
+		LogMessage("[SS] Pause cleanup: killed %d director-spawned SI", killed);
+
+	return Plugin_Continue;
 }
 
 public void OnPluginStart() {
@@ -565,12 +601,8 @@ Action tmrForceSuicide(Handle timer) {
 				g_fActionTimes[i] = time;
 		}
 		else {
-			// v2.1.0: 根据压力段位动态调整自杀时间
-			float suicideTime = g_fSuicideTime;
-			if (g_bPressureTrackerExists && g_cvPressureTier != null) {
-				suicideTime = GetSuicideTimeByTier(g_iCurrentPressureTier);
-			}
-			if (time - g_fActionTimes[i] > suicideTime)
+			// 压力系统已废弃（2026-08-16）: 自杀时间固定用 cfg 默认值
+			if (time - g_fActionTimes[i] > g_fSuicideTime)
 				KillInactiveSI(i);
 		}
 	}
@@ -838,21 +870,6 @@ public void OnConfigsExecuted() {
 	GetCvars_TankStatus();
 	GetCvars_TankCustom();
 	TweakSettings(false);
-
-	// v2.1.0 检测 pressure_tracker 插件
-	CheckPressureTracker();
-}
-
-// v2.1.0 检测 pressure_tracker 是否存在
-void CheckPressureTracker() {
-	g_cvPressureTier = FindConVar("sm_pressure_tier");
-	g_cvPressureAggression = FindConVar("sm_pressure_aggression");
-	g_bPressureTrackerExists = (g_cvPressureTier != null);
-
-	if (g_bPressureTrackerExists) {
-		g_iCurrentPressureTier = g_cvPressureTier.IntValue;
-		LogMessage("[SS] Pressure tracker detected, integration enabled | Current tier: T%d", g_iCurrentPressureTier);
-	}
 }
 
 void CvarChanged_Limits(ConVar convar, const char[] oldValue, const char[] newValue) {
@@ -993,9 +1010,6 @@ public void OnClientDisconnect(int client) {
 // 不会重发，刷怪定时器链会断（特感停刷到换图）。引擎状态不受插件重载影响，
 // 用 L4D_HasAnySurvivorLeftSafeArea 检测 → 已离开安全区则重建链。
 public void OnMapStart() {
-	// v2.1.0 热重载时重新检测 pressure_tracker
-	CheckPressureTracker();
-
 	if (L4D_HasAnySurvivorLeftSafeArea()) {
 		g_bLeftSafeArea = true;
 		// v2.0.0 热重载兜底: 状态机与全部 timer 随卸载清零 → 从收尾期恢复
@@ -1285,11 +1299,6 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	if (totalSI >= g_iSILimit)
 		return false;
 
-	// v2.1.0 通知 pressure_tracker 波次开始（仅首次执行，非 retry）
-	if (!retry && g_bPressureTrackerExists) {
-		NotifyPressureWaveStart();
-	}
-
 	#if BENCHMARK
 	g_profiler = new Profiler();
 	g_profiler.Start();
@@ -1304,11 +1313,7 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	// 上限压到 1，波次跳过——等队友起身/复活后下一波自动恢复，无 cvar 陈旧问题。
 	// 注意: IsPlayerAlive 对倒地返回 true，所以 total 含倒地者，须用
 	// m_isIncapacitated 区分站立人数。
-	// v2.1.0: 根据压力段位调整补偿强度（T1: 1.0全补偿, T5: 0.4弱补偿）
 	float compensationStrength = g_fIncapCompensation;
-	if (g_bPressureTrackerExists && g_cvPressureTier != null) {
-		compensationStrength = GetIncapCompensationByTier(g_iCurrentPressureTier);
-	}
 
 	if (compensationStrength > 0.0) {
 		int total;
@@ -1330,8 +1335,8 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 				effLimit = 1;
 
 			if (totalSI >= effLimit) {
-				LogMessage("[SS] incap comp: %d/%d 倒地, 上限 %d→%d, 存活 %d → 本波跳过 (tier T%d, comp %.1f)",
-					total - standing, total, g_iSILimit, effLimit, totalSI, g_iCurrentPressureTier, compensationStrength);
+				LogMessage("[SS] incap comp: %d/%d 倒地, 上限 %d→%d, 存活 %d → 本波跳过 (comp %.1f)",
+					total - standing, total, g_iSILimit, effLimit, totalSI, compensationStrength);
 				return false;
 			}
 
@@ -1344,8 +1349,8 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 				spawnSize = allowedSI;
 
 			if (spawnSize != oldSize)
-				LogMessage("[SS] incap comp: %d/%d 倒地, 波次 %d→%d, 上限 %d→%d (tier T%d, comp %.1f)",
-					total - standing, total, oldSize, spawnSize, g_iSILimit, effLimit, g_iCurrentPressureTier, compensationStrength);
+				LogMessage("[SS] incap comp: %d/%d 倒地, 波次 %d→%d, 上限 %d→%d (comp %.1f)",
+					total - standing, total, oldSize, spawnSize, g_iSILimit, effLimit, compensationStrength);
 		}
 	}
 
@@ -1430,7 +1435,6 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	// v2.0.0 批次引擎: 批数 = ceil(波次/ss_batch_size) 钳 [1, ss_batch_max]
 	// （战术小队 4 只/批）; 批间隔 = ss_batch_window/批数 钳 [5,10]（整波释放
 	// 窗口 ≈ 35s, 任意人数都在窗口内出完）。
-	// v2.1.0: 根据压力段位覆盖分批数（T1: 3批, T2-T3: 2批, T4-T5: 1批）
 	int batches = RoundToCeil(float(spawnSize) / float(g_cBatchSize.IntValue));
 	if (batches < 1)
 		batches = 1;
@@ -1438,14 +1442,6 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 		batches = g_cBatchMax.IntValue;
 	if (batches > spawnSize)
 		batches = spawnSize;
-
-	// 压力段位覆盖
-	if (g_bPressureTrackerExists && g_cvPressureTier != null) {
-		int tierBatches = GetBatchCountByTier(g_iCurrentPressureTier, spawnSize);
-		if (tierBatches > 0 && tierBatches <= spawnSize) {
-			batches = tierBatches;
-		}
-	}
 
 	g_iBatchBatchSize = spawnSize / batches + ((spawnSize % batches) ? 1 : 0);
 
@@ -1786,39 +1782,28 @@ Action tmrClearCheck(Handle timer) {
 	return Plugin_Continue;
 }
 
-// 进入冷静期: 12-18s 零特感压力倒计时（缓冲节点）, 播报总倒计时（冷静期 +
+// 进入冷静期: 25-35s 零特感压力倒计时（缓冲节点）, 播报总倒计时（冷静期 +
 // 下一波间隔, 确定性可算 → 数字精确）。PrintToChatAll——不用 PrintHintText
 // （L4D2 CJK hint 首条渲染乱码 bug）。
-// v2.1.0: 根据压力段位动态调整冷静期时长
+// 2026-08-16 压力系统废弃: 冷静期固定走 cfg 的 ss_rest_min/max（25-35s）。
+// 旧 v2.1.0 tier 覆盖有个遗留坑: g_iCurrentPressureTier 默认 T2 → 走
+// GetRestRangeByTier(2) 的 12-15s, cfg 设计值 25-35s 从未生效（记忆库
+// l4d2-rest-tier-override-bug）。清理后回归设计值。
 void EnterRest() {
-	// 读取当前压力段位
-	if (g_bPressureTrackerExists && g_cvPressureTier != null) {
-		g_iCurrentPressureTier = g_cvPressureTier.IntValue;
-	}
-
-	// 根据段位调整冷静期范围
-	float restMin, restMax;
-	GetRestRangeByTier(g_iCurrentPressureTier, restMin, restMax);
-
-	float rest = Math_GetRandomFloat(restMin, restMax);
+	float rest = Math_GetRandomFloat(g_cRestMin.FloatValue, g_cRestMax.FloatValue);
 	if (rest < 1.0)
 		rest = 1.0;
 	g_Phase = PHASE_REST;
 	if (g_hRestTimer != null && IsValidHandle(g_hRestTimer))
 		delete g_hRestTimer;
 	g_hRestTimer = CreateTimer(rest, tmrRestEnd);
-	LogMessage("[SS] phase: CLEARING -> REST (%.1fs, tier T%d)", rest, g_iCurrentPressureTier);
+	LogMessage("[SS] phase: CLEARING -> REST (%.1fs)", rest);
 
 	// v2.2.0 触发 REST forward（传入总倒计时秒数，供外部插件预警）
 	float totalCountdown = rest + GetPostRestInterval();
 	Call_StartForward(g_fwdOnWaveRest);
 	Call_PushFloat(totalCountdown);
 	Call_Finish();
-
-	// v2.1.0 通知 pressure_tracker 波次结束
-	if (g_bPressureTrackerExists) {
-		NotifyPressureWaveCleared();
-	}
 
 	int total = RoundToNearest(totalCountdown);
 	PrintToChatAll("\x04[特感]\x01 波次清剿完毕，\x05%d\x01 秒后下一波", total);
@@ -2013,103 +1998,4 @@ int GenerateIndex() {
 // https://github.com/bcserv/smlib/blob/transitional_syntax/scripting/include/smlib/math.inc
 float Math_GetRandomFloat(float min, float max) {
 	return (GetURandomFloat() * (max  - min)) + min;
-}
-
-// ============================================================================
-// v2.1.0 Pressure Tracker Integration
-// ============================================================================
-
-// 通知 pressure_tracker 波次开始
-void NotifyPressureWaveStart() {
-	Handle plugin = FindPluginByFile("pressure_tracker.smx");
-	if (plugin == null)
-		return;
-
-	Function func = GetFunctionByName(plugin, "OnWaveStarted");
-	if (func == INVALID_FUNCTION)
-		return;
-
-	Call_StartFunction(plugin, func);
-	Call_Finish();
-}
-
-// 通知 pressure_tracker 波次结束
-void NotifyPressureWaveCleared() {
-	Handle plugin = FindPluginByFile("pressure_tracker.smx");
-	if (plugin == null)
-		return;
-
-	Function func = GetFunctionByName(plugin, "OnWaveCleared");
-	if (func == INVALID_FUNCTION)
-		return;
-
-	Call_StartFunction(plugin, func);
-	Call_Finish();
-}
-
-// ============================================================================
-// v2.1.0 压力段位参数表
-// ============================================================================
-
-// 根据段位获取冷静期范围
-// T1: 18-24s, T2: 12-18s, T3: 10-14s, T4: 8-12s, T5: 6-10s
-void GetRestRangeByTier(int tier, float &restMin, float &restMax) {
-	switch (tier) {
-		case 1: { restMin = 18.0; restMax = 24.0; }
-		case 2: { restMin = 12.0; restMax = 15.0; }
-		case 3: { restMin = 10.0; restMax = 14.0; }
-		case 4: { restMin = 8.0;  restMax = 12.0; }
-		case 5: { restMin = 6.0;  restMax = 10.0; }
-		default: {
-			// 压力系统未启用，使用 cvar 默认值
-			restMin = g_cRestMin.FloatValue;
-			restMax = g_cRestMax.FloatValue;
-		}
-	}
-}
-
-// 根据段位获取分批数
-// T1: 3批, T2-T3: 2批, T4-T5: 1批
-int GetBatchCountByTier(int tier, int spawnSize) {
-	int batches;
-	switch (tier) {
-		case 1: batches = 3;  // Casual: 3 batches
-		case 2: batches = 2;  // Standard: 2 batches
-		case 3: batches = 2;  // Challenge: 2 batches
-		case 4: batches = 1;  // Hard: 1 batch
-		case 5: batches = 1;  // Hell: 1 batch
-		default: return 0;    // 使用默认逻辑
-	}
-
-	// 不能超过实际特感数量
-	if (batches > spawnSize)
-		batches = spawnSize;
-
-	return batches;
-}
-
-// 根据段位获取倒地补偿强度
-// T1: 1.0全补偿, T2: 1.0, T3: 0.8, T4: 0.6, T5: 0.4
-float GetIncapCompensationByTier(int tier) {
-	switch (tier) {
-		case 1: return 1.0;   // Casual: full compensation
-		case 2: return 1.0;   // Standard: full compensation
-		case 3: return 0.8;   // Challenge: 80%
-		case 4: return 0.6;   // Hard: 60%
-		case 5: return 0.4;   // Hell: 40%
-		default: return g_fIncapCompensation;  // Fallback to cvar
-	}
-}
-
-// 根据段位获取自杀时间
-// T1: 35s, T2: 25s, T3: 20s, T4: 15s, T5: 12s
-float GetSuicideTimeByTier(int tier) {
-	switch (tier) {
-		case 1: return 35.0;  // Casual: long patience
-		case 2: return 25.0;  // Standard: normal
-		case 3: return 20.0;  // Challenge: shorter
-		case 4: return 15.0;  // Hard: short
-		case 5: return 12.0;  // Hell: very short
-		default: return g_fSuicideTime;  // Fallback to cvar
-	}
 }

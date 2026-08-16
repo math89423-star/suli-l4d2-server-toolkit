@@ -122,14 +122,6 @@ stock int BT_CreateIsTargetInRange(float maxDist) {
     return id;
 }
 
-// v5.8: 压力感知版本 — 攻击距离随压力缩放（高压力时更远开火）
-stock int BT_CreateIsTargetInRange_Scaled(float maxDist) {
-    int id = BT_Create(BTN_CONDITION);
-    g_hBTFunc[id] = CND_IsTargetInRange_Scaled;
-    g_fBTNodeUserParam1[id] = maxDist;
-    return id;
-}
-
 stock int BT_CreateIsNotTargetInRange(float maxDist) {
     return BT_CreateInverter(BT_CreateIsTargetInRange(maxDist));
 }
@@ -242,42 +234,6 @@ BT_Status CND_IsTargetInRange(int client) {
     GetClientAbsOrigin(client, sPos);
     GetClientAbsOrigin(target, tPos);
     return (GetVectorDistance(sPos, tPos) <= maxDist) ? BT_SUCCESS : BT_FAILURE;
-}
-
-// v5.8: 压力感知版本 — 高压力时更远触发攻击（maxDist ÷ aggression）
-// v5.8.1: per-SI 敏感度 — 不同 SI 对压力的响应程度不同
-// T1(0.7): 850u → 1214u (更保守，靠近才攻击)
-// T3(1.0): 850u → 850u (基准)
-// T5(1.3): 850u → 654u (更激进，远距离就开火)
-BT_Status CND_IsTargetInRange_Scaled(int client) {
-    int nodeId = g_iBTCurrentTickNode;
-    float baseDist = g_fBTNodeUserParam1[nodeId];
-    float aggr = BB_GetFloat(client, "_pressure_aggr", 1.0);
-
-    // v5.8.1: per-SI 敏感度调整
-    // Smoker/Spitter: 远程特感，对压力更敏感 (1.2x)
-    // Boomer: 近距离爆破，保守一些 (0.8x)
-    // 其他: 标准响应 (1.0x)
-    float sensitivity = 1.0;
-    switch (L4D2_Infected:GetInfectedClass(client)) {
-        case L4D2Infected_Smoker:  sensitivity = 1.2;
-        case L4D2Infected_Spitter: sensitivity = 1.2;
-        case L4D2Infected_Boomer:  sensitivity = 0.8;
-    }
-
-    // 应用敏感度：aggr 越大，sensitivity 影响越明显
-    // T1(0.7) Smoker(1.2): aggr_eff = 0.7 + (1.2-1.0)*(1.0-0.7) = 0.76
-    // T5(1.3) Smoker(1.2): aggr_eff = 1.3 + (1.2-1.0)*(1.3-1.0) = 1.36
-    float aggr_effective = aggr + (sensitivity - 1.0) * FloatAbs(aggr - 1.0);
-
-    float scaledDist = baseDist / aggr_effective;  // 高压力时距离阈值降低 = 更远就能触发
-
-    int target = BB_GetInt(client, "target", -1);
-    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return BT_FAILURE;
-    float sPos[3], tPos[3];
-    GetClientAbsOrigin(client, sPos);
-    GetClientAbsOrigin(target, tPos);
-    return (GetVectorDistance(sPos, tPos) <= scaledDist) ? BT_SUCCESS : BT_FAILURE;
 }
 
 // Check if we're within the coordination attack window
@@ -743,6 +699,21 @@ BT_Status ACT_AcquireClosestTarget(int client) {
     int closest = GetClosestSurvivor(pos);
     if (closest > 0) {
         BB_SetInt(client, "target", closest);
+        return BT_SUCCESS;
+    }
+    return BT_FAILURE;
+}
+
+// v5.19: 优先选【可扑/可骑】的最近生还者（站立未控），全倒地时退回最近存活者。
+// 扑咬类特感（Jockey/Hunter/Charger）专用 —— GetClosestSurvivor 会锁倒地者
+// 导致原地跳/徘徊。全倒地兜底返回存活者，后续 pinnable 守卫仍会 FAIL 让树退回
+// 走位（语义不变），但正常场景下会跳过倒地者去追站立目标。
+BT_Status ACT_AcquirePinnableTarget(int client) {
+    float pos[3];
+    GetClientAbsOrigin(client, pos);
+    int t = GetClosestPinnableSurvivor(pos);
+    if (t > 0) {
+        BB_SetInt(client, "target", t);
         return BT_SUCCESS;
     }
     return BT_FAILURE;

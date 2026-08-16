@@ -269,7 +269,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.8.24"
+#define PLUGIN_VERSION "1.8.25"
 // v1.8.24: AGM导弹爆炸后暂停全部特感/小僵尸刷新（默认 20s，si_hud_art6_pause_spawn）——
 //          特感走 specialspawner SS_PauseSpawning，小僵尸走 l4d2_max_common MC_PauseCommon
 // v1.8.23: 购买任意物品后自动关闭商店（不再重开同分类）；打开后无操作 6 秒自动关闭
@@ -285,6 +285,7 @@
 
 native int SH_GetWallet(int client);
 native int SH_AddWallet(int client, int amount);
+native void SH_ShowMissileBanner(int client, int commonKills, int siKills, int witchKills, int tankKills);  // v1.8.25
 // v1.7.0: 复活币 natives（Get/AddReviveCoins/GetCoinMax/ReviveClient）已随 si_hud v1.12.0 移除
 
 // v1.8.24: specialspawner 暂停刷新 native（AGM 爆炸后暂停特感刷新）——可选绑定，
@@ -755,8 +756,8 @@ public void OnPluginStart()
     g_cvArt6RadiusSmall.SetBounds(ConVarBound_Upper, true, 2500.0);
     g_cvArt6RadiusSmall.SetBounds(ConVarBound_Lower, true, 100.0);
 
-    g_cvArt6DiveTime = CreateConVar("si_hud_art6_dive_time", "5.0",
-        "Missile dive duration seconds (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 0.3, true, 8.0);
+    g_cvArt6DiveTime = CreateConVar("si_hud_art6_dive_time", "1.6",
+        "Missile dive duration seconds (火力支援IV-AGM导弹，音效设计基准 1.6s).", FCVAR_NOTIFY, true, 0.3, true, 8.0);
     g_cvArt6DiveHeight = CreateConVar("si_hud_art6_dive_height", "2600.0",
         "Missile spawn height above impact point.", FCVAR_NOTIFY, true, 500.0, true, 6000.0);
 
@@ -3974,7 +3975,8 @@ void Art_CleanupAll()
 #define V1_SND_LAUNCH   "animation/overpass_jets.wav"         // v1.8.13: 发射音效（T-3秒，远处发射）
 #define V1_SND_FLY      "ambient/atmosphere/terrain_rumble1.wav"  // v1.8.13: 飞行音效（T-0秒，俯冲低频轰鸣）
 #define V1_SND_BOOM     "animation/Tanker_Explosion.wav"      // 爆炸音效
-#define V1_STEPS        100       // 俯冲插值步数（步长 = dive_time / STEPS）
+#define V1_STEPS        160       // 俯冲插值步数（步长 = dive_time / STEPS，160步 @ 1.6s = 0.01s间隔 = 100fps更新）
+#define V1_SND_BOOM_LEAD 0.4      // v1.8.25: 爆炸音效呼啸前摇（Tanker_Explosion.wav 前 0.4s），音效延迟 = diveTime - lead
 #define V1_DIVE_OFFSET  900.0     // 水平偏移：制造斜向俯冲倾角（0 = 垂直落）
 
 char g_sV1Particles[][] = {
@@ -4095,10 +4097,12 @@ void V1_Launch(int client, const float target[3], float radius)
     GetVectorAngles(dir, ang);
     TeleportEntity(ent, start, ang, NULL_VECTOR);
 
-    // v1.8.14: 爆炸音效延迟 1.2 秒播放（Tanker_Explosion.wav 前 0.4 秒是呼啸，
-    // 飞行 1.6 秒 - 音效呼啸 0.4 秒 = 延迟 1.2 秒，让音效爆炸声对准导弹落地）
+    // v1.8.25: 爆炸音效延迟 = 俯冲时长 - 呼啸前摇（Tanker_Explosion.wav 前 0.4s 是呼啸），
+    // 让音效爆炸声对准导弹落地。动态跟随 dive_time，改 cvar 也不失同步。
+    float sndDelay = g_cvArt6DiveTime.FloatValue - V1_SND_BOOM_LEAD;
+    if (sndDelay < 0.05) sndDelay = 0.05;
     DataPack dpSound;
-    CreateDataTimer(1.2, Timer_V1PlaySound, dpSound, TIMER_FLAG_NO_MAPCHANGE);
+    CreateDataTimer(sndDelay, Timer_V1PlaySound, dpSound, TIMER_FLAG_NO_MAPCHANGE);
     dpSound.WriteFloat(target[0]);
     dpSound.WriteFloat(target[1]);
     dpSound.WriteFloat(target[2]);
@@ -4384,7 +4388,7 @@ void V1_Detonate(int client, const float target[3], float radius)
     // 召唤者失效（断线/换图）时退回 worldspawn 作归属，伤害仍生效
     int attacker = (client > 0 && IsClientInGame(client)) ? client : 0;
 
-    int killedCommon = 0, killedSI = 0, killedSurv = 0;
+    int killedCommon = 0, killedSI = 0, killedWitch = 0, killedTank = 0, killedSurv = 0;
     bool bFriendly = g_cvArt6Friendly.BoolValue;
     float core2 = coreRadius * coreRadius;
     float shockwave2 = shockwaveRadius * shockwaveRadius;
@@ -4462,7 +4466,7 @@ void V1_Detonate(int client, const float target[3], float radius)
                 SDKHooks_TakeDamage(ent, attacker, attacker, 1200.0, DMG_GENERIC);
             else
                 SDKHooks_TakeDamage(ent, attacker, attacker, 800.0, DMG_GENERIC);
-            killedSI++;
+            killedWitch++;
             continue;
         }
 
@@ -4474,6 +4478,7 @@ void V1_Detonate(int client, const float target[3], float radius)
         if (team == 3)          // 特感
         {
             int zClass = GetEntProp(ent, Prop_Send, "m_zombieClass");
+            bool isTank = (zClass == 8);
 
             if (inCore)
             {
@@ -4483,7 +4488,7 @@ void V1_Detonate(int client, const float target[3], float radius)
             else if (inShockwave)
             {
                 // v1.8.18: Tank（zClass==8）冲击波区10000伤，其他特感500伤
-                if (zClass == 8)
+                if (isTank)
                     SDKHooks_TakeDamage(ent, attacker, attacker, 10000.0, DMG_BLAST);
                 else
                     SDKHooks_TakeDamage(ent, attacker, attacker, 500.0, DMG_BLAST);
@@ -4491,12 +4496,16 @@ void V1_Detonate(int client, const float target[3], float radius)
             else
             {
                 // v1.8.18: Tank 余波区6000伤，其他特感100伤
-                if (zClass == 8)
+                if (isTank)
                     SDKHooks_TakeDamage(ent, attacker, attacker, 6000.0, DMG_BLAST);
                 else
                     SDKHooks_TakeDamage(ent, attacker, attacker, 100.0, DMG_BLAST);
             }
-            killedSI++;
+
+            if (isTank)
+                killedTank++;
+            else
+                killedSI++;
         }
         else if (team == 2)     // 幸存者
         {
@@ -4555,14 +4564,20 @@ void V1_Detonate(int client, const float target[3], float radius)
     }
 
     if (attacker > 0)
-        PrintToChatAll("\x04[AGM导弹]\x01 \x05%N\x01 的导弹命中！清除 \x03%d\x01 只小僵尸、\x03%d\x01 只特感",
-            attacker, killedCommon, killedSI);
-    else
-        PrintToChatAll("\x04[AGM导弹]\x01 导弹命中！清除 \x03%d\x01 只小僵尸、\x03%d\x01 只特感",
-            killedCommon, killedSI);
+    {
+        PrintToChatAll("\x04[AGM导弹]\x01 \x05%N\x01 的导弹命中！清除 \x03%d\x01 只小僵尸、\x03%d\x01 只特感、\x03%d\x01 只女巫、\x03%d\x01 只坦克",
+            attacker, killedCommon, killedSI, killedWitch, killedTank);
 
-    LogMessage("[V1] detonate at (%.0f %.0f %.0f) r=%.0f common=%d si=%d surv=%d attacker=%d",
-        target[0], target[1], target[2], radius, killedCommon, killedSI, killedSurv, attacker);
+        // v1.8.25: 显示导弹聚合击杀横幅（si_hud v1.13.3+ native）
+        if (FindPluginByFile("l4d2_si_hud.smx") != INVALID_HANDLE)
+            SH_ShowMissileBanner(attacker, killedCommon, killedSI, killedWitch, killedTank);
+    }
+    else
+        PrintToChatAll("\x04[AGM导弹]\x01 导弹命中！清除 \x03%d\x01 只小僵尸、\x03%d\x01 只特感、\x03%d\x01 只女巫、\x03%d\x01 只坦克",
+            killedCommon, killedSI, killedWitch, killedTank);
+
+    LogMessage("[V1] detonate at (%.0f %.0f %.0f) r=%.0f common=%d si=%d witch=%d tank=%d surv=%d attacker=%d",
+        target[0], target[1], target[2], radius, killedCommon, killedSI, killedWitch, killedTank, killedSurv, attacker);
 
     // v1.8.24: AGM 爆炸后暂停特感和小僵尸刷新（用户定稿 20s）——给幸存者喘息时间。
     // 特感走 specialspawner SS_PauseSpawning；小僵尸走 l4d2_max_common MC_PauseCommon
