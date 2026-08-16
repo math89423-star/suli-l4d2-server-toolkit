@@ -123,6 +123,8 @@ ConVar
 	g_cSpawnRangeMax,
 	g_cSpawnRangeGuard,
 	g_cSpawnRangeGuardMin,
+	g_cSpawnRangeGuardInvisMin,	// v2.6.0 幽灵修复: 不可见兜底 A 档下限(防贴脸偏好层)
+	g_cSpawnRangeGuardInvisMax,	// v2.6.0 幽灵修复: 不可见兜底点距离上限(砍远处幽灵)
 	g_cFirstSpawnTime,
 	g_cSpawnRange,
 	g_cDiscardRange,
@@ -237,6 +239,8 @@ int
 	g_iBatchGuardBlocked,
 	g_iBatchGuardVis,
 	g_iBatchGuardInvis,
+	g_iBatchGuardInvisNear,		// v2.6.0 幽灵修复: B 档（[guard_min, invis_min) 极端兜底）计数
+	g_iBatchGuardInvisCount,	// v2.6.0 幽灵修复: invis 兜底放行总数（距离均值用）
 	g_iBatchSegA,				// 中段参照子集起点（前段结束处）
 	g_iBatchSegB,				// 后段参照子集起点（最后自然段起点）
 	// v2.0.0 收尾期清剿阈值: 场上存活 ≤ 该值进入冷静期（= max(2, 本波刷新量×40%)）
@@ -279,13 +283,14 @@ int
 	g_iBatchSurvivors[MAXPLAYERS + 1],
 	g_iBatchSurvivorCount;
 float
-	g_fBatchFlows[MAXPLAYERS + 1];
+	g_fBatchFlows[MAXPLAYERS + 1],
+	g_fBatchGuardInvisDistSum;	// v2.6.0 幽灵修复: invis 兜底放行点距离累计（日志均值）
 
 public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "2.5.3",
+	version = "2.6.0",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -488,10 +493,16 @@ public void OnPluginStart() {
 	// v1.3.8: 防贴脸守卫——落点离【所有】存活生还者（含倒地）的最小距离。
 	// 引擎 L4D_GetRandomPZSpawnPosition 只保证离"领跑者"≥ss_spawnrange_min，
 	// 队友完全没查 → 4人抱团时贴脸刷。本守卫对所有生还者生效，重掷+跳过兜底。
-	g_cSpawnRangeGuard =			CreateConVar("ss_spawnrange_guard",		"400.0",					"落点离所有生还者的最小距离(防贴脸, 0=关闭)", _, true, 0.0, true, 1500.0);
+	g_cSpawnRangeGuard =			CreateConVar("ss_spawnrange_guard",		"350.0",					"落点离所有生还者的最小距离(防贴脸, 0=关闭)", _, true, 0.0, true, 1500.0);
 	// v1.3.9: 保底阈值——重掷耗尽仍无 ≥guard 的点时，若存在离所有人 ≥ 本值的点则放行
 	// 最佳者（防整波饿死），必须 ≤ guard 才有意义，0=不保底（保持 v1.3.8 绝不放行）。
 	g_cSpawnRangeGuardMin =			CreateConVar("ss_spawnrange_guard_min",	"250.0",					"全跳保底:重掷耗尽后放行最近点≥该值的落点(须≤guard, 0=不保底)", _, true, 0.0, true, 1500.0);
+	// v2.6.0 幽灵修复双阈值（防贴脸偏好层）: 不可见兜底点分档——
+	// A 档 [invis_min, invis_max] 取最近点优先（不远不近, 特感走几步进入视线,
+	// 不再远处幽灵处决）; B 档 [guard_min, invis_min) 仅当 A 档不存在时启用
+	// （极端窄图防饿死, 硬下限 guard_min 不变 = 防贴脸不变式）。
+	g_cSpawnRangeGuardInvisMin =	CreateConVar("ss_spawnrange_guard_invis_min",	"350.0",	"幽灵修复: 不可见兜底A档下限(首选区间[本值,invis_max]取最近), B档=[guard_min,本值) 仅A档不存在时启用 [0=禁用A档偏好]", _, true, 0.0, true, 1500.0);
+	g_cSpawnRangeGuardInvisMax =	CreateConVar("ss_spawnrange_guard_invis_max",	"550.0",	"幽灵修复: 不可见兜底距离上限(砍900u远处幽灵, 0=不限制)", _, true, 0.0, true, 1500.0);
 
 	g_cFirstSpawnTime = 			CreateConVar("ss_first_time",			"0.0",						"玩家离开安全区域后第一波特感的刷新时间", _, true, 0.0);
 	// v1.5.0: 倒地补偿强度 [0-1]。1 = 全比例（波次与上限 ×站立/总人数），0 = 关闭，
@@ -513,11 +524,11 @@ public void OnPluginStart() {
 	// ——任意人数都在窗口内出完, 批内三段再平衡多点位输出
 	g_cBatchSize =					CreateConVar("ss_batch_size",			"4",						"波内每批特感数量(战术小队规模)", _, true, 1.0, true, 32.0);
 	g_cBatchMax =					CreateConVar("ss_batch_max",			"5",						"波内最大批数", _, true, 1.0, true, 8.0);
-	g_cBatchWindow =				CreateConVar("ss_batch_window",			"35.0",						"波内批次总释放窗口(秒), 批间隔=窗口/批数 钳制[5,10]", _, true, 5.0, true, 60.0);
+	g_cBatchWindow =				CreateConVar("ss_batch_window",			"20.0",						"波内批次总释放窗口(秒), 批间隔=窗口/批数 钳制[5,10]", _, true, 5.0, true, 60.0);
 	// v2.0.0 波间三态（压力/收尾/冷静）: 收尾期场上存活 ≤ 波次×40% 或
 	// ss_rest_force 硬上限 → 冷静期零特感压力（缓冲节点）→ 下一波
-	g_cRestMin =					CreateConVar("ss_rest_min",				"25.0",						"冷静期最小时长(秒, 零特感缓冲窗口)", _, true, 1.0, true, 60.0);
-	g_cRestMax =					CreateConVar("ss_rest_max",				"35.0",						"冷静期最大时长(秒)", _, true, 1.0, true, 60.0);
+	g_cRestMin =					CreateConVar("ss_rest_min",				"20.0",						"冷静期最小时长(秒, 零特感缓冲窗口)", _, true, 1.0, true, 60.0);
+	g_cRestMax =					CreateConVar("ss_rest_max",				"30.0",						"冷静期最大时长(秒)", _, true, 1.0, true, 60.0);
 	g_cRestForce =					CreateConVar("ss_rest_force",			"120.0",					"收尾期强制冷静硬上限(秒, 自波次开始计, 防留特/僵局)", _, true, 10.0, true, 600.0);
 	// v2.5.0 剿灭得分（用户设计 2026-08-17）: 波次清缴完成时全体生还者每人得分, 三档互斥:
 	// 完美（波内无人倒地/死亡）> 补偿（倒地/死亡 ≥ 队伍人数×ss_clear_comp_ratio）> 基础（其余）。
@@ -1695,6 +1706,9 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	g_iBatchGuardBlocked = 0;
 	g_iBatchGuardVis = 0;
 	g_iBatchGuardInvis = 0;
+	g_iBatchGuardInvisNear = 0;	// v2.6.0 幽灵修复: B 档计数/距离统计清零
+	g_iBatchGuardInvisCount = 0;
+	g_fBatchGuardInvisDistSum = 0.0;
 	g_iBatchTotal = spawnSize;
 	g_iBatchNext = 0;
 	g_iBatchSegA = segA;
@@ -1721,9 +1735,22 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 
 // v1.7.0: 刷取队列 [from, to) 区间。每只特感按段类型决定方向与参照者子集，
 // 守卫逻辑与 v1.4.0 相同（落点须离所有生还者 ≥guard，分层兜底防饿死）。
+// v2.6.0 幽灵修复（2026-08-17 用户拍板加固版）:
+//   实测 8-14~8-16 三天：0% 完美点、64-70% invis-fb、30-36% 跳过、921 处决/天
+//   （66% 在 ≥900u 远处处决 = 幽灵特感）。根因 = 旧 invis 兜底取【最远】候选点
+//   （bestDist 取最大）→ 全刷 900u 外墙后死巷 → 看不见玩家 → 25s 自杀处决。
+//   修复: 不可见候选分两档记录【最近】点 + 距离上限砍幽灵；硬下限 guard_min
+//   （250u 全队扫描）不变 = 防贴脸不变式（v1.3.8，与取远取近无关）:
+//     A 档 [invis_min, invis_max] 最近点优先 —— 350-550u 不远不近, 走几步进入
+//       视线, 形成真实威胁且不被处决
+//     B 档 [guard_min, invis_min) 最近点 —— 仅 A 档完全不存在时启用（极端窄图
+//       防饿死, 250-350u）
+//   分层优先级: 可见+≥guard > 可见+≥guard_min(vis-fb) > A 档 > B 档 > 跳过
 void SpawnSliced(int from, int to) {
 	float guard = g_cSpawnRangeGuard.FloatValue;
 	float guardMin = g_cSpawnRangeGuardMin.FloatValue;
+	float invisMin = g_cSpawnRangeGuardInvisMin.FloatValue;
+	float invisMax = g_cSpawnRangeGuardInvisMax.FloatValue;
 
 	for (int i = from; i < to; i++) {
 		int index = g_hBatchQueue.Get(i) + 1;
@@ -1760,38 +1787,50 @@ void SpawnSliced(int from, int to) {
 		g_iDirection = dir;
 
 		// v1.4.0 贴脸守卫 v3：候选点必须 LOS 可见至少一个生还者（看得见 → 有威胁
-		// → 不处决，特感立刻投入进攻）。分层：≥guard(400) 且可见 > 10 次耗尽取
-		// ≥guard_min(250) 且可见的最佳 > 再兜底 250 不可见（窄室内 AI 可自行转向
-		// 找人，防饿死）> 跳过。
+		// → 不处决，特感立刻投入进攻）。分层：≥guard 且可见 > 10 次耗尽取
+		// ≥guard_min 且可见的最佳 > v2.6.0 不可见 A 档[invis_min,invis_max]最近
+		// > 不可见 B 档[guard_min,invis_min)最近 > 跳过。
 		bool find = false;
-		bool hasBestPos = false;
-		float bestDist = 0.0;
-		float bestPos[3];
 		bool hasBestVisible = false;
 		float bestVisibleDist = 0.0;
 		float bestVisiblePos[3];
+		bool hasInvisMid = false;		// v2.6.0 A 档: [invis_min, invis_max]
+		float invisMidDist = 0.0;
+		float invisMidPos[3];
+		bool hasInvisNear = false;		// v2.6.0 B 档: [guard_min, invis_min)
+		float invisNearDist = 0.0;
+		float invisNearPos[3];
 		float vPos[3];
 		for (int tries = 0; tries < SPAWN_GUARD_MAX_TRIES; tries++) {
 			int ref = g_iBatchSurvivors[GetRandomInt(refMin, refMax)];
 			if (!L4D_GetRandomPZSpawnPosition(ref, index, 10, vPos))
 				continue;
 			float d = DistanceToNearestSurvivor(vPos);
-			bool visible = IsPosVisibleToAnySurvivor(vPos);
-			if (!hasBestPos || d > bestDist) {
-				hasBestPos = true;
-				bestDist = d;
-				bestPos = vPos;
-			}
-			if (visible && (!hasBestVisible || d > bestVisibleDist)) {
-				hasBestVisible = true;
-				bestVisibleDist = d;
-				bestVisiblePos = vPos;
-			}
-			if (!visible)
-				continue;
-			if (guard <= 0.0 || d >= guard) {
-				find = true;
-				break;
+			if (IsPosVisibleToAnySurvivor(vPos)) {
+				if (!hasBestVisible || d > bestVisibleDist) {
+					hasBestVisible = true;
+					bestVisibleDist = d;
+					bestVisiblePos = vPos;
+				}
+				if (guard <= 0.0 || d >= guard) {
+					find = true;
+					break;
+				}
+			} else if (guardMin > 0.0 && d >= guardMin) {
+				// 不可见候选: 分档记录【最近】点（v2.6.0, 旧逻辑取最远 = 幽灵根因）
+				if (invisMax <= 0.0 || d <= invisMax) {
+					if (invisMin <= 0.0 || d >= invisMin) {
+						if (!hasInvisMid || d < invisMidDist) {
+							hasInvisMid = true;
+							invisMidDist = d;
+							invisMidPos = vPos;
+						}
+					} else if (!hasInvisNear || d < invisNearDist) {
+						hasInvisNear = true;
+						invisNearDist = d;
+						invisNearPos = vPos;
+					}
+				}
 			}
 		}
 
@@ -1802,13 +1841,24 @@ void SpawnSliced(int from, int to) {
 				find = true;
 				g_iBatchGuardVis++;
 			}
-			// 保底 2：不可见但 ≥guard_min（极窄地形，AI 会自行转向找人）
-			// ⚠️ 残余处决源：不可见点 → m_hasVisibleThreats false → 25s 自杀计时。
-			// 无法完全消除（全跳 = 饿死），靠日志统计比例决定是否收紧。
-			else if (hasBestPos && guard > 0.0 && guardMin > 0.0 && bestDist >= guardMin) {
-				vPos = bestPos;
+			// 保底 2（A 档）：不可见 + [invis_min, invis_max] 最近点（v2.6.0）
+			// —— 350-550u 不远不近, 特感几步进入视线, 不再 900u 幽灵处决
+			else if (hasInvisMid) {
+				vPos = invisMidPos;
 				find = true;
 				g_iBatchGuardInvis++;
+				g_iBatchGuardInvisCount++;
+				g_fBatchGuardInvisDistSum += invisMidDist;
+			}
+			// 保底 3（B 档）：不可见 + [guard_min, invis_min) 最近点（v2.6.0）
+			// —— 极端窄图防饿死兜底（250-350u, 硬下限不变）
+			else if (hasInvisNear) {
+				vPos = invisNearPos;
+				find = true;
+				g_iBatchGuardInvis++;
+				g_iBatchGuardInvisNear++;
+				g_iBatchGuardInvisCount++;
+				g_fBatchGuardInvisDistSum += invisNearDist;
 			}
 			else {
 				g_iBatchGuardBlocked++;
@@ -1869,10 +1919,13 @@ Action tmrBatchContinue(Handle timer) {
 // 队列释放。
 void FinishWave() {
 	// v1.3.9/v1.4.1: 守卫统计（跳过 / 保底放行，波内有任何拦截才记一条，防日志刷屏）
+	// v2.6.0: invis-fb 行追加 near=B 档计数 + avgDist 平均距离（观测幽灵修复效果）
 	if (g_iBatchGuardBlocked || g_iBatchGuardVis || g_iBatchGuardInvis) {
-		LogMessage("[SS] spawn guard: %d/%d skipped, %d vis-fb(>=%.0f), %d invis-fb, prefer >=%.0f, dir=%d",
+		LogMessage("[SS] spawn guard: %d/%d skipped, %d vis-fb(>=%.0f), %d invis-fb(near=%d avgDist=%.0f), prefer >=%.0f, dir=%d",
 			g_iBatchGuardBlocked, g_iBatchTotal, g_iBatchGuardVis, g_cSpawnRangeGuardMin.FloatValue,
-			g_iBatchGuardInvis, g_cSpawnRangeGuard.FloatValue, g_iDirection);
+			g_iBatchGuardInvis, g_iBatchGuardInvisNear,
+			g_iBatchGuardInvisCount > 0 ? g_fBatchGuardInvisDistSum / g_iBatchGuardInvisCount : 0.0,
+			g_cSpawnRangeGuard.FloatValue, g_iDirection);
 	}
 
 	g_bInSpawnTime = false;
