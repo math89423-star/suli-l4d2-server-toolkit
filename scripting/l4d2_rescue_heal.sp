@@ -24,8 +24,10 @@ native int SH_AddWallet(int client, int amount);
 //   · 电击/挂边/递药维持原样（无积分）
 // v1.6: 电击复活积分奖励（用户 2026-08-16 定稿 1000——电击器最稀缺，
 //   奖励最高档）l4d2_rescue_heal_defib_score；实血 +20 保留
+// v1.7: 递药改单向（用户 2026-08-16 定稿）——只有递药者 +3 实血，吃药者
+//   不再加血（与 v1.5 打包修改一致）；清理 Reward 的 toSubject 双向死分支
 
-#define PLUGIN_VERSION "1.6"
+#define PLUGIN_VERSION "1.7"
 
 ConVar g_hCvarEnable;
 ConVar g_hCvarIncap;
@@ -263,7 +265,8 @@ void Event_PillsUsed(Event event, const char[] name, bool dontBroadcast)
     }
 
     Reward(giver, g_hCvarPills, "给队友递药");
-    Reward(subject, g_hCvarPills, "递药", true);
+    // v1.7: 删除 v1.2 的"吃药者 +3 回血"——用户定稿：递药只有传递者回血
+    //（吃药者本来就有药丸自身的回血效果，插件不再额外叠加）
 }
 
 // v1.4: 递药者差分推导 —— 递药瞬间给药者 health 槽实体消失（g_fPillLostTime 记录），
@@ -340,8 +343,8 @@ public void L4D2_OnStartUseAction_Post(any action, int client, int target)
     }
 }
 
-// v1.2: toSubject=true 时给"被帮助的队友"加血（仅打包/递药保留；救人动作 v1.3 起不再给被救者加血）
-void Reward(int client, ConVar cvar, const char[] what, bool toSubject = false)
+// v1.7: 奖励只给执行者（打包/递药双向加血已全部删除，toSubject 参数移除）
+void Reward(int client, ConVar cvar, const char[] what)
 {
     char cvarName[64];
     cvar.GetName(cvarName, sizeof(cvarName));
@@ -361,12 +364,7 @@ void Reward(int client, ConVar cvar, const char[] what, bool toSubject = false)
     {
         LogMessage("[RescueHeal] Reward(%N) skip: at max HP (%d/%d) %s", client, curHP, maxHP, cvarName);
         if (g_hCvarAnnounce.BoolValue)
-        {
-            if (toSubject)
-                PrintToChat(client, "\x04[奖励]\x01 你被队友%s，但你已满血！", what);
-            else
-                PrintToChat(client, "\x04[奖励]\x01 %s，但你已满血，奖励无法生效！", what);
-        }
+            PrintToChat(client, "\x04[奖励]\x01 %s，但你已满血，奖励无法生效！", what);
         return;
     }
 
@@ -377,12 +375,7 @@ void Reward(int client, ConVar cvar, const char[] what, bool toSubject = false)
     LogMessage("[RescueHeal] Reward(%N): %s +%d (curHP %d -> %d)", client, cvarName, newHP - curHP, curHP, newHP);
 
     if (g_hCvarAnnounce.BoolValue)
-    {
-        if (toSubject)
-            PrintToChat(client, "\x04[奖励]\x01 你被队友%s，恢复 \x05+%d\x01 实血！", what, newHP - curHP);
-        else
-            PrintToChat(client, "\x04[奖励]\x01 %s，恢复 \x05+%d\x01 实血！", what, newHP - curHP);
-    }
+        PrintToChat(client, "\x04[奖励]\x01 %s，恢复 \x05+%d\x01 实血！", what, newHP - curHP);
 }
 
 // v1.5: 积分奖励（用户 2026-08-16 定稿：打包 800 / 拉起倒地 600）——
