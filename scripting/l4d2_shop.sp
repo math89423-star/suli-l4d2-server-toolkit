@@ -5087,6 +5087,8 @@ void V1_Detonate(int client, const float target[3], float radius)
         }
 
         if (paused)
-            PrintToChatAll("\x04[AGM导弹]\x01 强大的冲击波暂时阻止了感染者的增援（\x03%.0f\x01 秒）", pauseSeconds);
+            // v1.9.0-fix6: 去掉"（20 秒）"——玩家对暂停效果感知不足时会觉得
+            // 承诺没兑现（mob 渐进恢复后推进路上仍有僵尸），避免具体秒数误导
+            PrintToChatAll("\x04[AGM导弹]\x01 强大的冲击波暂时阻止了感染者的增援");
     }
 }
