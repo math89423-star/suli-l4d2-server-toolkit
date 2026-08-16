@@ -143,7 +143,10 @@ ConVar
 	g_cClearScorePerfect,
 	g_cClearScoreComp,
 	g_cClearCompRatio,
-	g_cClearTankMult;
+	g_cClearTankMult,
+	// v2.5.1 剿灭得分时间倍率（用户设计: 刷新播报起 1.5×, 每秒 -0.015, 下限 1.0）
+	g_cClearTimeMultStart,
+	g_cClearTimeMultDecay;
 
 float
 	g_fSpawnTimeMin,
@@ -163,6 +166,7 @@ float
 	g_fDirSplitGap,
 	g_fBatchInterval,			// v2.0.0 本波批间隔（= 窗口/批数, 钳 [5,10]，跨 timer 存活）
 	g_fPhaseEnterTime,			// v2.0.0 压力期开始时刻（收尾期 120s 硬上限锚点）
+	g_fWaveStartTime,			// v2.5.1 波次开始时刻（剿灭得分时间倍率起算; retry 波不重置）
 	g_bRandomDirection;
 
 static const char
@@ -279,7 +283,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "2.5.0",
+	version = "2.5.1",
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -458,6 +462,11 @@ public void OnPluginStart() {
 	g_cClearScoreComp =			CreateConVar("ss_clear_score_comp",		"275",						"剿灭得分-补偿档: 波内倒地/死亡≥队伍比例时全体每人得分", _, true, 0.0);
 	g_cClearCompRatio =			CreateConVar("ss_clear_comp_ratio",		"0.30",						"剿灭补偿触发: 波内倒地/死亡去重人数 ≥ 队伍人数×本比例", _, true, 0.0, true, 1.0);
 	g_cClearTankMult =			CreateConVar("ss_clear_tank_mult",		"3.0",						"Tank 波剿灭得分倍率(三档同乘)", _, true, 1.0, true, 10.0);
+	// v2.5.1 时间倍率（用户设计 2026-08-17）: 剿灭得分从特感刷新播报(波次开始)起算,
+	// 倍率 = 起始 - 每秒衰减×经过秒数, 下限 1.0 —— 1.5 - 0.015/s ≈ 第 30s 恢复 1×。
+	// 清剿越快奖励越高（替代已废弃的高光时刻加分方案）。
+	g_cClearTimeMultStart =		CreateConVar("ss_clear_time_mult_start",	"1.5",						"剿灭得分时间倍率-起始值(波次刷新播报时刻)", _, true, 1.0, true, 5.0);
+	g_cClearTimeMultDecay =		CreateConVar("ss_clear_time_mult_decay",	"0.015",					"剿灭得分时间倍率-每秒衰减量(下限1.0; 1.5-0.015/s≈30s回1×)", _, true, 0.0, true, 1.0);
 
 	g_cSpawnRange =					FindConVar("z_spawn_range");
 	g_cDiscardRange =				FindConVar("z_discard_range");
@@ -1347,6 +1356,8 @@ Action tmrSpawnSpecial(Handle timer) {
 	// v2.0.0 波间三态: 压力期开始（收尾期 120s 强制冷静硬上限锚点）
 	g_fPhaseEnterTime = GetEngineTime();
 	g_Phase = PHASE_PRESSURE;
+	// v2.5.1 剿灭得分时间倍率起算点（特感刷新播报时刻; retry 波不重置）
+	g_fWaveStartTime = GetEngineTime();
 
 	// v2.5.0 剿灭得分: 波次开始快照——基数=当前生还队人数（含 bot, 用户拍板）,
 	// 清零波内倒地/死亡/Tank 标志（retry 波不重进此处, 统计延续本波）
@@ -1918,6 +1929,7 @@ void SettleWaveClearScore(float totalCountdown) {
 
 	int total = RoundToNearest(totalCountdown);
 	int score = 0;
+	float timeMult = 1.0;		// v2.5.1 时间倍率（默认 1.0, 快速清剿时 >1）
 	char tier[64];
 	char tankTag[32];
 	tankTag[0] = '\0';
@@ -1942,6 +1954,17 @@ void SettleWaveClearScore(float totalCountdown) {
 			score = RoundToNearest(float(score) * g_cClearTankMult.FloatValue);
 			strcopy(tankTag, sizeof(tankTag), "☠Tank波 ");
 		}
+
+		// v2.5.1 时间倍率（用户设计）: 从特感刷新播报(波次开始)起算 1.5×,
+		// 每秒 -0.015, 下限 1.0（≈30s 回 1×）——清剿越快奖励越高
+		timeMult = g_cClearTimeMultStart.FloatValue
+			- g_cClearTimeMultDecay.FloatValue * (GetEngineTime() - g_fWaveStartTime);
+		if (timeMult < 1.0)
+			timeMult = 1.0;
+		if (timeMult > 1.0) {
+			score = RoundToNearest(float(score) * timeMult);
+			Format(tankTag, sizeof(tankTag), "%s(清剿×%.1f) ", tankTag, timeMult);
+		}
 	}
 
 	if (score > 0) {
@@ -1952,8 +1975,8 @@ void SettleWaveClearScore(float totalCountdown) {
 					SH_AddWallet(i, score);
 			}
 		}
-		LogMessage("[SS] Clear score: tier=%s score=%d downDeaths=%d/%d base=%d tank=%s next=%ds",
-			tier, score, g_iWaveDownDeaths, g_iWaveBase, g_bWaveHadTank ? 1 : 0, total);
+		LogMessage("[SS] Clear score: tier=%s score=%d downDeaths=%d/%d base=%d tank=%s next=%ds (timeMult=%.2f)",
+			tier, score, g_iWaveDownDeaths, g_iWaveBase, g_bWaveHadTank ? 1 : 0, total, timeMult);
 		PrintToChatAll("\x04[特感]\x01 本波次剿灭完成，\x03%s%s\x01全体 \x05+%d\x01 分，下一波来袭 \x05%d\x01 秒",
 			tankTag, tier, score, total);
 	} else {
