@@ -9,6 +9,12 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.10.7（2026-08-16）：**商品名与 HUD 名直白化（用户拍板）**——火力支援
+ * 商品名改 汽油弹（II-地狱烈火）/ 胆汁雨（I-绿色雨幕）/ 榴弹雨（III-区域
+ * 轰炸）/ AGM导弹（IV），去掉"火力支援X-文艺名"前缀，路人一眼看懂；
+ * Art_KindWarnName 同步（HUD 文案 = "汽油弹来袭预警 N 秒！"等，AGM T-3 起
+ * "AGM导弹发射倒计时"）；classname/kind/价格/cvar 全不动。
+ *
  * v1.10.6（2026-08-16）：**四种支援 HUD 预警全带名称（用户拍板）**——
  * 燃烧弹（II-地狱烈火）/ 胆汁罐（I-绿色雨幕）/ 榴弹（III-区域轰炸）/
  * 导弹（IV-AGM），格式统一"%s来袭预警 %d 秒！"；轰炸开始提示与确认
@@ -319,7 +325,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.10.6"
+#define PLUGIN_VERSION "1.10.7"
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -579,16 +585,18 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // v1.4.3: 按价格重排编号（用户拍板）——胆汁雨 3500 最低 = I、轰炸 5500 = II、
     // 燃烧 6500 = III（原 III-胆汁雨/I-轰炸/II-燃烧）；v1.4.5 定名：绿色雨幕/地狱烈火/地毯轰炸
     // v1.8.5: 范围收紧20% + 频率降低 + 价格调整：绿色雨幕6500/地狱烈火10000/区域轰炸14500
-    { "火力支援II-地狱烈火", "artillery2",                 10000,   0,  4 },  // v1.8.5: 涨价 8500→10000
-    { "火力支援I-绿色雨幕", "artillery3",             6500,  0,  4 }   // v1.8.5: 涨价 4500→6500
+    // v1.10.7: 商品名直白化（用户拍板"去掉文艺描述，路人能一眼看懂"）——
+    // 汽油弹/胆汁雨/榴弹雨/AGM导弹（classname/kind/价格全不动）
+    { "汽油弹",      "artillery2",                 10000,   0,  4 },  // v1.8.5: 涨价 8500→10000
+    { "胆汁雨",      "artillery3",             6500,  0,  4 }   // v1.8.5: 涨价 4500→6500
     // v1.3.0: 支援V-混合轰炸 → v1.4.0 转正定稿「火力支援III-区域轰炸」5500/30s
     // （罐+榴弹 1:1；原火力支援I-炮击 artillery + IV-榴弹雨 artillery4 已禁用，表行删除）
-    , { "火力支援III-区域轰炸", "artillery5",               14500,  0,  4 }   // v1.8.5: 涨价 10000→14500（改为全榴弹）
+    , { "榴弹雨",      "artillery5",               14500,  0,  4 }   // v1.8.5: 涨价 10000→14500（改为全榴弹）
     // v1.8.0: 支援IV-AGM导弹（artillery6）——仿 BF5 V1 小队增援：单发导弹俯冲 + 一次
     // 瞬爆清场。与 I/II/III 的"持续落罐"机制不同，走独立 V1_Launch 路径（不进
     // Art_LaunchBarrage）。素材全为原版（models/missiles/f18_agm65maverick.mdl +
     // gen_rockblast_posZ/gas_explosion_main 粒子），零客户端分发。
-    , { "火力支援IV-AGM导弹", "artillery6",                  18000,  0,  4 }   // v1.8.4: 定稿价 18000
+    , { "AGM导弹",    "artillery6",                  18000,  0,  4 }   // v1.8.4: 定稿价 18000
     // v1.4.0: 新增商品（用户定稿；表尾追加不动透视特感槽位 12）——
     // 马格南 2000（武器栏）、燃烧弹包/高爆弹包 500（升级包走现有
     // ShopSpawn 通用生成路径，与激光瞄准同类）
@@ -3257,16 +3265,17 @@ void Art_RingParams(int kind, float ceiling, bool openAbove, float &ring)
 }
 
 // v1.10.6: 火力支援预警名称（用户拍板：每种支援 HUD 带名字，一眼看清呼叫的
-// 是什么支援，格式模仿"导弹来袭预警"）——2-地狱烈火=燃烧弹 / 3-绿色雨幕=
-// 胆汁罐 / 5-区域轰炸=榴弹 / 6-AGM=导弹；kind 1/4 已禁用兜底"空袭"。
+// 是什么支援，格式模仿"导弹来袭预警"）——2-地狱烈火=汽油弹 / 3-绿色雨幕=
+// 胆汁雨 / 5-区域轰炸=榴弹雨 / 6-AGM=AGM导弹；kind 1/4 已禁用兜底"空袭"。
+// v1.10.7: 名称随商品名直白化同步（用户拍板：胆汁雨/汽油弹/榴弹雨/AGM导弹）
 void Art_KindWarnName(int kind, char[] buf, int size)
 {
     switch (kind)
     {
-        case 2: strcopy(buf, size, "燃烧弹");
-        case 3: strcopy(buf, size, "胆汁罐");
-        case 5: strcopy(buf, size, "榴弹");
-        case 6: strcopy(buf, size, "导弹");
+        case 2: strcopy(buf, size, "汽油弹");
+        case 3: strcopy(buf, size, "胆汁雨");
+        case 5: strcopy(buf, size, "榴弹雨");
+        case 6: strcopy(buf, size, "AGM导弹");
         default: strcopy(buf, size, "空袭");
     }
 }
@@ -3416,7 +3425,8 @@ public Action Timer_ArtWarn(Handle timer)
         Art_KindWarnName(g_iArtWarnKind, kindName, sizeof(kindName));
         if (g_iArtWarnKind == 6 && remain <= 3)
         {
-            Format(warnBuf, sizeof(warnBuf), "导弹发射倒计时：%d 秒！", remain);
+            // v1.10.7: 名称随商品名（AGM导弹发射倒计时）
+            Format(warnBuf, sizeof(warnBuf), "%s发射倒计时：%d 秒！", kindName, remain);
             Art_WarnHintShow(warnBuf, ART_WARN_HINT_ICON, 0);
         }
         else
