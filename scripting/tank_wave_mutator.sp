@@ -9,6 +9,12 @@
 //   · 防前后包夹：两只相对幸存者方位夹角 ≤90°（同侧推进，不摆夹击阵型）
 //   · 卡住看护：监控发现 Tank 位置 8s 几乎不动 → 重定位到有 LOS 的新点
 //     （抢在引擎 stuck 处理/处决前，Tank 卡住根因=生成点重叠+不可达+AI 清跳）
+// v2.6.1: 实机修复（2026-08-16 19:01 双Tank 50u 重叠+跨层案例）——
+//   · 约束评估移到所有候选（v2.6.0 只在 ≥MIN_DIST 分支评估，贴脸兜底分支
+//     绕过约束 → c8m2 PZ 点池 <750u 时约束形同虚设）
+//   · 兜底改取"最远"候选（v2.4.0 注释承诺取最远、实现取第一个随机点——老坑）
+//   · 生成点 LOS 检查（防跨层/隔墙生成：Tank #2 曾生成在楼下平台玩家看不到）
+//   · 重定位兜底：LOS 采样失败 → 传送到最近幸存者前方 500u 地面点（必定成功）
 #pragma semicolon 1
 #pragma newdecls required
 
@@ -16,7 +22,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.6.0"
+#define PLUGIN_VERSION "2.6.1"
 
 // 配置常量
 #define MUTATION_CHANCE 0.10        // 10% 突变概率
@@ -276,12 +282,21 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
         // v2.4.0: 多次采样取最近的合法生成点（≥MIN_DIST 避免贴脸，取最近确保引擎立即激活）
         float refPos[3];
         GetClientAbsOrigin(client, refPos);
+        float eye[3];
+        GetClientEyePosition(client, eye);
 
         float spawnPos[3], spawnAng[3] = {0.0, 0.0, 0.0};
-        float bestPos[3];
-        float bestDist = -1.0;
-        float relaxedPos[3];        // v2.6.0: 放宽候选（仅 ≥MIN_DIST，无视双Tank约束）
-        float relaxedDist = -1.0;
+        // v2.6.1: 四级候选逐级兜底（约束在【所有】候选上评估——v2.6.0 只在
+        // ≥MIN_DIST 分支评估，贴脸兜底绕过约束，实机 50u 重叠+跨层案例）：
+        //   full = ≥MIN + LOS + 互斥 + 夹角 → 最近
+        //   noAng = ≥MIN + LOS + 互斥      → 最近（放弃夹角）
+        //   noSep = ≥MIN + LOS             → 最近（放弃互斥；至少玩家看得到）
+        //   far  = 任意候选最远            → 最后兜底（分离倾向；v2.4.0
+        //          注释承诺"取最远"但实现取第一个随机点——老坑修复）
+        float bestPos[3];   float bestDist = -1.0;
+        float noAngPos[3];  float noAngDist = -1.0;
+        float noSepPos[3];  float noSepDist = -1.0;
+        float farPos[3];    float farDist = -1.0;
         int validCount = 0;
         float maxCos = Cosine(TANK_SPAWN_MAX_ANGLE * 0.01745329252);  // 角度→cos 阈值
 
@@ -291,61 +306,58 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
                 float dist = GetVectorDistance(refPos, candidate);
                 validCount++;
 
-                if (dist >= TANK_SPAWN_MIN_DIST) {
-                    // 合格距离点：满足双Tank约束 → best；不满足 → 记入 relaxed 兜底
-                    bool ok = true;
-                    if (hasPrev) {
-                        // 互斥：与已有 Tank 水平距离 ≥SEPARATION（忽略 Z）
-                        float dx = candidate[0] - prevPos[0];
-                        float dy = candidate[1] - prevPos[1];
-                        if (SquareRoot(dx * dx + dy * dy) < TANK_SPAWN_SEPARATION)
-                            ok = false;
-                        // 防包夹：两只相对幸存者方位夹角 ≤MAX_ANGLE（水平面）
-                        if (ok) {
-                            float d1x = prevPos[0] - refPos[0];
-                            float d1y = prevPos[1] - refPos[1];
-                            float d2x = candidate[0] - refPos[0];
-                            float d2y = candidate[1] - refPos[1];
-                            float len1 = SquareRoot(d1x * d1x + d1y * d1y);
-                            float len2 = SquareRoot(d2x * d2x + d2y * d2y);
-                            if (len1 > 1.0 && len2 > 1.0) {
-                                float cosA = (d1x * d2x + d1y * d2y) / (len1 * len2);
-                                if (cosA < maxCos)
-                                    ok = false;
-                            }
+                // v2.6.1: LOS 检查在所有候选上做（防跨层/隔墙——生成在玩家
+                // 看不到的楼层 = 白刷；射线只算世界几何，忽略玩家实体）
+                TR_TraceRayFilter(candidate, eye, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
+                bool los = (TR_GetFraction() >= 0.95);
+
+                // 互斥：与已有 Tank 水平距离 ≥SEPARATION（忽略 Z）
+                bool sepOk = true;
+                // 防包夹：两只相对幸存者方位夹角 ≤MAX_ANGLE（水平面）
+                bool angOk = true;
+                if (hasPrev) {
+                    float dx = candidate[0] - prevPos[0];
+                    float dy = candidate[1] - prevPos[1];
+                    if (SquareRoot(dx * dx + dy * dy) < TANK_SPAWN_SEPARATION)
+                        sepOk = false;
+                    if (sepOk) {
+                        float d1x = prevPos[0] - refPos[0];
+                        float d1y = prevPos[1] - refPos[1];
+                        float d2x = candidate[0] - refPos[0];
+                        float d2y = candidate[1] - refPos[1];
+                        float len1 = SquareRoot(d1x * d1x + d1y * d1y);
+                        float len2 = SquareRoot(d2x * d2x + d2y * d2y);
+                        if (len1 > 1.0 && len2 > 1.0) {
+                            float cosA = (d1x * d2x + d1y * d2y) / (len1 * len2);
+                            if (cosA < maxCos)
+                                angOk = false;
                         }
                     }
-                    if (ok) {
-                        if (bestDist < 0.0 || dist < bestDist) {
-                            bestDist = dist;
-                            bestPos[0] = candidate[0];
-                            bestPos[1] = candidate[1];
-                            bestPos[2] = candidate[2];
-                        }
-                    } else if (relaxedDist < 0.0 || dist < relaxedDist) {
-                        relaxedDist = dist;
-                        relaxedPos[0] = candidate[0];
-                        relaxedPos[1] = candidate[1];
-                        relaxedPos[2] = candidate[2];
+                }
+
+                if (dist >= TANK_SPAWN_MIN_DIST && los && sepOk && angOk) {
+                    if (bestDist < 0.0 || dist < bestDist) {
+                        bestDist = dist;
+                        bestPos[0] = candidate[0]; bestPos[1] = candidate[1]; bestPos[2] = candidate[2];
                     }
-                } else if (bestDist < 0.0 && relaxedDist < 0.0) {
-                    // 暂无任何合格点，记录这个偏近的候选（fallback）
-                    bestDist = dist;
-                    bestPos[0] = candidate[0];
-                    bestPos[1] = candidate[1];
-                    bestPos[2] = candidate[2];
+                } else if (dist >= TANK_SPAWN_MIN_DIST && los && sepOk) {
+                    if (noAngDist < 0.0 || dist < noAngDist) {
+                        noAngDist = dist;
+                        noAngPos[0] = candidate[0]; noAngPos[1] = candidate[1]; noAngPos[2] = candidate[2];
+                    }
+                } else if (dist >= TANK_SPAWN_MIN_DIST && los) {
+                    if (noSepDist < 0.0 || dist < noSepDist) {
+                        noSepDist = dist;
+                        noSepPos[0] = candidate[0]; noSepPos[1] = candidate[1]; noSepPos[2] = candidate[2];
+                    }
+                }
+
+                // far 兜底：所有候选取最远（分离倾向，尽量不与已有 Tank 贴脸）
+                if (dist > farDist) {
+                    farDist = dist;
+                    farPos[0] = candidate[0]; farPos[1] = candidate[1]; farPos[2] = candidate[2];
                 }
             }
-        }
-
-        // v2.6.0: 严格约束无解 → 放宽到"仅 ≥MIN_DIST"（至少不贴脸、不重叠概率低）
-        if (bestDist < 0.0 && relaxedDist > 0.0) {
-            bestDist = relaxedDist;
-            bestPos[0] = relaxedPos[0];
-            bestPos[1] = relaxedPos[1];
-            bestPos[2] = relaxedPos[2];
-            LogMessage("[Tank Mutator] Tank #%d: no candidate within constraints, relaxed to dist=%.0f",
-                       n + 1, relaxedDist);
         }
 
         if (validCount == 0) {
@@ -354,9 +366,27 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
             continue;
         }
 
-        spawnPos[0] = bestPos[0];
-        spawnPos[1] = bestPos[1];
-        spawnPos[2] = bestPos[2];
+        // 逐级兑现：full → noAng → noSep → far
+        float chosenDist;
+        if (bestDist >= 0.0) {
+            spawnPos[0] = bestPos[0]; spawnPos[1] = bestPos[1]; spawnPos[2] = bestPos[2];
+            chosenDist = bestDist;
+        } else if (noAngDist >= 0.0) {
+            spawnPos[0] = noAngPos[0]; spawnPos[1] = noAngPos[1]; spawnPos[2] = noAngPos[2];
+            chosenDist = noAngDist;
+            LogMessage("[Tank Mutator] Tank #%d: no candidate with angle constraint, relaxed to dist=%.0f",
+                       n + 1, noAngDist);
+        } else if (noSepDist >= 0.0) {
+            spawnPos[0] = noSepPos[0]; spawnPos[1] = noSepPos[1]; spawnPos[2] = noSepPos[2];
+            chosenDist = noSepDist;
+            LogMessage("[Tank Mutator] Tank #%d: no candidate with separation, relaxed to dist=%.0f",
+                       n + 1, noSepDist);
+        } else {
+            spawnPos[0] = farPos[0]; spawnPos[1] = farPos[1]; spawnPos[2] = farPos[2];
+            chosenDist = farDist;
+            LogMessage("[Tank Mutator] Tank #%d: fallback far candidate dist=%.0f (no LOS/≥MIN candidate)",
+                       n + 1, farDist);
+        }
 
         // 直接生成 Tank
         int tank = L4D2_SpawnTank(spawnPos, spawnAng);
@@ -367,7 +397,7 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
             g_iTankStuckChecks[spawned] = 0;
             spawned++;
             LogMessage("[Tank Mutator] Tank #%d spawned at (%.1f, %.1f, %.1f), dist=%.0f, client: %d",
-                       n + 1, spawnPos[0], spawnPos[1], spawnPos[2], bestDist, tank);
+                       n + 1, spawnPos[0], spawnPos[1], spawnPos[2], chosenDist, tank);
         } else {
             LogMessage("[Tank Mutator] Tank #%d spawn failed: invalid entity", n + 1);
         }
@@ -521,7 +551,32 @@ void RelocateStuckTank(int tank) {
     }
 
     if (bestDist < 0.0) {
-        LogMessage("[Tank Mutator] Stuck tank %d relocate failed: no LOS candidate", tank);
+        // v2.6.1: LOS 采样无解 → 兜底：传送到最近幸存者前方 500u 的地面点。
+        // 该点必然在玩家视线内（正前方），Tank 会被立刻看到并投入战斗；
+        // 不再让卡住的 Tank 干等（实机：c8m2 每 8s 失败一次刷了 2 分钟日志）。
+        float origin[3], ang[3], fwd[3], dest[3];
+        GetClientAbsOrigin(survivor, origin);
+        GetClientEyeAngles(survivor, ang);
+        GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+        fwd[2] = 0.0;                       // 只取水平方向
+        NormalizeVector(fwd, fwd);
+        dest[0] = origin[0] + fwd[0] * 500.0;
+        dest[1] = origin[1] + fwd[1] * 500.0;
+        dest[2] = origin[2] + 80.0;         // 抬高再向下 trace 找地面
+
+        float end[3];
+        end[0] = dest[0]; end[1] = dest[1]; end[2] = dest[2] - 3000.0;
+        TR_TraceRayFilter(dest, end, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
+        if (TR_GetFraction() > 0.0 && TR_GetFraction() < 1.0) {
+            float ground[3];
+            TR_GetEndPosition(ground);
+            float ang2[3] = {0.0, 0.0, 0.0};
+            TeleportEntity(tank, ground, ang2, NULL_VECTOR);
+            LogMessage("[Tank Mutator] Stuck tank %d relocated (fallback: in front of survivor) to (%.1f, %.1f, %.1f)",
+                       tank, ground[0], ground[1], ground[2]);
+        } else {
+            LogMessage("[Tank Mutator] Stuck tank %d relocate failed: no LOS candidate AND no fallback ground", tank);
+        }
         return;
     }
 
