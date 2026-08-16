@@ -90,6 +90,8 @@ Handle
 	g_hBatchTimer,				// v1.7.0 分批释放续刷 timer
 	g_hClearTimer,				// v2.0.0 收尾期 2s 轮询 timer
 	g_hRestTimer;				// v2.0.0 冷静期倒计时 timer
+	float g_fRestEndTime;		// v2.5.4: 冷静期到期时刻（engine time，冻结恢复用）
+	float g_fRestFrozenRemaining;	// v2.5.4: 暂停冻结的冷静期剩余秒数（0 = 无冻结）
 
 // v2.2.0 波次生命周期 forward（外部插件监听）
 GlobalForward
@@ -318,6 +320,31 @@ int Native_MarkWaveTank(Handle plugin, int numParams) {
 	return 0;
 }
 
+// v2.5.4: 暂停期间冻结冷静期倒计时（用户实测洞察：爆炸恰好撞上波次剿灭 →
+// 冷静期本来就不刷特感，暂停 20s 被冷静期覆盖 = 无额外价值；冻结后暂停是
+// "从当前状态额外 +N 秒安静"，暂停结束冷静期续走）。
+void SS_FreezeWaveTimers() {
+	g_fRestFrozenRemaining = 0.0;
+	if (g_Phase == PHASE_REST && g_hRestTimer != null && IsValidHandle(g_hRestTimer)) {
+		float remaining = g_fRestEndTime - GetEngineTime();
+		if (remaining < 0.1)
+			remaining = 0.1;
+		delete g_hRestTimer;
+		g_hRestTimer = null;
+		g_fRestFrozenRemaining = remaining;
+		LogMessage("[SS] REST frozen by external pause (%.1fs remaining)", remaining);
+	}
+}
+
+void SS_UnfreezeWaveTimers() {
+	if (g_fRestFrozenRemaining > 0.0 && g_hRestTimer == null) {
+		g_hRestTimer = CreateTimer(g_fRestFrozenRemaining, tmrRestEnd);
+		g_fRestEndTime = GetEngineTime() + g_fRestFrozenRemaining;
+		LogMessage("[SS] REST resumed after external pause (%.1fs)", g_fRestFrozenRemaining);
+	}
+	g_fRestFrozenRemaining = 0.0;
+}
+
 // v2.4.0 native: SS_PauseSpawning(float seconds)
 // 暂停特感刷新 N 秒（外部插件调用，如火力支援 AGM 爆炸清场）
 // seconds: 暂停秒数（调用时重置计时器，最后一次调用生效）
@@ -334,6 +361,7 @@ int Native_PauseSpawning(Handle plugin, int numParams) {
 		delete g_hPauseTimer;
 		delete g_hPauseCleanupTimer;
 		SS_RestoreDirectorSpecials();
+		SS_UnfreezeWaveTimers();   // v2.5.4: 解冻冷静期
 		LogMessage("[SS] Spawning pause CLEARED (external)");
 		return 0;
 	}
@@ -344,6 +372,7 @@ int Native_PauseSpawning(Handle plugin, int numParams) {
 	g_hPauseTimer = CreateTimer(seconds, Timer_UnpauseSpawning, _, TIMER_FLAG_NO_MAPCHANGE);
 	g_hPauseCleanupTimer = CreateTimer(1.0, Timer_PauseCleanup, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 	SS_PauseDirectorSpecials();
+	SS_FreezeWaveTimers();       // v2.5.4: 冻结冷静期（暂停 = 额外安静）
 	LogMessage("[SS] Spawning PAUSED for %.1f seconds (external, director_no_specials + active cleanup)", seconds);
 	return 0;
 }
@@ -384,6 +413,7 @@ Action Timer_UnpauseSpawning(Handle timer) {
 	g_bSpawningPaused = false;
 	delete g_hPauseCleanupTimer;
 	SS_RestoreDirectorSpecials();
+	SS_UnfreezeWaveTimers();   // v2.5.4: 解冻冷静期（续走剩余倒计时）
 	LogMessage("[SS] Spawning pause EXPIRED, resuming normal spawn");
 	return Plugin_Stop;
 }
@@ -1948,6 +1978,7 @@ void EnterRest() {
 	if (g_hRestTimer != null && IsValidHandle(g_hRestTimer))
 		delete g_hRestTimer;
 	g_hRestTimer = CreateTimer(rest, tmrRestEnd);
+	g_fRestEndTime = GetEngineTime() + rest;   // v2.5.4: 记录到期时刻（暂停冻结用）
 	LogMessage("[SS] phase: CLEARING -> REST (%.1fs)", rest);
 
 	// v2.2.0 触发 REST forward（传入总倒计时秒数，供外部插件预警）
