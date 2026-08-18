@@ -392,6 +392,20 @@ stock void BT_AbortNode(int client, int nodeId) {
         }
     }
 
+    // v5.33: abort 时清除 ranged ability 的 TRYING 状态 + locked target
+    // 防止子树被抢占后旧 try_at/lock_target 残留，下次进入时继续消费过期窗口
+    if (g_hBTBlackboard[client] != null) {
+        SI_AbilitySetState(client, "_smoker", ABILITY_IDLE);
+        SI_AttackClearTarget(client, "_smoker");
+        SI_AbilitySetState(client, "_spitter", ABILITY_IDLE);
+        SI_AttackClearTarget(client, "_spitter");
+        SI_AbilitySetState(client, "_boomer", ABILITY_IDLE);
+        SI_AbilitySetState(client, "_hunter", ABILITY_IDLE);
+        SI_AbilitySetState(client, "_charger", ABILITY_IDLE);
+        SI_AttackClearTarget(client, "_charger");
+        SI_AbilitySetState(client, "_jockey", ABILITY_IDLE);
+    }
+
     if (g_hBTChildren[nodeId] != null) {
         int len = g_hBTChildren[nodeId].Length;
         for (int i = 0; i < len; i++) {

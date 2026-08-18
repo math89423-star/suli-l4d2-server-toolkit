@@ -356,6 +356,10 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
                 }
             }
 
+            // v2.7.0: hull/nav/可达性验证
+            if (!ValidateTankSpawnPoint(candidate))
+                continue;
+
             if (bestDist < 0.0 || dist < bestDist) {
                 bestDist = dist;
                 bestPos[0] = candidate[0]; bestPos[1] = candidate[1]; bestPos[2] = candidate[2];
@@ -540,16 +544,33 @@ void RelocateStuckTank(int tank) {
         if (TR_GetFraction() > 0.0 && TR_GetFraction() < 1.0) {
             float ground[3];
             TR_GetEndPosition(ground);
-            float ang2[3] = {0.0, 0.0, 0.0};
-            TeleportEntity(tank, ground, ang2, NULL_VECTOR);
-            LogMessage("[Tank Mutator] Stuck tank %d relocated next to buddy %d at (%.1f, %.1f, %.1f)",
-                       tank, buddy, ground[0], ground[1], ground[2]);
+            // v2.7.0: hull/nav 验证
+            if (ValidateTankSpawnPoint(ground)) {
+                float ang2[3] = {0.0, 0.0, 0.0};
+                TeleportEntity(tank, ground, ang2, NULL_VECTOR);
+                LogMessage("[Tank Mutator] Stuck tank %d relocated next to buddy %d at (%.1f, %.1f, %.1f)",
+                           tank, buddy, ground[0], ground[1], ground[2]);
+            } else {
+                // ground 点验证失败 → 尝试伙伴位置
+                if (ValidateTankSpawnPoint(bPos)) {
+                    float ang2[3] = {0.0, 0.0, 0.0};
+                    TeleportEntity(tank, bPos, ang2, NULL_VECTOR);
+                    LogMessage("[Tank Mutator] Stuck tank %d relocated to buddy %d spot (ground failed validation)",
+                               tank, buddy);
+                } else {
+                    LogMessage("[Tank Mutator] Stuck tank %d buddy relocate failed: both ground and buddy pos invalid", tank);
+                }
+            }
         } else {
-            // 地面 trace 异常 → 直接传伙伴位置（同点，引擎物理推开）
-            float ang2[3] = {0.0, 0.0, 0.0};
-            TeleportEntity(tank, bPos, ang2, NULL_VECTOR);
-            LogMessage("[Tank Mutator] Stuck tank %d relocated to buddy %d exact spot (%.1f, %.1f, %.1f)",
-                       tank, buddy, bPos[0], bPos[1], bPos[2]);
+            // 地面 trace 异常 → 尝试伙伴位置（需验证）
+            if (ValidateTankSpawnPoint(bPos)) {
+                float ang2[3] = {0.0, 0.0, 0.0};
+                TeleportEntity(tank, bPos, ang2, NULL_VECTOR);
+                LogMessage("[Tank Mutator] Stuck tank %d relocated to buddy %d exact spot (%.1f, %.1f, %.1f)",
+                           tank, buddy, bPos[0], bPos[1], bPos[2]);
+            } else {
+                LogMessage("[Tank Mutator] Stuck tank %d buddy relocate failed: no ground AND buddy pos invalid", tank);
+            }
         }
         return;
     }
@@ -583,6 +604,10 @@ void RelocateStuckTank(int tank) {
         if (TR_GetFraction() < 0.95)
             continue;   // 被墙/天花板挡
 
+        // v2.7.0: hull/nav 验证
+        if (!ValidateTankSpawnPoint(candidate))
+            continue;
+
         if (bestDist < 0.0 || dist < bestDist) {
             bestDist = dist;
             bestPos[0] = candidate[0];
@@ -608,10 +633,15 @@ void RelocateStuckTank(int tank) {
         if (TR_GetFraction() > 0.0 && TR_GetFraction() < 1.0) {
             float ground[3];
             TR_GetEndPosition(ground);
-            float ang2[3] = {0.0, 0.0, 0.0};
-            TeleportEntity(tank, ground, ang2, NULL_VECTOR);
-            LogMessage("[Tank Mutator] Stuck tank %d relocated (random 700u) to (%.1f, %.1f, %.1f)",
-                       tank, ground[0], ground[1], ground[2]);
+            // v2.7.0: hull/nav 验证
+            if (ValidateTankSpawnPoint(ground)) {
+                float ang2[3] = {0.0, 0.0, 0.0};
+                TeleportEntity(tank, ground, ang2, NULL_VECTOR);
+                LogMessage("[Tank Mutator] Stuck tank %d relocated (random 700u) to (%.1f, %.1f, %.1f)",
+                           tank, ground[0], ground[1], ground[2]);
+            } else {
+                LogMessage("[Tank Mutator] Stuck tank %d relocate ground failed validation", tank);
+            }
         } else {
             LogMessage("[Tank Mutator] Stuck tank %d relocate failed: no LOS candidate AND no fallback ground", tank);
         }
@@ -624,9 +654,55 @@ void RelocateStuckTank(int tank) {
                tank, bestPos[0], bestPos[1], bestPos[2], bestDist);
 }
 
-// 射线过滤器：忽略玩家实体（幸存者/特感），只把世界几何当阻挡
+// 射线过滤器：忽略玩家实体（幸存者/特感），只把世界几何+实体当阻挡
+// v2.6.6: 修复写反 bug — SourceMod TraceFilter 语义: true=允许命中该 entity
+//   旧代码 return (entity >= 1 && entity <= MaxClients) 把玩家当阻挡、把门/车/prop 全忽略
 public bool TraceFilter_World(int entity, int contentsMask, any data) {
-    return (entity >= 1 && entity <= MaxClients);
+    return (entity < 1 || entity > MaxClients);
+}
+
+// ============================================================================
+// v2.7.0: Tank spawn validator — hull clearance + 地面 + 碰撞
+// ============================================================================
+// Tank hull: 宽 ~48u, 高 ~72u (蹲姿出生)。验证：
+//   1. 向上 trace 检查头顶空间 ≥ 72u
+//   2. 向下 trace 确认有地面
+//   3. 水平 4 方向 trace 检查无实体阻挡（门/车/墙壁）
+#define TANK_HULL_HEIGHT 72.0    // Tank 蹲姿高度（出生时）
+#define TANK_HULL_WIDTH  48.0    // Tank 半宽
+
+bool ValidateTankSpawnPoint(float pos[3]) {
+    // 1) 头顶空间检查：从 pos 向上 trace，确认有 ≥72u 净空
+    float upEnd[3];
+    upEnd[0] = pos[0]; upEnd[1] = pos[1]; upEnd[2] = pos[2] + TANK_HULL_HEIGHT;
+    TR_TraceRayFilter(pos, upEnd, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
+    if (TR_GetFraction() < 1.0) {
+        return false;
+    }
+
+    // 2) 脚下地面检查：从 pos 向下 trace，确认有地面
+    float downEnd[3];
+    downEnd[0] = pos[0]; downEnd[1] = pos[1]; downEnd[2] = pos[2] - 120.0;
+    TR_TraceRayFilter(pos, downEnd, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
+    if (TR_GetFraction() >= 1.0) {
+        return false;
+    }
+
+    // 3) 水平碰撞检查：4 个方向各 trace TANK_HULL_WIDTH，确认无实体阻挡
+    float dirs[4][2] = {{1.0, 0.0}, {-1.0, 0.0}, {0.0, 1.0}, {0.0, -1.0}};
+    for (int d = 0; d < 4; d++) {
+        float sideStart[3], sideEnd[3];
+        sideStart[0] = pos[0]; sideStart[1] = pos[1]; sideStart[2] = pos[2] + 36.0;
+        sideEnd[0] = sideStart[0] + dirs[d][0] * TANK_HULL_WIDTH;
+        sideEnd[1] = sideStart[1] + dirs[d][1] * TANK_HULL_WIDTH;
+        sideEnd[2] = sideStart[2];
+        TR_TraceRayFilter(sideStart, sideEnd, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
+        if (TR_GetFraction() < 1.0) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 // ============ v2.6.4 前后刷新 fallback ============
@@ -702,7 +778,9 @@ bool SpawnTankFallback(int n, float spawnPos[3]) {
         TR_TraceRayFilter(start, end, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
         if (TR_GetFraction() > 0.0 && TR_GetFraction() < 1.0) {
             TR_GetEndPosition(spawnPos);
-            return true;
+            // v2.7.0: fallback 也要过 hull/nav 验证
+            if (ValidateTankSpawnPoint(spawnPos))
+                return true;
         }
     }
     return false;

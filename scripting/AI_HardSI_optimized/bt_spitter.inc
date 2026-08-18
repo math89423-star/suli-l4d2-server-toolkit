@@ -141,11 +141,13 @@ BT_Status SpitterAct_FindBoomedTarget(int client) {
 // ============================================================================
 
 BT_Status SpitterAct_PredictiveSpit(int client) {
+    // v5.33: 首次进入时读 BB target 并锁定，后续 tick 用锁定目标（防 Sequence 重评换人）
     int target = BB_GetInt(client, "target", -1);
     // v5.6: IN_ATTACK 与时间戳移入 target 有效分支（原版 target 死亡瞬间
     // 仍按一次无效吐并刷新 8s 冷却，白白锁死一个冷却窗口）
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
+        SI_AttackClearTarget(client, "_spitter");   // v5.33: 无效目标释放锁定
         return BT_SUCCESS;
     }
 
@@ -153,13 +155,22 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
     if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
         BB_SetBool(client, "_spitter_waiting_spit", true);
         BB_SetFloat(client, "_spitter_press_start", now);
+        SI_AttackLockTarget(client, "_spitter", target);   // v5.33: 锁定目标
         // v5.23: post-spit 行为不再在按压瞬间 roll —— 移到真实发射确认分支。
         // 按压即 roll 会被引擎拒绝的失败尝试污染（没吐出来也定死吐后行为）。
     }
 
+    // v5.33: 用锁定目标（不再读 BB target，防 Sequence 重评换人）
+    int lockedTarget = SI_AttackGetLockedTarget(client, "_spitter");
+    if (lockedTarget <= 0 || !IsSurvivor(lockedTarget) || !IsPlayerAlive(lockedTarget)) {
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        SI_AttackClearTarget(client, "_spitter");
+        return BT_SUCCESS;
+    }
+
     float tPos[3], tVel[3], sPos[3];
-    GetClientAbsOrigin(target, tPos);
-    GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
+    GetClientAbsOrigin(lockedTarget, tPos);
+    GetEntPropVector(lockedTarget, Prop_Data, "m_vecVelocity", tVel);
     float speed = GetVectorLength(tVel);
     GetClientAbsOrigin(client, sPos);
     float aimPos[3];
@@ -188,6 +199,7 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
     if (g_bSpitterSpitFired[client]) {
         g_bSpitterSpitFired[client] = false;
         BB_SetBool(client, "_spitter_waiting_spit", false);
+        SI_AttackClearTarget(client, "_spitter");   // v5.33: 发射成功释放锁定
         // 决定 post-spit 行为（同普通吐）—— v5.0 三分：40% 据守 / 35% 撤退 / 25% 靠近
         int r = GetRandomInt(0, 9);
         BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
@@ -198,6 +210,7 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
     // （未吐出绝不进正式 8s 冷却/成功态），短退避防立刻重试，FAIL 交走位分支
     if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
+        SI_AttackClearTarget(client, "_spitter");   // v5.33: 超时释放锁定
         SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
         return BT_FAILURE;
     }
@@ -264,6 +277,7 @@ BT_Status SpitterAct_Spit(int client) {
     // v5.6: 同 PredictiveSpit —— 吐键与时间戳移入 target 有效分支
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
+        SI_AttackClearTarget(client, "_spitter");   // v5.33
         return BT_SUCCESS;
     }
 
@@ -271,18 +285,27 @@ BT_Status SpitterAct_Spit(int client) {
     if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
         BB_SetBool(client, "_spitter_waiting_spit", true);
         BB_SetFloat(client, "_spitter_press_start", now);
+        SI_AttackLockTarget(client, "_spitter", target);   // v5.33: 锁定目标
         // v5.23: 吐后行为 roll 移到真实发射确认分支 —— 按压瞬间被引擎拒绝的
         // 失败尝试不得污染 post_mode（原 80% 贴脸送死已在 v5.0 修正为三分）。
     }
 
+    // v5.33: 用锁定目标
+    int lockedTarget = SI_AttackGetLockedTarget(client, "_spitter");
+    if (lockedTarget <= 0 || !IsSurvivor(lockedTarget) || !IsPlayerAlive(lockedTarget)) {
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        SI_AttackClearTarget(client, "_spitter");
+        return BT_SUCCESS;
+    }
+
     float sPos[3], tPos[3], dir[3], ang[3];
     GetClientAbsOrigin(client, sPos);
-    GetClientAbsOrigin(target, tPos);
+    GetClientAbsOrigin(lockedTarget, tPos);
 
     // === v5.16: 预判投掷 ===
     // 获取目标移动速度
     float vel[3];
-    GetEntPropVector(target, Prop_Data, "m_vecVelocity", vel);
+    GetEntPropVector(lockedTarget, Prop_Data, "m_vecVelocity", vel);
     float speed = SquareRoot(vel[0]*vel[0] + vel[1]*vel[1]);  // 水平速度
 
     // 如果目标在快速移动（>150u/s），进行预判
@@ -325,6 +348,7 @@ BT_Status SpitterAct_Spit(int client) {
     if (g_bSpitterSpitFired[client]) {
         g_bSpitterSpitFired[client] = false;
         BB_SetBool(client, "_spitter_waiting_spit", false);
+        SI_AttackClearTarget(client, "_spitter");   // v5.33: 发射成功释放锁定
         int r = GetRandomInt(0, 9);
         BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
         BB_SetFloat(client, "_spitter_spit_time", now);
@@ -333,6 +357,7 @@ BT_Status SpitterAct_Spit(int client) {
     // v5.23: 1.5s 超时 = 引擎拒绝 → 尝试失败（不进 8s 冷却/成功态），短退避重试
     if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
+        SI_AttackClearTarget(client, "_spitter");   // v5.33: 超时释放锁定
         SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
         return BT_FAILURE;
     }

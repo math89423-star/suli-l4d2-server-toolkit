@@ -455,6 +455,31 @@ stock bool SI_AbilityBackoffActive(int client, const char[] keyPrefix) {
     return true;
 }
 
+// ============================================================================
+// v5.33: Attack Target Lock — 技能进入 TRYING 后锁定目标，防止 BT 重评换人
+// ============================================================================
+// 用法: TryTongue/PredictiveSpit 进入 TRYING 时调用 LockTarget，
+//       超时/成功/abort 时调用 ClearTarget。
+//       瞄准时用 GetLockedTarget 替代 BB_GetInt("target")。
+
+stock void SI_AttackLockTarget(int client, const char[] keyPrefix, int target) {
+    char key[64];
+    Format(key, sizeof(key), "%s_lock_target", keyPrefix);
+    BB_SetInt(client, key, target);
+}
+
+stock int SI_AttackGetLockedTarget(int client, const char[] keyPrefix) {
+    char key[64];
+    Format(key, sizeof(key), "%s_lock_target", keyPrefix);
+    return BB_GetInt(client, key, -1);
+}
+
+stock void SI_AttackClearTarget(int client, const char[] keyPrefix) {
+    char key[64];
+    Format(key, sizeof(key), "%s_lock_target", keyPrefix);
+    BB_SetInt(client, key, -1);
+}
+
 // Check if we're within the coordination attack window
 BT_Status CND_IsAttackWindow(int client) {
     return SI_IsAttackWindow() ? BT_SUCCESS : BT_FAILURE;

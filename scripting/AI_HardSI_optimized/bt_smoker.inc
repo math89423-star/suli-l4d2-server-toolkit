@@ -246,6 +246,7 @@ BT_Status SmokerAct_TryTongue(int client) {
     if (victim > 0) {
         SI_AbilityMarkConfirmed(client, "_smoker", now);
         SI_AbilitySetState(client, "_smoker", ABILITY_CONFIRMED);
+        SI_AttackClearTarget(client, "_smoker");   // v5.33: 释放锁定
         return BT_SUCCESS;   // 触发外层 Cooldown arm（1.8s 反挠击窗口）
     }
 
@@ -253,17 +254,16 @@ BT_Status SmokerAct_TryTongue(int client) {
     float tryAt = SI_AbilityGetTryAt(client, "_smoker");
     if (tryAt > 0.0 && (now - tryAt) > SMOKER_TONGUE_TRY_TIMEOUT) tryAt = 0.0;
     if (tryAt <= 0.0) {
+        // v5.33: 首次进入 TRYING → 锁定当前 target，后续 tick 不再换人
+        int bbTarget = BB_GetInt(client, "target", -1);
+        SI_AttackLockTarget(client, "_smoker", bbTarget);
         SI_AbilityMarkTry(client, "_smoker", now);
         SI_AbilitySetState(client, "_smoker", ABILITY_TRYING);
         tryAt = now;
     }
 
-    // --- 持续按压：锁瞄黑板 target（Sequence 每 tick 重评首条件，目标移动时
-    //     这里的瞄准保持跟随；mode3Pull 序列无 SnapAim 节点，靠本动作兜住）---
-    // v5.32: 命中率优化 —— 原瞄脚底（GetClientAbsOrigin）且无移动预判：
-    //   ① 瞄准点抬到胸口高度（+30u，脚底射线贴地易被障碍/地面边缘挡）
-    //   ② 移动预判：舌头飞行时间 lead（距离越远提前量越大，clamp 0.1-0.6s）
-    int target = BB_GetInt(client, "target", -1);
+    // --- v5.33: 用锁定目标瞄准（不再读 BB target，防止 Sequence 重评换人）---
+    int target = SI_AttackGetLockedTarget(client, "_smoker");
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
         float sPos[3], tPos[3], tVel[3], dir[3], ang[3];
         GetClientAbsOrigin(client, sPos);
@@ -285,6 +285,7 @@ BT_Status SmokerAct_TryTongue(int client) {
 
     // --- 尝试超时未拉中：短退避 + FAILURE（不锁冷却，立即重评分支）---
     if ((now - tryAt) > SMOKER_TONGUE_TRY_TIMEOUT) {
+        SI_AttackClearTarget(client, "_smoker");   // v5.33: 超时释放锁定
         SI_AbilityBackoff(client, "_smoker", now, SMOKER_TONGUE_BACKOFF);
         return BT_FAILURE;
     }
