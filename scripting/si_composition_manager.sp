@@ -283,7 +283,9 @@ float PinSpawnTiming()
 //   spawn_size = base_spawn_size + ss_extra_limit * (survivors - ss_base_size) / ss_extra_size
 //
 // with ss_spawn_size from cfg as the "base_spawn_size" (for 4 survivors).
-// Clamped to minimum 4 and capped at the computed alive limit.
+// v6.0.1（2026-08-18）下限修复: <=4 人的基础局不再被压到 4，spawn 与 limit 都保底到
+// cfg 基线（base_spawn_size=10 / base_limit=10）→ 1~4 人恒 "10 只/波、上限 10"，
+// 只有 >4 人大房才按 2.5×（人数−4）放大。实测 3 人曾算出 round(10−2.5)=8 波次。
 // ============================================================================
 int GetSurvivorCount()
 {
@@ -310,12 +312,16 @@ void AdjustSpawnSize()
     // survivor delta: how many more (or fewer) than base_size
     float delta = (float(survivors) - baseSize) / extraSize;
 
+    int baseSpawnI = RoundToNearest(baseSpawn);   // cfg 基线(4人基准=10), 波次下限
+    int baseLimitI = RoundToNearest(baseLimit);   // 存活上限下限
+
     // Compute target spawn_size
     int spawn = RoundToNearest(baseSpawn + extraLimit * delta);
-    if (spawn < 4) spawn = 4;
+    if (spawn < baseSpawnI) spawn = baseSpawnI;
 
     // Compute alive limit (same formula as specialspawner)
     int limit = RoundToNearest(baseLimit + extraLimit * delta);
+    if (limit < baseLimitI) limit = baseLimitI;
     if (spawn > limit) spawn = limit;
 
     g_cvSsSpawnSize.SetInt(spawn);
