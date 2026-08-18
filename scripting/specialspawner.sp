@@ -184,11 +184,8 @@ float
 	g_fPhaseEnterTime,			// v2.0.0 压力期开始时刻（收尾期 120s 硬上限锚点）
 	g_fWaveStartTime,			// v2.5.1 波次开始时刻（剿灭得分时间倍率起算; retry 波不重置）
 	g_bRandomDirection,
-	// v6.0.0 调研落地: Hard Gate + Soft Score 参数缓存
-	g_fNavPathMax,
-	g_fNavTravelPrefMin,
-	g_fNavTravelPrefMax,
-	g_fFlowDeltaPref,
+	// v6.1.0 信任引擎方案: 参数缓存
+	g_fNavPathMax,				// NavPath 快速重试保护①: 候选点到目标的最大路径长度
 	g_fTargetInjectTime,
 	g_fRecoverTime,
 	g_fRelocateTime,
@@ -296,10 +293,6 @@ float
 	g_fSISpawnTime[MAXPLAYERS + 1],	// client → 生成时间
 	g_fSILastNavDist[MAXPLAYERS + 1];	// v6.0.0 看门狗: 上次到目标的 NavTravelDistance(-1=未测量)
 
-// v6.0.1 坠落修复③: 本波已成功刷出的 SI 落点（Soft Score 上给"靠太近的候选"惩罚，防聚集）
-float g_fPlacedPos[MAX_WAVE][3];
-int g_iPlacedCount;
-
 bool
 	g_bLateLoad,
 	g_bInSpawnTime,
@@ -355,7 +348,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "6.0.3",		// v6.0.3 环境死亡修复: Hard Gate 拒伤害触发器(陷阱), Soft Score 拒屋檐/悬崖落脚
+	version = "6.1.1",		// v6.1.1 移除击杀/刷新/补位/波次结算聊天刷屏(保留剿灭提示+LogMessage); v6.1.0 信任引擎取点详见6.1.0注释
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -555,27 +548,26 @@ public void OnPluginStart() {
 
 	g_cSpawnRangeMin =				CreateConVar("ss_spawnrange_min",		"100.0",					"特感最小生成距离", _, true, 0.0);
 	g_cSpawnRangeMax =				CreateConVar("ss_spawnrange_max",		"1500.0",					"特感最大生成距离", _, true, 0.0);
-	// v1.3.8: 防贴脸守卫——落点离【所有】存活生还者（含倒地）的最小距离。
-	// 引擎 L4D_GetRandomPZSpawnPosition 只保证离"领跑者"≥ss_spawnrange_min，
-	// 队友完全没查 → 4人抱团时贴脸刷。本守卫对所有生还者生效，重掷+跳过兜底。
-	g_cSpawnRangeGuard =			CreateConVar("ss_spawnrange_guard",		"350.0",					"落点离所有生还者的最小距离(防贴脸, 0=关闭)", _, true, 0.0, true, 1500.0);
-	// v1.3.9: 保底阈值——重掷耗尽仍无 ≥guard 的点时，若存在离所有人 ≥ 本值的点则放行
-	// 最佳者（防整波饿死），必须 ≤ guard 才有意义，0=不保底（保持 v1.3.8 绝不放行）。
-	g_cSpawnRangeGuardMin =			CreateConVar("ss_spawnrange_guard_min",	"250.0",					"全跳保底:重掷耗尽后放行最近点≥该值的落点(须≤guard, 0=不保底)", _, true, 0.0, true, 1500.0);
+	// v6.1.0: ss_spawnrange_guard/guard_min 仅保留注册作观测阈值（FinishWave 日志
+	// 统计落点距离分档），不再作为筛选条件——距离交给引擎 z_spawn_safety_range 语义。
+	g_cSpawnRangeGuard =			CreateConVar("ss_spawnrange_guard",		"350.0",					"[v6.1.0仅观测] 落点距离观测阈值(引擎距离语义由 z_spawn_safety_range 负责)", _, true, 0.0, true, 1500.0);
+	// v1.3.9 保底阈值注释已废弃；保留注册防旧 cfg 报错。
+	g_cSpawnRangeGuardMin =			CreateConVar("ss_spawnrange_guard_min",	"250.0",					"[v6.1.0仅观测] 落点最近距离观测阈值下限", _, true, 0.0, true, 1500.0);
 	// v2.6.0 幽灵修复双阈值（防贴脸偏好层）——v6.0.0 起语义废弃（报告 §16）：
 	// 不再决定 fallback 等级，仅保留注册防旧 cfg 报错；丢弃 handle 不持有。
 	CreateConVar("ss_spawnrange_guard_invis_min",	"350.0",	"[已废弃] 原不可见兜底A档下限，v6.0.0 起不再使用，仅保留注册", _, true, 0.0, true, 1500.0);
 	CreateConVar("ss_spawnrange_guard_invis_max",	"550.0",	"[已废弃] 原不可见兜底距离上限，v6.0.0 起不再使用，仅保留注册", _, true, 0.0, true, 1500.0);
 
-	// ===================== v6.0.0 调研落地: Hard Gate + Soft Score =====================
-	// 云端调研(2026-08-18)结论: 成熟玩法不用 "Nav && LOS && Flow" 三硬条件 AND(极端图饿死),
-	// 而是 Hard Gate(永不可破) + Soft Score(取最优)。invis_min/max 不再决定 fallback 等级。
-	// 新参数起测值见 specialspawner.cfg; 250/350 两档保留不动(先验证算法, 再调参)。
-	g_cCandidateSamples =		CreateConVar("ss_spawn_candidate_samples",	"16.0",		"Hard Gate 采样候选数: 每只特感从 Director PZ 采样多少个候选点打分 [8|16|24; 24人服建议16, 有余量再试24, 别一口64]", _, true, 2.0, true, 48.0);
-	g_cNavPathMax =				CreateConVar("ss_spawn_nav_path_max",		"5000.0",	"Hard Gate: 候选点到目标生还者的 infected NavPath 最大长度限制(超过算不可达)", _, true, 500.0, true, 20000.0);
-	g_cNavTravelPrefMin =		CreateConVar("ss_spawn_nav_travel_preferred_min", "0.0",	"Soft Score: 候选点到目标的 NavAreaTravelDistance 首选区间下限(真实路线长度)", _, true, 0.0, true, 10000.0);
-	g_cNavTravelPrefMax =		CreateConVar("ss_spawn_nav_travel_preferred_max", "3000.0",	"Soft Score: NavAreaTravelDistance 首选区间上限(超过=压力延迟过长, 给惩罚)", _, true, 0.0, true, 10000.0);
-	g_cFlowDeltaPref =			CreateConVar("ss_spawn_flow_delta_preferred", "1500.0",	"Soft Score: 候选点与目标生还者 flow 差首选上限(战场分段一致; 超过线性惩罚)", _, true, 0.0, true, 20000.0);
+	// ===================== v6.1.0 信任引擎方案 =====================
+	// v6.0.0 的 Hard Gate + Soft Score(vs 官方候选打分) 已废弃: 实测"二次过滤+打分排序"
+	// 打破 Director PZ 候选分布 → 选出奇怪点位被处决。改为社区 InfectedBots 哲学的
+	// "信任引擎取点": 以 target 为参照直接 L4D_GetRandomPZSpawnPosition, 只留两条
+	// 快速重试保护(trigger_hurt 陷阱 / NavPath 不通), 其余质量判定全交引擎。
+	g_cCandidateSamples =		CreateConVar("ss_spawn_candidate_samples",	"16.0",		"引擎取点+保护重试轮数: 每只特感在 target 周围调 L4D_GetRandomPZSpawnPosition 的尝试次数(越高越不易欠账, 也越耗CPU) [8|16|24]", _, true, 2.0, true, 48.0);
+	g_cNavPathMax =				CreateConVar("ss_spawn_nav_path_max",		"5000.0",	"快速重试保护②: 候选点到目标生还者的 infected NavPath 最大长度限制(超过=不可达, 重试)", _, true, 500.0, true, 20000.0);
+	g_cNavTravelPrefMin =		CreateConVar("ss_spawn_nav_travel_preferred_min", "0.0",	"[已废弃] v6.0.0 Soft Score 项, v6.1.0 起不再使用, 仅保留注册防旧cfg报错", _, true, 0.0, true, 10000.0);
+	g_cNavTravelPrefMax =		CreateConVar("ss_spawn_nav_travel_preferred_max", "3000.0",	"[已废弃] v6.0.0 Soft Score 项, v6.1.0 起不再使用, 仅保留注册防旧cfg报错", _, true, 0.0, true, 10000.0);
+	g_cFlowDeltaPref =			CreateConVar("ss_spawn_flow_delta_preferred", "1500.0",	"[已废弃] v6.0.0 Soft Score 项, v6.1.0 起不再使用, 仅保留注册防旧cfg报错", _, true, 0.0, true, 20000.0);
 	g_cTargetInject =			CreateConVar("ss_spawn_target_inject",		"1",		"出生目标注入: SI 出生后 L4D2_CommandABot(ATTACK 指定目标, 可绕过 BOT_CANT_SEE), 数秒后 RESET 交还 AI [1=开|0=关]", _, true, 0.0, true, 1.0);
 	g_cTargetInjectTime =		CreateConVar("ss_spawn_target_inject_time",	"1.5",		"目标注入持续秒数: 到期 L4D2_CommandABot(RESET) 交还原版/AI_HardSI", _, true, 0.2, true, 10.0);
 	g_cRecoverTime =			CreateConVar("ss_spawn_recover_time",		"7.0",		"幽灵看门狗: 无行动进展 T 秒后重新分配目标 + 重新注入(可绕过感知)", _, true, 2.0, true, 60.0);
@@ -1244,16 +1236,11 @@ void GetCvars_General() {
 	g_fDirSplitSpread = g_cDirSplitSpread.FloatValue;
 	g_fDirSplitGap = g_cDirSplitGap.FloatValue;
 
-	// v6.0.0 调研落地: Hard Gate + Soft Score 参数缓存
+	// v6.1.0 信任引擎方案: 参数缓存
 	g_iCandidateSamples = g_cCandidateSamples.IntValue;
 	if (g_iCandidateSamples < 2)
 		g_iCandidateSamples = 2;
 	g_fNavPathMax = g_cNavPathMax.FloatValue;
-	g_fNavTravelPrefMin = g_cNavTravelPrefMin.FloatValue;
-	g_fNavTravelPrefMax = g_cNavTravelPrefMax.FloatValue;
-	if (g_fNavTravelPrefMax < g_fNavTravelPrefMin)
-		g_fNavTravelPrefMax = g_fNavTravelPrefMin;
-	g_fFlowDeltaPref = g_cFlowDeltaPref.FloatValue;
 	g_bTargetInject = g_cTargetInject.BoolValue;
 	g_fTargetInjectTime = g_cTargetInjectTime.FloatValue;
 	g_fRecoverTime = g_cRecoverTime.FloatValue;
@@ -1485,11 +1472,11 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
 		LogMessage("[SS] SI#%d-%d DIED: class=%s(%.0fs alive) killer='%s' weapon='%s' headshot=%d",
 			waveNum, siID, (siClass >= 0 && siClass < SI_MAX_SIZE) ? g_sZombieClass[siClass] : "?",
 			lifespan, killerName, weapon, headshot);
-		// v5.33: 聊天播报击杀
+		// v5.33: 聊天播报击杀（v6.1.1 起移除——防刷屏；保留 LogMessage 生命周期追踪）
 		if (attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker) && GetClientTeam(attacker) == 2) {
-			PrintToChatAll("\x04[击杀]\x01 %s#\x05%d-%d\x01 被 \x03%s\x01 击杀（%.1fs）",
-				(siClass >= 0 && siClass < SI_MAX_SIZE) ? g_sZombieClass[siClass] : "?",
-				waveNum, siID, killerName, lifespan);
+			// PrintToChatAll("\x04[击杀]\x01 %s#\x05%d-%d\x01 被 \x03%s\x01 击杀（%.1fs）",
+			// 	(siClass >= 0 && siClass < SI_MAX_SIZE) ? g_sZombieClass[siClass] : "?",
+			// 	waveNum, siID, killerName, lifespan);
 		} else {
 			// 非玩家击杀（世界/自杀/坠落）
 			char reason[32];
@@ -1501,9 +1488,9 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
 				strcopy(reason, sizeof(reason), "自杀");
 			else
 				strcopy(reason, sizeof(reason), weapon);
-			PrintToChatAll("\x04[击杀]\x01 %s#\x05%d-%d\x01 %s（%.1fs）",
-				(siClass >= 0 && siClass < SI_MAX_SIZE) ? g_sZombieClass[siClass] : "?",
-				waveNum, siID, reason, lifespan);
+			// PrintToChatAll("\x04[击杀]\x01 %s#\x05%d-%d\x01 %s（%.1fs）",
+			// 	(siClass >= 0 && siClass < SI_MAX_SIZE) ? g_sZombieClass[siClass] : "?",
+			// 	waveNum, siID, reason, lifespan);
 		}
 	} else {
 		// 非本插件生成的 SI（引擎 director 生成的残留）
@@ -1988,10 +1975,9 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 		KillTimer(g_hCatchupTimer);
 		g_hCatchupTimer = null;
 	}
-	// v6.0.1 坠落修复: 目标分散计数 + 本波已刷落点 清零
+	// v6.0.1 target 分散计数 清零
 	for (int _t = 1; _t <= MaxClients; _t++)
 		g_iTargetCounts[_t] = 0;
-	g_iPlacedCount = 0;
 	// v6.0.2: 波次泄气计时清零
 	g_fWaveNoSITime = 0.0;
 
@@ -2072,126 +2058,22 @@ Action tmrReserveTimeout(Handle timer) {
 }
 
 // ============================================================================
-// v6.0.0 调研落地（2026-08-18，云端调研交付《Hard Gate + Soft Score》）:
-// 不再用 "Nav && LOS && Flow" 三硬条件 AND（极端图饿死 → 垃圾 fallback），
-// 也不再靠 可见/不可见 A/B 分档层层兜底。改为:
-//   HARD GATE（任何 fallback 都不能突破）:
-//     Euclid 距所有生还者 >= ss_spawnrange_guard_min(250)
-//     有合法 NavArea 且非 OUTSIDE_WORLD / FLOW_BLOCKED / NAV_BLOCKER
-//     Hull 有空间（按 class 尺寸 hull trace，Charger 更大）
-//     ground 有支撑（向下 hull trace 命中）
-//     存在 候选→目标生还者 的 infected NavPath（teamID=3）
-//   SOFT SCORE（通过 Hard Gate 的候选打分取最高）:
-//     preferred euclid（围绕 ss_spawnrange_guard=350） + NavTravel 首选带
-//     + flow 差首选带 + 隐藏出生加分(可见出生惩罚) + AttackLOS 加分
-//     - 跨层垂直惩罚
-// 视角: 不可见 ≠ 幽灵；"出生后不知道打谁 + Nav 走不通"才是幽灵（调研 §1/§4/§24）。
-// 幽灵主要靠出生目标注入（CommandABot ATTACK → 短暂后 RESET）解决，不是靠距离/LOS。
+// v6.1.0 信任引擎取点（2026-08-18，对标社区 InfectedBots 3.0.8 刷点哲学）:
+// v6.0.0 的 "Hard Gate(8项) + Soft Score(8项打分排序)" 已废弃——实测二次过滤+
+// 打分排序打破 Director PZ 候选分布, 选出"奇怪位置被处决"（这也是用户困惑的根因）。
+// InfectedBots 社区十几年实践的做法: 一次 L4D_GetRandomPZSpawnPosition 拿引擎给
+// 的点, 找到就刷、找不到重试, 点位质量全权信任 Valve。
+// 本插件在此之上保留两层原创保护（不改变候选分布, 只做快速重试）:
+//   A) trigger_hurt 陷阱内 → 重试（v6.0.3 环境死亡实测）
+//   B) 候选点→target NavPath 不通 → 重试
+// 压力均衡（首中尾都面临特感）由 SISpawn_PickTarget（目标分配）保证: 每只 SI 以
+// 自己分配到的 target 为参照锚取点 → 被盯谁, 点就刷在谁附近, 整队分段承压。
+// 幽灵（出生后不知打谁 + 感知被卡）由出生目标注入（CommandABot → RESET）解决。
 // ============================================================================
 
 #define L4D_TEAM_SURVIVOR		2
 #define L4D_TEAM_INFECTED		3
 
-// 视觉口径拆分（调研 §23）: visibleToSurvivor = 生还者能否看到出生点(防凭空出现);
-// hasAttackLOS = SI 能否从出生点直接看到目标(攻击机会评分)。两者不是同一问题。
-bool SISpawn_LOS(const float pos[3], int client) {
-	if (client < 1 || client > MaxClients || !IsClientInGame(client) || GetClientTeam(client) != 2 || !IsPlayerAlive(client))
-		return false;
-	float eye[3];
-	GetClientEyePosition(client, eye);
-	TR_TraceRayFilter(pos, eye, MASK_VISIBLE, RayType_EndPoint, TRFilter_SkipPlayers);
-	return !TR_DidHit();
-}
-
-void SISpawn_RepAdd(int[] rep, int &n, int client) {
-	if (client < 1 || client > MaxClients)
-		return;
-	if (!IsClientInGame(client) || GetClientTeam(client) != 2 || !IsPlayerAlive(client))
-		return;
-	for (int i = 0; i < n; i++)
-		if (rep[i] == client)
-			return;
-	if (n < MAXPLAYERS)
-		rep[n++] = client;
-}
-
-// 24 人性能（调研 §19）: 候选打分时可见性只查 最多4个代表生还者
-// （最高 flow / 中位 flow / intended target / 最近），不查 24 人全量。
-// 每候选 ≤4 次 LOS → 候选16 × 4 而非 16 × 24。
-bool SISpawn_RepresentativeCanSee(const float pos[3], int intendedTarget) {
-	if (g_iBatchSurvivorCount <= 0)
-		return false;
-	int rep[MAXPLAYERS + 1];
-	int n = 0;
-	SISpawn_RepAdd(rep, n, g_iBatchSurvivors[0]);							// 最高 flow
-	SISpawn_RepAdd(rep, n, g_iBatchSurvivors[g_iBatchSurvivorCount / 2]);	// 中位 flow
-	SISpawn_RepAdd(rep, n, intendedTarget);									// intended target
-	int nearest = -1;
-	float nd = 999999.0;
-	for (int s = 1; s <= MaxClients; s++) {
-		if (!IsClientInGame(s) || GetClientTeam(s) != 2 || !IsPlayerAlive(s))
-			continue;
-		float o[3];
-		GetClientAbsOrigin(s, o);
-		float d = GetVectorDistance(pos, o);
-		if (d < nd) { nd = d; nearest = s; }
-	}
-	if (nearest <= 0) {
-		// 兜底: 上面已含最高/中位 flow；若都不可用返回 false
-		for (int k = 0; k < n; k++)
-			if (SISpawn_LOS(pos, rep[k]))
-				return true;
-		return false;
-	}
-	SISpawn_RepAdd(rep, n, nearest);										// 最近
-	for (int k = 0; k < n; k++)
-		if (SISpawn_LOS(pos, rep[k]))
-			return true;
-	return false;
-}
-
-// 该位置当前这一刻是否有空间塞下一只该 class 的 SI（调研 §B2: Nav 合法 ≠ 实体空间足够）
-bool SISpawn_HullClear(const float pos[3], int zombieClass) {
-	float mins[3], maxs[3];
-	if (zombieClass == 6) {			// Charger 体型更大
-		mins[0] = -24.0; mins[1] = -24.0; mins[2] = 0.0;
-		maxs[0] = 24.0;  maxs[1] = 24.0;  maxs[2] = 88.0;
-	} else {
-		mins[0] = -16.0; mins[1] = -16.0; mins[2] = 0.0;
-		maxs[0] = 16.0;  maxs[1] = 16.0;  maxs[2] = 72.0;
-	}
-	float start[3]; start = pos; start[2] += 5.0;
-	float end[3];   end = pos;   end[2] += 72.0;
-	TR_TraceHullFilter(start, end, mins, maxs, MASK_PLAYERSOLID, TRFilter_SkipPlayers);
-	if (TR_StartSolid())
-		return false;
-	if (TR_DidHit())
-		return false;
-	return true;
-}
-
-// 向下 hull trace: 出生点下方必须有支撑（防悬空/虚空/台阶缺角）
-bool SISpawn_HasGroundSupport(const float pos[3]) {
-	float mins[3] = { -12.0, -12.0, 0.0 };
-	float maxs[3] = { 12.0, 12.0, 8.0 };
-	float start[3]; start = pos; start[2] += 5.0;
-	float end[3];   end = pos;   end[2] -= 96.0;
-	TR_TraceHullFilter(start, end, mins, maxs, MASK_PLAYERSOLID, TRFilter_SkipPlayers);
-	return TR_DidHit();
-}
-
-// v6.0.3 环境死亡修复 -----------------------------------------------------------
-// 返回 pos 下方实心支撑面的 z（无支撑返回 -9999）
-float SISpawn_GroundZ(const float pos[3]) {
-	float s[3]; s = pos; s[2] += 5.0;
-	float e[3]; e = pos; e[2] -= 220.0;
-	TR_TraceRayFilter(s, e, MASK_SOLID, RayType_EndPoint, TRFilter_SkipPlayers);
-	if (!TR_DidHit())
-		return -9999.0;
-	float hit[3];
-	TR_GetEndPosition(hit);
-	return hit[2];
-}
 
 // v6.0.3: 出生点是否在伤害触发器(trigger_hurt 等"陷阱")包围盒内 → 一出生就被机关秒杀
 // （实测 2026-08-18 波6: charger/spitter 出生 2.2s/2.7s "陷阱"秒死）。硬拒。
@@ -2216,243 +2098,52 @@ bool SISpawn_InHurtTrigger(const float pos[3]) {
 	return false;
 }
 
-// v6.0.3: 四周落脚是否平整（防"出生在屋檐/悬崖边 → 走着掉下去"）
-// 以中心支撑面为基准：任一方向 70u 处支撑面比中心低 >110u → 悬崖/边缘 → 扣分
-float SISpawn_ScoreFooting(const float pos[3]) {
-	float centerFloor = SISpawn_GroundZ(pos);
-	if (centerFloor < -1000.0)
-		return -300.0;					// 中心都悬空
-	float worst = 0.0;
-	float offs[4][2] = { {70.0, 0.0}, {-70.0, 0.0}, {0.0, 70.0}, {0.0, -70.0} };
-	for (int i = 0; i < 4; i++) {
-		float p2[3]; p2 = pos;
-		p2[0] += offs[i][0]; p2[1] += offs[i][1];
-		float z2 = SISpawn_GroundZ(p2);
-		if (z2 < -1000.0) {
-			worst += 80.0;				// 该方向悬空
-			continue;
-		}
-		float drop = centerFloor - z2;	// 正 = 该方向更低
-		if (drop > 110.0)
-			worst += (drop - 110.0) * 0.5;
-	}
-	if (worst > 300.0)
-		worst = 300.0;
-	return -worst;
-}
 
-// ---------- SOFT SCORE 各分项（调研 §9 第二层） ----------
-// Euclid = safety（防贴脸）: 越接近首选(guard=350) 分越高。
-// v6.0.2 不可见修复: >600u 的选点被重罚（实测首发平均 800u 全隐蔽 = 看不到 + 到不了位）
-float SISpawn_ScoreEuclid(float euclid) {
-	float pref = g_cSpawnRangeGuard.FloatValue;
-	if (pref <= 0.0) pref = 350.0;
-	float d = FloatAbs(euclid - pref);
-	if (euclid > 600.0)				// 600→-250, 700→-550, 800→-850, 900→-1150（远方硬压）
-		d += (euclid - 600.0) * 2.0;
-	return -d;
-}
+// 候选点主入口（v6.1.0 方案1）: 信任引擎取点，不再二次打分/排序。
+// 参照锚 = 本只 SI 分配到的 intendedTarget（压力均衡由 SISpawn_PickTarget 保底）。
+// 直接调 L4D_GetRandomPZSpawnPosition(target, class, attempts) 拿引擎给的点；
+// 只保留两条快速重试保护（trigger_hurt 陷阱 / NavPath 不通），其余质量判定全交引擎。
+// 返回 false = 引擎取不到合法点（欠账 catch-up，失败不耗波次预算）。
+bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float outPos[3]) {
 
-// NavTravel = reachability / 压力延迟（真实 AI 路线长度）
-// v6.0.2: >4000 的真实路线即便 nav 可达也要走太久，加重罚（防"能到但永远到不了位"）
-float SISpawn_ScoreNavTravel(float travel) {
-	if (travel < 0.0)
-		return 0.0;
-	float over = 0.0;
-	if (travel < g_fNavTravelPrefMin)
-		over = (g_fNavTravelPrefMin - travel) * 0.1;
-	else if (travel > g_fNavTravelPrefMax)
-		over = (travel - g_fNavTravelPrefMax) * 0.1;
-	if (travel > 4000.0)
-		over += (travel - 4000.0) * 0.5;
-	return -over;
-}
+	if (intendedTarget <= 0 || intendedTarget > MaxClients
+		|| !IsClientInGame(intendedTarget) || GetClientTeam(intendedTarget) != 2
+		|| !IsPlayerAlive(intendedTarget))
+		return false;
 
-// Flow = 战场分段（选"同一段战场"的落点）
-float SISpawn_ScoreFlow(float flowDelta) {
-	if (flowDelta <= g_fFlowDeltaPref)
-		return 0.0;
-	return (g_fFlowDeltaPref - flowDelta) * 0.1;
-}
-
-// 隐藏出生（OBSCURED）是 Valve 设计目标；可见出生给轻微惩罚。
-// v6.0.2: 旧值 -150 让"最远最隐蔽"恒赢 → 全员不可见。降到 -60, 隐蔽只做平局偏好。
-float SISpawn_ScoreConcealment(bool visibleToSurvivor) {
-	return visibleToSurvivor ? -60.0 : 0.0;
-}
-
-// hasAttackLOS: SI 出生即能射线看到目标 → 最优的"立刻能交战"信号。
-// v6.0.2: +100/+250 太弱, 扛不过隐蔽偏好 → 提到 ~450/500，让"看得到目标"的候选稳赢。
-float SISpawn_ScoreAttackLOS(const float pos[3], int intendedTarget, int zombieClass) {
-	if (intendedTarget <= 0)
-		return 0.0;
-	if (!SISpawn_LOS(pos, intendedTarget))
-		return 0.0;
-	return (zombieClass == 1 || zombieClass == 4) ? 500.0 : 450.0;	// Smoker/Spitter 更吃出生攻击射线
-}
-
-// 跨层垂直惩罚（§B4: Euclid 150u 但实际隔层）——即使 Nav 可达也扣分
-float SISpawn_ScoreClassGeometry(const float pos[3], int intendedTarget) {
-	if (intendedTarget <= 0 || !IsClientInGame(intendedTarget) || !IsPlayerAlive(intendedTarget))
-		return 0.0;
 	float tp[3];
 	GetClientAbsOrigin(intendedTarget, tp);
-	float dz = FloatAbs(pos[2] - tp[2]);
-	if (dz <= 150.0)
-		return 0.0;
-	float over = dz - 150.0;
-	if (over > 200.0)
-		over = 200.0;
-	return -over;
-}
+	Address targetNav = L4D_GetNearestNavArea(tp, 500.0, true, false, false, L4D_TEAM_INFECTED);
 
-// v6.0.1 坠落修复③: 同波聚集惩罚——候选点离本波已刷 SI 落点越近扣越多
-// （c2m1 首波 7 只全挤同一口袋的实测教训: 聚集 → 全幽灵 → relocate/坠落）
-#define SPREAD_RADIUS		450.0
-#define SPREAD_PENALTY_MAX	250.0
-float SISpawn_ScoreSpread(const float pos[3]) {
-	if (g_iPlacedCount <= 0)
-		return 0.0;
-	float pen = 0.0;
-	for (int i = 0; i < g_iPlacedCount; i++) {
-		float d = GetVectorDistance(pos, g_fPlacedPos[i]);
-		if (d < SPREAD_RADIUS)
-			pen += SPREAD_PENALTY_MAX * (1.0 - d / SPREAD_RADIUS);
-	}
-	return -pen;
-}
-
-// 对 [refMin,refMax] 里的参照者反复采 Director PZ 候选 → Hard Gate → Soft Score
-// 取最高分。bestValid/bestScore/bestPos 为 in/out（数组天然引用传参）。
-void SISpawn_ScanCandidates(int zombieClass, int dir, int refMin, int refMax,
-	int targetClient, Address targetNav, float targetPos[3],
-	bool useFlow, float hardMin, int samples,
-	bool &bestValid, float &bestScore, float bestPos[3]) {
-
-	if (refMin < 0) refMin = 0;
-	if (refMax >= g_iBatchSurvivorCount) refMax = g_iBatchSurvivorCount - 1;
-	if (refMax < refMin) refMin = refMax;
-	if (refMax < 0)
-		return;
-
-	float targetFlow = 0.0;
-	if (useFlow && targetNav != Address_Null) {
-		targetFlow = L4D2Direct_GetTerrorNavAreaFlow(targetNav);
-		if (targetFlow <= -9000.0)
-			targetFlow = 0.0;
-	}
-	bool haveTarget = (targetClient > 0 && targetClient <= MaxClients
-		&& IsClientInGame(targetClient) && IsPlayerAlive(targetClient)
-		&& targetNav != Address_Null);
+	int attempts = g_iCandidateSamples;		// 引擎取点尝试/保护重试轮数
+	if (attempts < 2)
+		attempts = 2;
 
 	float p[3];
-	for (int t = 0; t < samples; t++) {
-		int ref = g_iBatchSurvivors[GetRandomInt(refMin, refMax)];
-		g_iDirection = dir;		// 引擎 GetRandomPZSpawnPosition 会读 PreferredSpecialDirection
-		if (!L4D_GetRandomPZSpawnPosition(ref, zombieClass, 10, p))
-			continue;
+	for (int t = 0; t < attempts; t++) {
+		g_iDirection = dir;		// 引擎 GetRandomPZSpawnPosition 读 PreferredSpecialDirection
+		if (!L4D_GetRandomPZSpawnPosition(intendedTarget, zombieClass, 10, p))
+			continue;			// 引擎取点失败 → 下一轮
 
-		// ---------- HARD GATE（任何 fallback 不得突破） ----------
-		float euclid = DistanceToNearestSurvivor(p);
-		if (euclid < hardMin)
-			continue;
-
-		Address nav = L4D_GetNearestNavArea(p, 300.0, false, false, false, L4D_TEAM_INFECTED);
-		if (nav == Address_Null)
-			continue;
-		int flags = L4D_GetNavArea_AttributeFlags(nav);
-		if (flags & NAV_BASE_OUTSIDE_WORLD || flags & NAV_BASE_FLOW_BLOCKED || flags & NAV_BASE_NAV_BLOCKER)
-			continue;
-		if (!SISpawn_HullClear(p, zombieClass))
-			continue;
-		if (!SISpawn_HasGroundSupport(p))
-			continue;
-		if (SISpawn_InHurtTrigger(p)) {		// v6.0.3: 伤害触发器内 = 出生秒死, 硬拒
+		// 快速重试保护①: 伤害触发器(陷阱)内 → 出生即死，重试
+		if (SISpawn_InHurtTrigger(p)) {
 			g_iBatchGuardTrap++;
 			continue;
 		}
-		if (haveTarget && !L4D2_NavAreaBuildPath(nav, targetNav, g_fNavPathMax, L4D_TEAM_INFECTED, false))
+
+		// 快速重试保护②: 候选点到 target 的 NavPath 不通 → 重试
+		Address nav = L4D_GetNearestNavArea(p, 300.0, false, false, false, L4D_TEAM_INFECTED);
+		if (nav == Address_Null)
+			continue;
+		if (targetNav != Address_Null
+			&& !L4D2_NavAreaBuildPath(nav, targetNav, g_fNavPathMax, L4D_TEAM_INFECTED, false))
 			continue;
 
-		// ---------- SOFT SCORE ----------
-		float travel = -1.0;
-		if (haveTarget) {
-			travel = L4D2_NavAreaTravelDistance(p, targetPos, false);
-			if (travel < 0.0)
-				travel = -1.0;
-		}
-		float flowDelta = 0.0;
-		if (useFlow && nav != Address_Null) {
-			float f = L4D2Direct_GetTerrorNavAreaFlow(nav);
-			if (f > -9000.0)
-				flowDelta = FloatAbs(f - targetFlow);
-		}
-		bool visibleToSurvivor = SISpawn_RepresentativeCanSee(p, targetClient);
-
-		float score = 0.0;
-		score += SISpawn_ScoreEuclid(euclid);
-		if (travel >= 0.0)
-			score += SISpawn_ScoreNavTravel(travel);
-		if (useFlow)
-			score += SISpawn_ScoreFlow(flowDelta);
-		score += SISpawn_ScoreConcealment(visibleToSurvivor);
-		score += SISpawn_ScoreAttackLOS(p, targetClient, zombieClass);
-		score += SISpawn_ScoreClassGeometry(p, targetClient);
-		score += SISpawn_ScoreSpread(p);	// v6.0.1: 同波聚集惩罚
-		score += SISpawn_ScoreFooting(p);	// v6.0.3: 屋檐/悬崖边缘惩罚
-
-		if (!bestValid || score > bestScore) {
-			bestValid = true;
-			bestScore = score;
-			bestPos = p;
-		}
-	}
-}
-
-// 候选点主入口: Hard Gate + Soft Score 取最优；返回 false = 无任何合法候选（欠账）。
-// 第一遍对着 intendedTarget 严格采样；若全灭，第二遍仅把"路径可达锚点"换为最高 flow
-// 生还者（调研 §12: 必要时更换 anchor）——Hard Gate 其余项一条不放松。
-bool SISpawn_FindPosition(int zombieClass, int dir, int refMin, int refMax,
-	int intendedTarget, float outPos[3]) {
-
-	float hardMin = g_cSpawnRangeGuardMin.FloatValue;
-	if (hardMin < 0.0)
-		hardMin = 0.0;
-	int samples = g_iCandidateSamples;
-
-	bool bestValid = false;
-	float bestScore = -9999999.0;
-	float bestPos[3];
-
-	// 遍 1: 严格对着 intendedTarget
-	if (intendedTarget > 0 && intendedTarget <= MaxClients
-		&& IsClientInGame(intendedTarget) && IsPlayerAlive(intendedTarget)) {
-		float tp[3];
-		GetClientAbsOrigin(intendedTarget, tp);
-		Address tnav = L4D_GetNearestNavArea(tp, 500.0, true, false, false, L4D_TEAM_INFECTED);
-		SISpawn_ScanCandidates(zombieClass, dir, refMin, refMax, intendedTarget,
-			tnav, tp, true, hardMin, samples, bestValid, bestScore, bestPos);
-	} else {
-		SISpawn_ScanCandidates(zombieClass, dir, refMin, refMax, -1,
-			Address_Null, NULL_VECTOR, false, hardMin, samples, bestValid, bestScore, bestPos);
+		outPos = p;
+		return true;
 	}
 
-	// 遍 2: 仅在遍 1 全灭时换锚（仍是 Hard Gate 全通过的点）
-	if (!bestValid && g_iBatchSurvivorCount > 1) {
-		int anchor = g_iBatchSurvivors[0];
-		if (anchor > 0 && IsClientInGame(anchor) && GetClientTeam(anchor) == 2 && IsPlayerAlive(anchor)) {
-			float ap[3];
-			GetClientAbsOrigin(anchor, ap);
-			Address anav = L4D_GetNearestNavArea(ap, 500.0, true, false, false, L4D_TEAM_INFECTED);
-			SISpawn_ScanCandidates(zombieClass, dir, refMin, refMax, anchor,
-				anav, ap, true, hardMin, samples, bestValid, bestScore, bestPos);
-		}
-	}
-
-	if (!bestValid)
-		return false;
-	outPos = bestPos;
-	return true;
+	return false;
 }
 
 // 目标选择（调研 §20）: 不用所有 SI 都打最高 flow（前排会被集火）。
@@ -2567,16 +2258,13 @@ int SISpawn_PlaceOne(int zombieClass0, int dir, int refMin, int refMax, bool isR
 	if (g_iTargetCounts[target] < 9999)	// 防溢出
 		g_iTargetCounts[target]++;
 	float vPos[3];
-	if (!SISpawn_FindPosition(index, dir, refMin, refMax, target, vPos))
+	if (!SISpawn_FindPosition(index, dir, target, vPos))
 		return 0;
 
 	vPos[2] += 5.0;
 	int zombie = L4D2_SpawnSpecial(index, vPos, NULL_VECTOR);
 	if (zombie <= 0)
 		return 0;
-	// v6.0.1 坠落修复③: 记录本波成功落点（Soft Score 给"靠太近的下一个候选"惩罚）
-	if (g_iPlacedCount < MAX_WAVE)
-		g_fPlacedPos[g_iPlacedCount++] = vPos;
 	SetEntProp(zombie, Prop_Send, "m_bDucked", 1);
 	SetEntityFlags(zombie, GetEntityFlags(zombie) | FL_DUCKING);
 
@@ -2609,9 +2297,10 @@ int SISpawn_PlaceOne(int zombieClass0, int dir, int refMin, int refMax, bool isR
 		g_iWaveNumber, g_iSIWaveID[zombie], g_sZombieClass[zombieClass0],
 		g_iWaveNumber, target, vPos[0], vPos[1], vPos[2],
 		placedVisible, isReplacement ? " (replacement)" : "");
-	if (!isReplacement)
-		PrintToChatAll("\x04[SI]\x01 %s#\x05%d-%d\x01 已刷新",
-			g_sZombieClass[zombieClass0], g_iWaveNumber, g_iSIWaveID[zombie]);
+	// v6.1.1 起移除"已刷新"聊天播报（防刷屏；保留 LogMessage 生成日志）
+	// if (!isReplacement)
+	// 	PrintToChatAll("\x04[SI]\x01 %s#\x05%d-%d\x01 已刷新",
+	// 		g_sZombieClass[zombieClass0], g_iWaveNumber, g_iSIWaveID[zombie]);
 	return zombie;
 }
 
@@ -2632,7 +2321,7 @@ void SISpawn_RelocateSI(int client) {
 	}
 	int dir = g_bRandomDirection ? SPAWN_NO_PREFERENCE : SPAWN_LARGE_VOLUME;
 	float p[3];
-	if (SISpawn_FindPosition(zClass, dir, 0, g_iBatchSurvivorCount - 1, target, p)) {
+	if (SISpawn_FindPosition(zClass, dir, target, p)) {
 		p[2] += 5.0;
 		TeleportEntity(client, p, NULL_VECTOR, NULL_VECTOR);
 		LogMessage("[SS] ghost-relocate: %N -> safe (%.0f,%.0f,%.0f)", client, p[0], p[1], p[2]);
@@ -2772,8 +2461,9 @@ bool SpawnReplacement() {
 	int dir = g_bRandomDirection ? SPAWN_NO_PREFERENCE : SPAWN_LARGE_VOLUME;
 	if (SISpawn_PlaceOne(class, dir, 0, g_iBatchSurvivorCount - 1, true)) {
 		g_iWaveReserveSpawned++;
-		PrintToChatAll("\x04[补位]\x01 %s 补刷成功（剩余 \x03%d\x01）",
-			g_sZombieClass[class], g_iWaveReserve - 1);
+		// v6.1.1 起移除"补位"聊天播报（防刷屏；保留 LogMessage 补位日志）
+		// PrintToChatAll("\x04[补位]\x01 %s 补刷成功（剩余 \x03%d\x01）",
+		// 	g_sZombieClass[class], g_iWaveReserve - 1);
 		LogMessage("[SS] Wave Budget: replacement OK class=%d reserve=%d", class, g_iWaveReserve - 1);
 		return true;
 	}
@@ -2859,9 +2549,9 @@ void FinishWave() {
 			}
 		}
 		LogMessage("[SS] Wave #%d lifecycle: total_spawned=%d alive=%d killed=%d", g_iWaveNumber, waveSI, waveAlive, waveKilled);
-		// v5.33: 聊天摘要——刷了几只、死了几只、补了几只
-		PrintToChatAll("\x04[SI]\x01 第 \x05%d\x01 波结算：实际刷新 \x03%d\x01，玩家击杀 \x05%d\x01，补位 \x05%d\x01，存活 \x03%d\x01",
-			g_iWaveNumber, waveSI, g_iWaveKills, g_iWaveReserveSpawned, waveAlive);
+		// v5.33 波次结算聊天摘要：v6.1.1 起移除（防刷屏；保留 LogMessage；剿灭提示仍保留）
+		// PrintToChatAll("\x04[SI]\x01 第 \x05%d\x01 波结算：实际刷新 \x03%d\x01，玩家击杀 \x05%d\x01，补位 \x05%d\x01，存活 \x03%d\x01",
+		// 	g_iWaveNumber, waveSI, g_iWaveKills, g_iWaveReserveSpawned, waveAlive);
 	}
 
 	if (g_bBatchRetry) {
