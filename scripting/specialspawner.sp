@@ -2007,11 +2007,10 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	g_hBatchQueue = aQueue;
 
 	// v5.33: 波次开始播报（必须在 SpawnSliced 之前，否则玩家先看到刷新再看到计划）。
-	// v6.1.1: 简化播报文案——不再报波次号与数量，固定 "[SI] 特感来袭！"
-	// retry 补波（处决/续波）是同一波次的补充，不重复播报"特感来袭"。
-	if (!retry) {
-		PrintToChatAll("\x04[SI]\x01 特感来袭！");
-	}
+	// v6.1.1: 播报已移除（用户要求减少刷屏）。
+	// if (!retry) {
+	// 	PrintToChatAll("\x04[SI]\x01 特感来袭！");
+	// }
 
 	// v5.33: 首发一次性刷完（不受 batch_size 拆分）
 	SpawnSliced(0, g_iWaveInitial);
