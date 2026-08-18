@@ -186,6 +186,7 @@ float
 	g_bRandomDirection,
 	// v6.1.0 信任引擎方案: 参数缓存
 	g_fNavPathMax,				// NavPath 快速重试保护①: 候选点到目标的最大路径长度
+	g_fOrigSafetyRange,			// v6.1.1: 覆盖前保存的 z_spawn_safety_range 原值(OnMapEnd 恢复用)
 	g_fTargetInjectTime,
 	g_fRecoverTime,
 	g_fRelocateTime,
@@ -688,6 +689,13 @@ public void OnPluginStart() {
 }
 
 public void OnPluginEnd() {
+	// v6.1.1: 恢复 z_spawn_safety_range 原值（插件卸载/reload 不留脏值）
+	{
+		ConVar cvSafety = FindConVar("z_spawn_safety_range");
+		if (cvSafety != null)
+			cvSafety.SetFloat(g_fOrigSafetyRange);
+	}
+
 	TweakSettings(true);
 	// v2.5.3: reload/卸载时还原导演特感刷新（防暂停中 reload 残留 director_no_specials=1）
 	SS_RestoreDirectorSpecials();
@@ -1313,6 +1321,16 @@ public void OnClientDisconnect(int client) {
 // 不会重发，刷怪定时器链会断（特感停刷到换图）。引擎状态不受插件重载影响，
 // 用 L4D_HasAnySurvivorLeftSafeArea 检测 → 已离开安全区则重建链。
 public void OnMapStart() {
+	// v6.1.1: 覆盖 z_spawn_safety_range = 350 (InfectedBots 默认值，SI 刷点更贴近目标)
+	// 保存原值，OnMapEnd/OnPluginEnd 恢复，避免永久污染全局 cvar。
+	{
+		ConVar cvSafety = FindConVar("z_spawn_safety_range");
+		if (cvSafety != null) {
+			g_fOrigSafetyRange = cvSafety.FloatValue;
+			cvSafety.SetFloat(350.0);
+		}
+	}
+
 	if (L4D_HasAnySurvivorLeftSafeArea()) {
 		g_bLeftSafeArea = true;
 		// v2.0.0 热重载兜底: 状态机与全部 timer 随卸载清零 → 从收尾期恢复
@@ -1327,6 +1345,13 @@ public void OnMapStart() {
 }
 
 public void OnMapEnd() {
+	// v6.1.1: 恢复 z_spawn_safety_range 原值
+	{
+		ConVar cvSafety = FindConVar("z_spawn_safety_range");
+		if (cvSafety != null)
+			cvSafety.SetFloat(g_fOrigSafetyRange);
+	}
+
 	g_bLeftSafeArea = false;
 	g_bFinaleStarted = false;
 
