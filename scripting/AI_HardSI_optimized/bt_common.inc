@@ -29,6 +29,15 @@
 #define STUCK_JUMP_TIME 0.4    // v5.26: 停滞即跳的短跳窗口（秒，多帧注入 IN_JUMP）
 #define STUCK_JUMP_TIME_LONG 0.8  // v5.26: 连续 3 轮仍卡 → 长跳窗口（翻更高障碍）
 
+// v5.34: 运动意图标记 —— 区分"想走但走不动"和"行为树让我站着"。
+// 每帧 BT_ResetMovement() 已清除控制声明；本标记在每 tick 开始时由调用方
+// 重新声明。只有声明了运动意图的动作才触发 StuckDetector，非运动 Action
+// （技能/等待/伏击）调 BT_StuckDetour 时自动跳过并重置基线，
+// 防止"站着→突然蹦"的假 stuck 误判。
+stock void BT_BeginMovement(int client) {
+    BB_SetBool(client, "_stuck_movement_intent", true);
+}
+
 // ============================================================================
 // v5.25: 远近分流瞄准（导航层整改核心 —— 任务书 §14 路线 A）
 // 远距离移动时【不覆盖视角】：Valve/NextBot 原生导航需要自由视角来沿
@@ -75,6 +84,19 @@ stock bool BT_ObstacleAhead(int client, float probeDist = 120.0) {
 
 stock bool BT_StuckDetour(int client) {
     float now = GetGameTime();
+
+    // v5.34: 运动意图检查 —— 无运动意图时跳过 stuck 检测并重置基线。
+    // 解决"站着 → 突然蹦"：非运动 Action（技能/等待/伏击）不声明运动意图，
+    // 旧的 position baseline 不会被误判为"停滞"。重新进入运动 Action 时
+    // 通过 BT_BeginMovement() 声明意图，StuckDetector 以全新基线启动。
+    if (!BB_GetBool(client, "_stuck_movement_intent", false)) {
+        // 无运动意图：重置所有 stuck 状态，防止旧 baseline 残留
+        BB_SetBool(client, "_stuck_detour", false);
+        BB_SetFloat(client, "_stuck_check_at", 0.0);
+        BB_SetInt(client, "_stuck_rounds", 0);
+        BB_SetFloat(client, "_stuck_jump_until", 0.0);
+        return false;
+    }
 
     // --- 绕行激活期间跳过位移检测（v5.6：原版绕行造成 >20u 位移 → 0.75s 后
     // 被自己的检测取消 → 每次绕行刚起步就掐断再撞墙，推进效率腰斩）---
@@ -397,6 +419,13 @@ stock float SI_AbilityGetTryAt(int client, const char[] keyPrefix) {
     return BB_GetFloat(client, key, 0.0);
 }
 
+// v5.34: 清除尝试开始时刻（Abort 时调用，防止残留 try_at 误导下次进入）
+stock void SI_AbilityClearTryAt(int client, const char[] keyPrefix) {
+    char key[64];
+    Format(key, sizeof(key), "%s_try_at", keyPrefix);
+    BB_SetFloat(client, key, 0.0);
+}
+
 // 记录真实确认时刻（事件到达 → CONFIRMED 时调用）
 stock void SI_AbilityMarkConfirmed(int client, const char[] keyPrefix, float now) {
     char key[64];
@@ -579,9 +608,16 @@ BT_Status CND_WaveStaging(int client) {
 // 补两条放行：
 //   ① 硬超时 ai_harass_max_hold（默认 5s）—— 蹲坑再久也得打
 //   ② 目标已进扑击距离且有 LOS —— 到嘴边的肉不放
+//
+// v5.34 FIX: 骚扰者解放距离独立于 Hunter 扑击距离 —— 原版共用
+// ai_fast_pounce_proximity（Hunter 1000u）：Charger 自身冲锋决策距离
+// ai_charge_proximity=750，750~1000u 被公共"到嘴边就打"提前解除骚扰，
+// 随后发现冲锋条件不合适 → 掉进 reposition → 观感"犹豫降智"。
+// 新增 ai_harass_release_proximity 专控骚扰者解放距离，默认 800u
+// （Charger/Jockey 攻击半径的合理中值），Hunter 不受影响。
 static float s_fHarassHoldStart[MAXPLAYERS + 1];
-static ConVar s_hHarassHold = null;      // 缓存句柄：本函数是每 tick 每 SI 热路径
-static ConVar s_hHarassGate = null;      // FindConVar 是字符串查表，不能每 tick 调
+static ConVar s_hHarassHold = null;           // 缓存句柄：本函数是每 tick 每 SI 热路径
+static ConVar s_hHarassReleaseProx = null;    // v5.34: 骚扰者解放距离（独立于 Hunter pounceGate）
 
 stock void Harass_ResetHold(int client) {
     if (client > 0 && client <= MAXPLAYERS) s_fHarassHoldStart[client] = 0.0;
@@ -592,7 +628,13 @@ BT_Status CND_HarasserReleased(int client) {
     if (CND_InitiatorEngaged(client) == BT_SUCCESS) return BT_SUCCESS;
 
     if (s_hHarassHold == null) s_hHarassHold = FindConVar("ai_harass_max_hold");
-    if (s_hHarassGate == null) s_hHarassGate = FindConVar("ai_fast_pounce_proximity");
+    // v5.34: 优先读 ai_harass_release_proximity；不存在时 fallback ai_fast_pounce_proximity
+    if (s_hHarassReleaseProx == null) {
+        s_hHarassReleaseProx = FindConVar("ai_harass_release_proximity");
+        if (s_hHarassReleaseProx == null) {
+            s_hHarassReleaseProx = FindConVar("ai_fast_pounce_proximity");
+        }
+    }
 
     // ① 硬超时先判（一次浮点比较）—— 放在 ② 之前纯为省开销：两条是 OR
     // 关系，结果不受顺序影响，但超时一旦成立就直接返回，后面的
@@ -606,7 +648,8 @@ BT_Status CND_HarasserReleased(int client) {
     }
 
     // ② 到嘴边就打：最近幸存者已在扑击距离内且视线通畅
-    float pounceGate = (s_hHarassGate != null) ? s_hHarassGate.FloatValue : 1000.0;
+    // v5.34: 使用独立的 ai_harass_release_proximity 而非 Hunter 的 pounceGate
+    float pounceGate = (s_hHarassReleaseProx != null) ? s_hHarassReleaseProx.FloatValue : 800.0;
     float own[3];
     GetClientAbsOrigin(client, own);
     int prox = GetSurvivorProximity(own);
@@ -1000,6 +1043,7 @@ BT_Status ACT_StrafeRandom(int client) {
         BT_AddButton(client, IN_MOVERIGHT);
         BT_RemoveButton(client, IN_MOVELEFT);
     }
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.3: 横移贴墙死锁（如 Spitter 守位）→ 沿墙走
     return BT_RUNNING;
 }
@@ -1019,6 +1063,7 @@ BT_Status ACT_MoveToTarget(int client) {
     BT_AimIfNear(client, target, 600.0);   // v5.25: 近处才接管瞄准
     // Move forward
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙时追加横移键斜插绕行
     return BT_RUNNING;
 }
@@ -1056,6 +1101,7 @@ BT_Status ACT_StrafeApproach(int client) {
         BT_AimIfNear(client, target, 600.0);   // v5.25
     }
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
     return BT_RUNNING;
 }
@@ -1092,6 +1138,7 @@ BT_Status ACT_Wander(int client) {
         BT_SetAimAngles(client, 0.0, yaw, 0.0);
     }
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
     return BT_RUNNING;
 }
@@ -1144,6 +1191,7 @@ BT_Status ACT_StrafeMoveToTarget(int client) {
     BT_AimIfNear(client, target, 600.0);   // v5.25: 远近分流
     BT_AddButton(client, IN_FORWARD);
 
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
     return BT_RUNNING;
 }
@@ -1211,6 +1259,7 @@ BT_Status ACT_ErraticApproach(int client) {
     }
     BT_AddButton(client, IN_FORWARD);
 
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
     return BT_RUNNING;
 }
@@ -1230,6 +1279,7 @@ BT_Status ACT_Retreat(int client) {
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
     return BT_RUNNING;
 }
@@ -1522,6 +1572,7 @@ BT_Status ACT_FlankApproach(int client) {
         BT_AddButton(client, IN_MOVERIGHT);
     }
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
     return BT_RUNNING;
 }
@@ -1551,6 +1602,7 @@ BT_Status ACT_HugWall(int client) {
         // Both blocked (narrow corridor) — move straight
     }
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
     return BT_RUNNING;
 }
@@ -1778,6 +1830,7 @@ BT_Status ACT_CircleFlank(int client) {
         BT_RemoveButton(client, IN_MOVELEFT);
     }
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
     return BT_RUNNING;
 }

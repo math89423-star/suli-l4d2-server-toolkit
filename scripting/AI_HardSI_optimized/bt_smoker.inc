@@ -145,6 +145,7 @@ BT_Status SmokerAct_ApproachOutside(int client) {
     GetClientAbsOrigin(client, myPos);
 
     float dir[3], ang[3];
+    float distToTarget = GetVectorDistance(myPos, tPos);
     if (count > 0) {
         center[0] /= float(count);
         center[1] /= float(count);
@@ -164,8 +165,15 @@ BT_Status SmokerAct_ApproachOutside(int client) {
         MakeVectorFromPoints(myPos, tPos, dir);
     }
     GetVectorAngles(dir, ang);
-    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    // v5.34 FIX: 远距离不强制视角 —— 距离 >850u（舌头射程）时交还 Valve
+    // NextBot 导航自由调整方向沿 navmesh 绕障碍；只有进入射程附近才
+    // 强制朝向 standPos（瞄准/战术位置需要精确朝向）。
+    // 原版无论距离一律 BT_SetAimAngles → 远距离剥夺引擎导航 → 撞墙循环。
+    if (distToTarget <= 850.0) {
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    }
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行（隔墙站桩主因）
     return BT_RUNNING;
 }
@@ -264,7 +272,14 @@ BT_Status SmokerAct_TryTongue(int client) {
 
     // --- v5.33: 用锁定目标瞄准（不再读 BB target，防止 Sequence 重评换人）---
     int target = SI_AttackGetLockedTarget(client, "_smoker");
-    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+    // v5.34 FIX: lock_target 无效时立即失败 —— Abort 清了 lock 但 try_at 残留
+    // 的场景下（或目标死亡），不应无条件按 IN_ATTACK 对着空气吐 1.2s
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        SI_AttackClearTarget(client, "_smoker");
+        SI_AbilityBackoff(client, "_smoker", now, 0.3);
+        return BT_FAILURE;
+    }
+    {
         float sPos[3], tPos[3], tVel[3], dir[3], ang[3];
         GetClientAbsOrigin(client, sPos);
         GetClientAbsOrigin(target, tPos);

@@ -67,15 +67,13 @@ BT_Status BoomerCnd_PostVomitApproach(int client) {
 // Flank or direct approach based on whether survivor is watching.
 // Faces the blackboard "target" while approaching.
 BT_Status BoomerAct_FlankApproach(int client) {
-    // Face target
+    // Face target — v5.34: 远距离不强制视角，交还 Valve 导航
     int target = BB_GetInt(client, "target", -1);
     if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
-        float sPos[3], tPos[3], dir[3], ang[3];
-        GetClientAbsOrigin(client, sPos);
-        GetClientAbsOrigin(target, tPos);
-        MakeVectorFromPoints(sPos, tPos, dir);
-        GetVectorAngles(dir, ang);
-        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        // v5.34 FIX: 原版无条件 BT_SetAimAngles → 远距离剥夺引擎导航能力 →
+        // 复杂地形（楼梯/车辆/隔墙）脸朝目标顶墙。改用 BT_AimIfNear：
+        // >600u 交还 Valve NextBot 自由导航，≤600u 才接管视角（呕吐需要精确朝向）。
+        BT_AimIfNear(client, target, 600.0);
     }
 
     bool watched = IsTargetWatchingAttacker(client);
@@ -100,7 +98,11 @@ BT_Status BoomerAct_FlankApproach(int client) {
         // Direct approach — clear flank state
         BB_SetFloat(client, "_boomer_flank_next", 0.0);
     }
+    // v5.34 FIX: 原版无 BT_StuckDetour —— Boomer 在复杂室内/楼梯口/车辆旁
+    // 脸朝 Survivor 顶墙时无脱困机制，只能等行为树重评切换分支。
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
+    BT_StuckDetour(client);
     return BT_RUNNING;
 }
 

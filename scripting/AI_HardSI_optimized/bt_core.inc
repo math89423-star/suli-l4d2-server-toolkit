@@ -397,8 +397,17 @@ stock void BT_AbortNode(int client, int nodeId) {
     if (g_hBTBlackboard[client] != null) {
         SI_AbilitySetState(client, "_smoker", ABILITY_IDLE);
         SI_AttackClearTarget(client, "_smoker");
+        // v5.34 FIX: 清除 _smoker_try_at —— 原版只清 state+lock_target，
+        // 残留 try_at 让下次进入 TryTongue 误判"已在 TRYING"跳过 LockTarget，
+        // 但 lock_target=-1 → 不瞄准 + 无条件 IN_ATTACK → 对着空气按 1.2s
+        SI_AbilityClearTryAt(client, "_smoker");
         SI_AbilitySetState(client, "_spitter", ABILITY_IDLE);
         SI_AttackClearTarget(client, "_spitter");
+        // v5.34 FIX: 清除 _spitter_waiting_spit + _spitter_press_start ——
+        // 残留 waiting_spit=true 让 PredictiveSpit/Spit 跳过重新锁目标，
+        // 但 lock_target 已被清 -1 → "锁目标无效"立即退出 → 吐酸被静默取消
+        BB_SetBool(client, "_spitter_waiting_spit", false);
+        BB_SetFloat(client, "_spitter_press_start", 0.0);
         SI_AbilitySetState(client, "_boomer", ABILITY_IDLE);
         SI_AbilitySetState(client, "_hunter", ABILITY_IDLE);
         SI_AbilitySetState(client, "_charger", ABILITY_IDLE);

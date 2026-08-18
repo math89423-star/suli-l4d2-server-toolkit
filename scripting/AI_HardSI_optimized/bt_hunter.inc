@@ -508,6 +508,7 @@ BT_Status HunterAct_HarasserApproach(int client) {
         BT_RemoveButton(client, IN_DUCK);
     }
 
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);
     return BT_RUNNING;
 }
@@ -581,6 +582,7 @@ BT_Status HunterAct_SprintApproach(int client) {
     // CRITICAL: Ensure NOT ducking — sprint at full running speed.
     // The old approachFull forced crouch BEFORE approach, causing slow crawl.
     BT_RemoveButton(client, IN_DUCK);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
 
     return BT_RUNNING;
@@ -641,6 +643,7 @@ BT_Status HunterAct_CrouchApproach(int client) {
 
     // Move forward toward target
     BT_AddButton(client, IN_FORWARD);
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);   // v5.2: 顶墙绕行
 
     return BT_RUNNING;

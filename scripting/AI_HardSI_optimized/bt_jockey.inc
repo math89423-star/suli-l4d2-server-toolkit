@@ -126,6 +126,7 @@ BT_Status JockeyAct_HarasserRide(int client) {
         }
     }
 
+    BT_BeginMovement(client);   // v5.34: 声明运动意图
     BT_StuckDetour(client);
     return BT_RUNNING;
 }
