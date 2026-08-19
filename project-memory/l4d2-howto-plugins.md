@@ -85,10 +85,10 @@ cd /home/administrator/suli-l4d2-server-toolkit/scripting
 cp compiled/插件名.smx /home/administrator/l4d2-server/left4dead2/addons/sourcemod/plugins/
 
 # 3. RCON 热加载（无需重启 srcds）
-python3 /tmp/rcons.py 'sm plugins reload 插件名'
+python3 /home/administrator/suli-l4d2-server-toolkit/bin/rcons.py 'sm plugins reload 插件名'
 ```
 
-> **RCON 客户端**: `/tmp/rcons.py`，端口 27015，密码在 `server.cfg`。
+> **RCON 客户端**: `/home/administrator/suli-l4d2-server-toolkit/bin/rcons.py`，端口 27015，密码在 `server.cfg`。
 
 ## 部署 cfg
 
@@ -112,17 +112,17 @@ mv /home/administrator/l4d2-server/left4dead2/addons/sourcemod/plugins/disabled/
    /home/administrator/l4d2-server/left4dead2/addons/sourcemod/plugins/
 
 # 热加载生效
-python3 /tmp/rcons.py 'sm plugins reload 插件名'
+python3 /home/administrator/suli-l4d2-server-toolkit/bin/rcons.py 'sm plugins reload 插件名'
 ```
 
 ## 查看插件状态
 
 ```bash
 # 列出所有插件
-python3 /tmp/rcons.py 'sm plugins list'
+python3 /home/administrator/suli-l4d2-server-toolkit/bin/rcons.py 'sm plugins list'
 
 # 查看特定插件
-python3 /tmp/rcons.py 'sm plugins info 插件名'
+python3 /home/administrator/suli-l4d2-server-toolkit/bin/rcons.py 'sm plugins info 插件名'
 
 # 查看错误日志
 tail -50 /home/administrator/l4d2-server/left4dead2/addons/sourcemod/logs/errors_$(date +%Y%m%d).log
@@ -140,10 +140,10 @@ tail -50 /home/administrator/l4d2-server/left4dead2/addons/sourcemod/logs/errors
 
 ```bash
 # 确认插件加载无错误
-python3 /tmp/rcons.py 'sm plugins list' 2>&1 | grep "插件名"
+python3 /home/administrator/suli-l4d2-server-toolkit/bin/rcons.py 'sm plugins list' 2>&1 | grep "插件名"
 
 # 确认 cvar 生效
-python3 /tmp/rcons.py 'sm_cvar cvar名' 2>&1 | grep "Value"
+python3 /home/administrator/suli-l4d2-server-toolkit/bin/rcons.py 'sm_cvar cvar名' 2>&1 | grep "Value"
 ```
 
 ## 关联

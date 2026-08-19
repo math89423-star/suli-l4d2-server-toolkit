@@ -37,7 +37,7 @@ Python 的模块搜索顺序：**脚本所在目录优先于 site-packages**。
 /tmp/rcon.py          ← Python 把它当 rcon 模块
 
 # 正确：改名避开
-/tmp/rcons.py         ← 不冲突，正常 import rcon.source
+/home/administrator/suli-l4d2-server-toolkit/bin/rcons.py         ← 不冲突，正常 import rcon.source
 ```
 
 ## 触发条件

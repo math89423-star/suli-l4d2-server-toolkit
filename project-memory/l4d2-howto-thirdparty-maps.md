@@ -72,7 +72,7 @@ cp /tmp/*.vpk /home/administrator/l4d2-server/admin-panel/maps/vpk/
 ### 已加载的 VPK 之间切换：`sm_map` 即可
 
 ```bash
-python3 /tmp/rcons.py 'sm_map c2m1_highway'
+python3 /home/administrator/suli-l4d2-server-toolkit/bin/rcons.py 'sm_map c2m1_highway'
 ```
 
 ### 新增 VPK 后：必须重启 srcds！
