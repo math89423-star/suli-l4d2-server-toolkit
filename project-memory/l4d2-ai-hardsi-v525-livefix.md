@@ -106,3 +106,13 @@ Smoker v5.32（`aimPos[2]=tPos[2]+30` 胸口）—— **Spitter 此前漏改**�
 **部署**：编译 0 error / 28 warn → cp → `sm plugins reload AI_HardSI_bt`
 （21:00:37 运行正常，hash 45022a48e621ec22141275345d8f0d93；errors 零新增）。
 **待实机观测**：80u 以上酸液命中是否改善；若仍偏低可把 40 上探 50-60（眼高）。
+
+## v5.38（2026-08-20）IsTank 补 IsClientInGame 守卫
+
+- **现象**：偶尔 `[SM] Exception reported: Client X is not in game`，堆栈
+  `SpitterAct_SpitTankCover → FindTankClient → IsTank → GetClientTeam`（实机 21:19:15 单次爆发，
+  历史 errors 累计 103 次 = bot 槽位释放瞬间的偶发抖动）。
+- **根因**：`IsTank()`（hardcoop_util.sp:374）只查 `IsClientConnected` 未查 `IsClientInGame`，
+  connected 但未 in-game 的槽位上 `GetClientTeam` 抛异常 → SM 按 tick 捕获，该帧 AI 空转。
+- **修复**：`IsTank()` 条件加 `IsClientInGame(client)`。不启停波次，仅消噪。
+- **部署**：与 v5.36 同一 smx 重编重载（21:23:14，0 error/28 warn），reload 后零异常。

@@ -372,6 +372,8 @@ stock CountSpecialInfectedBots() {
  */
 stock bool:IsTank(client) {
 	return IsClientConnected(client)
+		&& IsClientInGame(client)   // v5.38: 补 in-game 守卫 —— 原只有 Connected，bot 槽位释放瞬间
+									// GetClientTeam 抛 "Client X is not in game"(实机 21:19 坦克协同分支)
 		&& L4D2_Team:GetClientTeam(client) == L4D2Team_Infected
 		&& GetInfectedClass(client) == L4D2Infected_Tank;
 }
