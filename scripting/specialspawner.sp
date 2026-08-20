@@ -2811,6 +2811,14 @@ void ResetLifecycle() {
 		KillTimer(g_hCatchupTimer);
 		g_hCatchupTimer = null;
 	}
+	// v5.37 FIX: 换图后 g_hReserveTimer 残留 —— reserve 兜底 timer 用 TIMER_FLAG_NO_MAPCHANGE，
+	// 换图被引擎自动杀但变量未置 null → 下一波 ExecuteSpawnQueue:2018 KillTimer 对失效句柄抛异常
+	// → 函数中止、SpawnSliced 不执行 → 整波 0 特感（2026-08-20 li_c1m3 实机：21:06 起 total_spawned=0）。
+	// OnMapEnd/ResetLifecycle 时刻该 timer 仍有效，安全 KillTimer。
+	if (g_hReserveTimer != null) {
+		KillTimer(g_hReserveTimer);
+		g_hReserveTimer = null;
+	}
 	g_bBatchCatchup = false;
 	g_iBatchDebt = 0;
 	for (int c = 1; c <= MaxClients; c++)

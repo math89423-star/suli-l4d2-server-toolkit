@@ -326,3 +326,23 @@ reload 后 errors 日志零新增。⚠ exec 路径必须 `exec sourcemod/specia
 - specialspawner `SetSpawnCount` 只会把 ss_spawn_size 抬高到自身算式值，低于 si_comp 时沿用 si_comp 值，
   故实际波次 = max(3N, 12+(N-4)) = 3N ✓
 - **实测**：6人 → `ss_spawn_size = 18`（=3×6）✓
+
+## v5.37（2026-08-20）整波 0 特感根治 —— g_hReserveTimer 换图残留
+
+**现象**：换图后特感完全不刷新（`Wave lifecycle total_spawned=0` 连续多波），errors 日志每 ~37s 一条
+`Invalid timer handle (error 1) @ specialspawner.sp:2018 ExecuteSpawnQueue ← 1745 tmrSpawnSpecial`。
+
+**根因链路**（实机 21:05:44 换图 li_c1m3 触发，21:06:27 起稳定复现）：
+- `g_hReserveTimer = CreateTimer(60.0, tmrReserveTimeout, _, TIMER_FLAG_NO_MAPCHANGE)`(2062行)
+- **换图时引擎自动杀 NO_MAPCHANGE timer，但 `g_hReserveTimer` 变量未置 null**
+- 下一波 `ExecuteSpawnQueue:2018 KillTimer(g_hReserveTimer)` → 对失效句柄抛异常 → **函数中止，
+  SpawnSliced 根本不执行** → 整波 0 特感 → 死循环每波一次
+- 触发概率与特感×3 联动：×3 后 reserve>0 的波更多 → 换图时挂着 reserve timer 的概率更高
+
+**修复**（specialspawner.sp `ResetLifecycle()`，OnMapEnd 兜底）：
+```pawn
+if (g_hReserveTimer != null) { KillTimer(g_hReserveTimer); g_hReserveTimer = null; }
+```
+（ResetLifecycle 原本清 BatchTimer/CatchupTimer，唯独漏了 ReserveTimer；OnMapEnd 时刻 timer 仍有效，安全。）
+- `sm plugins reload specialspawner` 可临时救场（重置全局句柄）；根治必须上版代码。
+- 部署：编译 0 error/4 warn(既有) → cp → reload；wave 立即回复正常。版本号未 bump（沿用 6.1.1）。
