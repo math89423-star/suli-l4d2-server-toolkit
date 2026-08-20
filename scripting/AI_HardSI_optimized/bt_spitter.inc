@@ -1,6 +1,11 @@
 // ============================================================================
 // bt_spitter.inc — Spitter Behavior Tree (v3.2)
 // ============================================================================
+// v5.36: 命中率修复 —— 三个吐酸动作瞄准点从脚底抬到胸口高度
+//   （SpitterAct_Spit / PredictiveSpit +40u，SpitterAct_SpitTankCover +30u）。
+//   原 GetClientAbsOrigin = 脚底 → 酸液抛物线低抛短落、落点偏近（命中率差），
+//   同 Tank v5.30（GetClientEyePosition）/ Smoker v5.32（+30 胸口）的先例，
+//   Spitter 此前漏改。预判系数未动（最低风险改动）。
 // v3.1: Post-spit behavior — 80% approach survivors (body-block/distract),
 //       20% retreat. No longer suicides after spitting.
 // Key behaviors preserved from v2.4:
@@ -170,6 +175,8 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
 
     float tPos[3], tVel[3], sPos[3];
     GetClientAbsOrigin(lockedTarget, tPos);
+    tPos[2] += 40.0;   // v5.36 FIX: 胸口高度 —— 原脚底 = 酸液抛物线低抛短落、命中率差
+                       // （同 Tank v5.30 GetClientEyePosition / Smoker v5.32 +30 的先例，Spitter 此前漏改）
     GetEntPropVector(lockedTarget, Prop_Data, "m_vecVelocity", tVel);
     float speed = GetVectorLength(tVel);
     GetClientAbsOrigin(client, sPos);
@@ -236,6 +243,7 @@ BT_Status SpitterAct_SpitTankCover(int client) {
 
     float tPos[3], tAng[3], fwd[3], aimPos[3];
     GetClientAbsOrigin(tank, tPos);
+    tPos[2] += 30.0;   // v5.36 FIX: 抬 30u —— 原落点在坦克脚底平线，抛物线短落到不了封锁位
     GetClientEyeAngles(tank, tAng);
     tAng[0] = 0.0;
     GetAngleVectors(tAng, fwd, NULL_VECTOR, NULL_VECTOR);
@@ -301,6 +309,7 @@ BT_Status SpitterAct_Spit(int client) {
     float sPos[3], tPos[3], dir[3], ang[3];
     GetClientAbsOrigin(client, sPos);
     GetClientAbsOrigin(lockedTarget, tPos);
+    tPos[2] += 40.0;   // v5.36 FIX: 胸口高度 —— 原脚底 = 酸液低抛短落（同 PredictiveSpit 先例）
 
     // === v5.16: 预判投掷 ===
     // 获取目标移动速度

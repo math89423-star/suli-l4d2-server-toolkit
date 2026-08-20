@@ -316,3 +316,13 @@ reload 后 errors 日志零新增。⚠ exec 路径必须 `exec sourcemod/specia
 - [[l4d2-si-composition-manager]] — SI 组合管理器，ceil(存活人数×1.5) + 存活数播报
 - `spawn_infected_nolimit.smx` — 移除引擎层面的特感数量限制，使 specialspawner 的高上限生效
 - `AI_HardSI_bt.smx` — 行为树 AI，接管刷新后 SI 的决策逻辑
+
+## 2026-08-20: 特感数量 = 人数×3（用户拍板）
+
+- 公式 **10+2.5×(N-4) → 12+3×(N-4)**（4人基准 12 = 3×4，钳 [12,32]）
+- cfg 三处同步：`ss_spawn_size` 10→12 / `ss_base_limit` 10→12 / `ss_extra_limit` 2.5→3
+- ⚠️ si_comp `g_fCfgBaseSpawnSize` 只在 OnConfigsExecuted 从 `ss_spawn_size` cfg 捕获 → 改 cfg 后必须
+  `exec sourcemod/specialspawner.cfg` + `sm plugins reload si_composition_manager` 才生效（纯 sm_cvar 无效）
+- specialspawner `SetSpawnCount` 只会把 ss_spawn_size 抬高到自身算式值，低于 si_comp 时沿用 si_comp 值，
+  故实际波次 = max(3N, 12+(N-4)) = 3N ✓
+- **实测**：6人 → `ss_spawn_size = 18`（=3×6）✓

@@ -88,3 +88,21 @@ Jockey 站立 leap 正常而 Hunter 蹲姿链路脆弱（决策帧按蹲、Valve
 改距离/1100×0.7（原固定 0.8s 远近失真）
 
 编译 0 error；git b3bbf46 已推送 0/0
+
+## v5.36（2026-08-20）spitter 命中率修复 —— 瞄准点脚底 → 胸口
+
+**现象**：用户反馈 spitter 命中率低（"我感觉现在spitter命中率很低"）。
+
+**根因**：三个吐酸动作（`SpitterAct_Spit` / `SpitterAct_PredictiveSpit` / `SpitterAct_SpitTankCover`）
+全瞄 `GetClientAbsOrigin(目标)`（= **脚底**），且 `aimPos[2]=tPos[2]` 保持脚底水平线。
+酸液是带弧线下坠的抛射物 → **低抛短落、落点偏近**。这是同代码库早已修过的坑：
+Tank v5.30（`GetClientAbsOrigin=脚底 → 石头抛物线落点偏低/低抛，命中率差`，改 `GetClientEyePosition`）、
+Smoker v5.32（`aimPos[2]=tPos[2]+30` 胸口）—— **Spitter 此前漏改**。
+
+**修复**（bt_spitter.inc，最小改动：只抬高度、不动预判系数）：
+- `SpitterAct_Spit` / `SpitterAct_PredictiveSpit`：取位后 `tPos[2] += 40.0`（胸口高度）
+- `SpitterAct_SpitTankCover`：`tPos[2] += 30.0`
+
+**部署**：编译 0 error / 28 warn → cp → `sm plugins reload AI_HardSI_bt`
+（21:00:37 运行正常，hash 45022a48e621ec22141275345d8f0d93；errors 零新增）。
+**待实机观测**：80u 以上酸液命中是否改善；若仍偏低可把 40 上探 50-60（眼高）。
