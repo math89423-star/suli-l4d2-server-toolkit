@@ -9,6 +9,14 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.12.3（2026-08-22）：**透视边框改粉色（用户拍板）**——特感透视 `m_glowColorOverride`
+ * 蓝 `0,0,255` → 粉 `255,105,180` (HOT PINK)，与幸存者轮廓区分；Witch 同步。
+ *
+ * v1.12.2（2026-08-22）：**AGM第一圈层扩大50%（用户拍板）**——核心区
+ * 半径系数 1.38→2.07（1.38*1.5），友伤圈同步扩大；瞄准圈
+ * Art_RingParams 与 V1_Detonate coreRadius 口径一致改 2.07；825→1242 /
+ * 621→931 / 483→724。
+ *
  * v1.10.10（2026-08-17）：**AGM 倒计时从 5 秒开始（用户定稿）**——发射音效
  * 在 remain==3（预警第 5 秒）响起 = 导弹发射时刻 → "AGM导弹发射倒计时"
  * 显示 5→1 秒（remain 8..4 映射 5..1），走完瞬间音效响起并切"AGM导弹已
@@ -342,7 +350,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.12.1"   // v1.12.0: 近战盲盒 → 固定武士刀；v1.12.1: 电锯单独重上 2850（用户拍板）
+#define PLUGIN_VERSION "1.12.3"   // v1.12.3: 透视改粉色 255,105,180 HOT PINK（用户拍板）
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -2617,7 +2625,7 @@ void WallhackApplyGlow()
         SetEntProp(i, Prop_Send, "m_iGlowType", 3);
         SetEntProp(i, Prop_Send, "m_nGlowRange", 999999);
         SetEntProp(i, Prop_Send, "m_nGlowRangeMin", 0);
-        SetEntProp(i, Prop_Send, "m_glowColorOverride", 0 | (0 << 8) | (255 << 16) | (255 << 24));  // 蓝
+        SetEntProp(i, Prop_Send, "m_glowColorOverride", 255 | (105 << 8) | (180 << 16) | (255 << 24));  // 粉 HOT PINK 255,105,180
     }
     for (int i = 0; i < g_hWitchList.Length; i++)
     {
@@ -2638,7 +2646,7 @@ void WallhackApplyGlow()
         SetEntProp(w, Prop_Send, "m_iGlowType", 3);
         SetEntProp(w, Prop_Send, "m_nGlowRange", 999999);
         SetEntProp(w, Prop_Send, "m_nGlowRangeMin", 0);
-        SetEntProp(w, Prop_Send, "m_glowColorOverride", 0 | (0 << 8) | (255 << 16) | (255 << 24));  // 蓝
+        SetEntProp(w, Prop_Send, "m_glowColorOverride", 255 | (105 << 8) | (180 << 16) | (255 << 24));  // 粉 HOT PINK
     }
     WallhackClearRagdolls();   // v1.7.5: 尸体 ragdoll 残留发光兜底
 }
@@ -3434,10 +3442,10 @@ void Art_RingParams(int kind, float ceiling, bool openAbove, float &ring)
     else                               r = cvSmall.FloatValue;   // 拒绝级：确认前被拦截
 
     // v1.8.18: AGM导弹不落罐，是三层圆柱杀伤——圈只显示第一圈（核心区）
-    // 范围 = radius × 1.38（与 V1_Detonate 的 coreRadius 口径一致），不加落罐效果半径
+    // 范围 = radius × 2.07（v1.12.2 扩大50%: 1.38*1.5=2.07，与 V1_Detonate 的 coreRadius 口径一致），不加落罐效果半径
     if (kind == 6)
     {
-        ring = r * 1.38;
+        ring = r * 2.07;
         return;
     }
     ring = r + 450.0;   // v1.6.4: 落点半径 + 效果半径（用户拍板 450u）
@@ -5129,12 +5137,12 @@ void V1_Detonate(int client, const float target[3], float radius)
     // v1.8.14: 爆炸音效已提前到 V1_Launch（导弹出现时）播放，此处不再播放，避免重复
 
     // v1.8.16: 三层分区伤害系统（圆柱形，高度 ±1500u）
-    // 0-radius*1.38(核心区): 幸存者原分圈伤害逻辑，特感/僵尸秒杀
-    // radius*1.38-2000u(冲击波区): 幸存者震屏无伤，僵尸秒杀
+    // v1.12.2: 第一圈层扩大50% → 0-radius*2.07(核心区): 幸存者原分圈伤害逻辑，特感/僵尸秒杀
+    // radius*2.07-2000u(冲击波区): 幸存者震屏无伤，僵尸秒杀
     // 2000-3000u(余波区): 幸存者无影响，僵尸100伤秒杀，特感轻伤
     // v1.9.1: 1/2 圈层（核心区+冲击波区）特感/Tank/Witch 统一 99999 秒杀（用户定稿），
     // 余波区分层保留（特感100/Tank6000/Witch800）
-    float coreRadius = radius * 1.38;              // 核心区扩大 38%（1.2 × 1.15）
+    float coreRadius = radius * 2.07;              // v1.12.2: 核心区 1.38*1.5=2.07（原1.38=1.2*1.15，扩50%）
     float shockwaveRadius = 2000.0;               // 冲击波区外边界
     float aftershockRadius = 3000.0;              // 余波区外边界
 
@@ -5213,7 +5221,7 @@ void V1_Detonate(int client, const float target[3], float radius)
             continue;  // 超出余波区
 
         // 判断所在区域
-        bool inCore = (dist2 <= core2);                          // 0-radius*1.38 核心区
+        bool inCore = (dist2 <= core2);                          // 0-radius*2.07 核心区 v1.12.2
         bool inShockwave = !inCore && (dist2 <= shockwave2);     // 核心区-2000u 冲击波区
         // 余波区 = !inCore && !inShockwave（2000-3000u），用 else 分支隐含
 

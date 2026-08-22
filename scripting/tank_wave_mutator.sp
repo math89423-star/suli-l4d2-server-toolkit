@@ -38,6 +38,9 @@
 //   · 距离 600→500→400 逐级缩短 + 向下 trace 找地面（防卡墙/落地）；无 LOS 要求
 //   · 仍找不到地面点才放弃该只（日志区分 fallback 成功/失败原因）
 // v2.6.5: fallback 距离档位 600/500/400 → 800/600/450（用户拍板，拉开前后距离）
+// v2.7.1: 出生点nav校验 + 放宽主路径（用户拍板 1+2 合并）——
+//   · 主路径 TANK_SPAWN_MIN_DIST 800→700 + SAMPLES 20→40（室内段800+LOS 0%成功→100% fallback）
+//   · 全链路 IsNavReachable：主路径/fallback/重定位LOS后加 nav可达性，过滤Z=-2879虚空非nav点被导演秒删
 #pragma semicolon 1
 #pragma newdecls required
 
@@ -45,7 +48,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.7.0"
+#define PLUGIN_VERSION "2.7.2"
 
 // 配置常量
 #define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
@@ -55,8 +58,8 @@
 #define MAX_TRACKED_TANKS 4         // 最多跟踪的 Tank 数量
 // v2.4.0: 就近生成 —— 突变 Tank 生成后必须在幸存者活跃模拟范围内，否则引擎
 // 不 tick 其 AI（待命站桩），且远离流程会被导演判定掉队自动清除（"被系统处死"）。
-#define TANK_SPAWN_MIN_DIST 800.0   // v2.6.3: 750→800（用户："至少保持800u距离"）
-#define TANK_SPAWN_SAMPLES  20      // 采样次数（v2.6.3: 12→20，严格 ≥MIN 后提高命中率）
+#define TANK_SPAWN_MIN_DIST 700.0   // v2.7.1: 800→700 放宽100u（配合nav校验，主路径失败率过高 100%走fallback，室内段无800+LOS点）
+#define TANK_SPAWN_SAMPLES  40      // v2.7.1: 20→40（采样翻倍，降低"无候选"概率）
 // v2.6.3: 三角形刷新（用户定稿）——两只与玩家构成三角形，夹角 60°-120°
 #define TANK_SPAWN_ANGLE_MIN 60.0   // 夹角下限（60° 保证两只间距 ≥800u 不互卡）
 #define TANK_SPAWN_ANGLE_MAX 120.0  // 夹角上限（防侧翼包夹）
@@ -359,6 +362,9 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
             // v2.7.0: hull/nav/可达性验证
             if (!ValidateTankSpawnPoint(candidate))
                 continue;
+            // v2.7.1: nav 可达性（防非nav/悬空点被导演秒删 Z=-2879案例）
+            if (!IsNavReachable(candidate, refPos))
+                continue;
 
             if (bestDist < 0.0 || dist < bestDist) {
                 bestDist = dist;
@@ -545,17 +551,18 @@ void RelocateStuckTank(int tank) {
             float ground[3];
             TR_GetEndPosition(ground);
             // v2.7.0: hull/nav 验证
-            if (ValidateTankSpawnPoint(ground)) {
+            // v2.7.1: + nav 可达性（buddy点周围200u内应在同一nav网）
+            if (ValidateTankSpawnPoint(ground) && IsNavReachable(ground, bPos)) {
                 float ang2[3] = {0.0, 0.0, 0.0};
                 TeleportEntity(tank, ground, ang2, NULL_VECTOR);
                 LogMessage("[Tank Mutator] Stuck tank %d relocated next to buddy %d at (%.1f, %.1f, %.1f)",
                            tank, buddy, ground[0], ground[1], ground[2]);
             } else {
-                // ground 点验证失败 → 尝试伙伴位置
+                // ground 点验证/nav失败 → 尝试伙伴位置（bPos本身是活Tank脚底，nav必通）
                 if (ValidateTankSpawnPoint(bPos)) {
                     float ang2[3] = {0.0, 0.0, 0.0};
                     TeleportEntity(tank, bPos, ang2, NULL_VECTOR);
-                    LogMessage("[Tank Mutator] Stuck tank %d relocated to buddy %d spot (ground failed validation)",
+                    LogMessage("[Tank Mutator] Stuck tank %d relocated to buddy %d spot (ground failed validation/nav)",
                                tank, buddy);
                 } else {
                     LogMessage("[Tank Mutator] Stuck tank %d buddy relocate failed: both ground and buddy pos invalid", tank);
@@ -605,7 +612,8 @@ void RelocateStuckTank(int tank) {
             continue;   // 被墙/天花板挡
 
         // v2.7.0: hull/nav 验证
-        if (!ValidateTankSpawnPoint(candidate))
+        // v2.7.1: + nav 可达性（防非nav点被导演秒删）
+        if (!ValidateTankSpawnPoint(candidate) || !IsNavReachable(candidate, refPos))
             continue;
 
         if (bestDist < 0.0 || dist < bestDist) {
@@ -634,13 +642,14 @@ void RelocateStuckTank(int tank) {
             float ground[3];
             TR_GetEndPosition(ground);
             // v2.7.0: hull/nav 验证
-            if (ValidateTankSpawnPoint(ground)) {
+            // v2.7.1: + nav 可达性
+            if (ValidateTankSpawnPoint(ground) && IsNavReachable(ground, origin)) {
                 float ang2[3] = {0.0, 0.0, 0.0};
                 TeleportEntity(tank, ground, ang2, NULL_VECTOR);
                 LogMessage("[Tank Mutator] Stuck tank %d relocated (random 700u) to (%.1f, %.1f, %.1f)",
                            tank, ground[0], ground[1], ground[2]);
             } else {
-                LogMessage("[Tank Mutator] Stuck tank %d relocate ground failed validation", tank);
+                LogMessage("[Tank Mutator] Stuck tank %d relocate ground failed validation/nav", tank);
             }
         } else {
             LogMessage("[Tank Mutator] Stuck tank %d relocate failed: no LOS candidate AND no fallback ground", tank);
@@ -663,13 +672,23 @@ public bool TraceFilter_World(int entity, int contentsMask, any data) {
 
 // ============================================================================
 // v2.7.0: Tank spawn validator — hull clearance + 地面 + 碰撞
+// v2.7.1: 新增 nav 可达性校验（IsNavReachable）—— hull 通过但不在nav上
+//         的点会被导演判 stuck/掉队秒删（Z=-2879虚空点实证）
 // ============================================================================
 // Tank hull: 宽 ~48u, 高 ~72u (蹲姿出生)。验证：
 //   1. 向上 trace 检查头顶空间 ≥ 72u
 //   2. 向下 trace 确认有地面
 //   3. 水平 4 方向 trace 检查无实体阻挡（门/车/墙壁）
+//   4. (v2.7.1) nav 可达性在调用方额外检查 IsNavReachable
 #define TANK_HULL_HEIGHT 72.0    // Tank 蹲姿高度（出生时）
 #define TANK_HULL_WIDTH  48.0    // Tank 半宽
+
+bool IsNavReachable(float from[3], float to[3]) {
+    // L4D2_NavAreaTravelDistance <0 = 至少一端不在nav或不连通
+    // 用作"点是否在有效nav且可寻路到幸存者"的代理
+    float d = L4D2_NavAreaTravelDistance(from, to, false);
+    return d >= 0.0;
+}
 
 bool ValidateTankSpawnPoint(float pos[3]) {
     // 1) 头顶空间检查：从 pos 向上 trace，确认有 ≥72u 净空
@@ -766,21 +785,30 @@ bool SpawnTankFallback(int n, float spawnPos[3]) {
     float dir = (n % 2 == 0) ? 1.0 : -1.0;   // 第一只前方、第二只后方
     float tiers[3] = { TANK_FALLBACK_DIST_1, TANK_FALLBACK_DIST_2, TANK_FALLBACK_DIST_3 };
 
-    for (int i = 0; i < 3; i++) {
-        float dist = tiers[i] * dir;
-        float start[3];
-        start[0] = center[0] + fwd[0] * dist;
-        start[1] = center[1] + fwd[1] * dist;
-        start[2] = center[2] + 80.0;   // 抬高向下 trace 找地面
+    // v2.7.2: 两段式 fallback 保证必刷 — 第一段 hull+nav 精选，第二段 hull 兜底（室内 nav 稀疏时仍必刷）
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < 3; i++) {
+            float dist = tiers[i] * dir;
+            float start[3];
+            start[0] = center[0] + fwd[0] * dist;
+            start[1] = center[1] + fwd[1] * dist;
+            start[2] = center[2] + 80.0;   // 抬高向下 trace 找地面
 
-        float end[3];
-        end[0] = start[0]; end[1] = start[1]; end[2] = start[2] - 3000.0;
-        TR_TraceRayFilter(start, end, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
-        if (TR_GetFraction() > 0.0 && TR_GetFraction() < 1.0) {
-            TR_GetEndPosition(spawnPos);
-            // v2.7.0: fallback 也要过 hull/nav 验证
-            if (ValidateTankSpawnPoint(spawnPos))
-                return true;
+            float end[3];
+            end[0] = start[0]; end[1] = start[1]; end[2] = start[2] - 3000.0;
+            TR_TraceRayFilter(start, end, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
+            if (TR_GetFraction() > 0.0 && TR_GetFraction() < 1.0) {
+                TR_GetEndPosition(spawnPos);
+                if (pass == 0) {
+                    // 第一段：hull+nav 精选（防悬空/非nav被导演秒删）
+                    if (ValidateTankSpawnPoint(spawnPos) && IsNavReachable(spawnPos, center))
+                        return true;
+                } else {
+                    // 第二段：仅 hull 兜底（nav 稀疏室内必刷）
+                    if (ValidateTankSpawnPoint(spawnPos))
+                        return true;
+                }
+            }
         }
     }
     return false;

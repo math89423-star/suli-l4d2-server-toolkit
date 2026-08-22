@@ -271,6 +271,8 @@ int
 	// v6.0.0 调研落地: 阻塞槽位欠账（失败不扣波次预算）——本波被 Hard Gate 拦下的槽位数,
 	// 首发完成后 1s 内 catch-up 重采样补上（不消耗 reserve、不计入击杀阈值）
 	g_iBatchDebt,
+	// v6.1.4 分散刷：本波已刷点位（防挤一处，透视可见聚堆）
+	g_iBatchSpawnPosCount,
 	// v2.0.0 收尾期清剿阈值: 场上存活 ≤ 该值进入冷静期（= max(2, 本波刷新量×40%)）
 	g_iClearThreshold,
 	// v2.5.0 剿灭得分: 波次开始时生还队人数快照（含 bot）+ 波内倒地/死亡去重人数
@@ -294,7 +296,8 @@ int
 
 float
 	g_fSISpawnTime[MAXPLAYERS + 1],	// client → 生成时间
-	g_fSILastNavDist[MAXPLAYERS + 1];	// v6.0.0 看门狗: 上次到目标的 NavTravelDistance(-1=未测量)
+	g_fSILastNavDist[MAXPLAYERS + 1],	// v6.0.0 看门狗: 上次到目标的 NavTravelDistance(-1=未测量)
+	g_fBatchSpawnPos[48][3];	// v6.1.4 分散刷：本波已刷点位
 
 bool
 	g_bLateLoad,
@@ -1323,13 +1326,14 @@ public void OnClientDisconnect(int client) {
 // 不会重发，刷怪定时器链会断（特感停刷到换图）。引擎状态不受插件重载影响，
 // 用 L4D_HasAnySurvivorLeftSafeArea 检测 → 已离开安全区则重建链。
 public void OnMapStart() {
-	// v6.1.1: 覆盖 z_spawn_safety_range = 350 (InfectedBots 默认值，SI 刷点更贴近目标)
+	// v6.1.1: 覆盖 z_spawn_safety_range = 350 (InfectedBots 默认值)
+	// v6.1.2 中度优化: 350→500 (+150) 配合 ss_spawnrange_min/guard_min 上调，给 2.5s 反应
 	// 保存原值，OnMapEnd/OnPluginEnd 恢复，避免永久污染全局 cvar。
 	{
 		ConVar cvSafety = FindConVar("z_spawn_safety_range");
 		if (cvSafety != null) {
 			g_fOrigSafetyRange = cvSafety.FloatValue;
-			cvSafety.SetFloat(350.0);
+			cvSafety.SetFloat(500.0);
 		}
 	}
 
@@ -1997,6 +2001,7 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	g_fBatchGuardInvisDistSum = 0.0;
 	// v6.0.0 调研落地: 阻塞槽位欠账重置（失败不消耗波次预算）
 	g_iBatchDebt = 0;
+	g_iBatchSpawnPosCount = 0;	// v6.1.4 分散刷：已刷点位清零
 	g_bBatchCatchup = false;
 	if (g_hCatchupTimer != null) {
 		KillTimer(g_hCatchupTimer);
@@ -2008,10 +2013,10 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	// v6.0.2: 波次泄气计时清零
 	g_fWaveNoSITime = 0.0;
 
-	// v5.33: 70/30 Wave Budget — 首发 70%，补位 30%
+	// v5.33: 70/30 Wave Budget — 首发 70%，补位 30%（v6.1.3: 用户拍板取消补位，一次全刷，人数*2.5）
 	g_iWaveBudget = spawnSize;
-	g_iWaveInitial = RoundToCeil(float(spawnSize) * 0.7);
-	g_iWaveReserve = spawnSize - g_iWaveInitial;
+	g_iWaveInitial = spawnSize; // 100% 首发，无保留
+	g_iWaveReserve = 0;
 	g_iWaveKills = 0;
 	g_iWaveReserveSpawned = 0;
 	g_iWaveSICount = 0;   // v5.33: 波次内 SI 序号重置
@@ -2022,7 +2027,7 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	}
 	if (g_iWaveInitial < 1) g_iWaveInitial = 1;
 
-	// 首发只刷 70%（queue 里后 30% 保留给补位）
+	// 一次全刷（无 reserve 补位）
 	g_iBatchTotal = g_iWaveInitial;
 	g_iBatchNext = 0;
 	g_iBatchSegA = segA;
@@ -2128,10 +2133,11 @@ bool SISpawn_InHurtTrigger(const float pos[3]) {
 // 候选点主入口（v6.1.2）: 信任引擎取点 + LOS/距离轻过滤。
 // 参照锚 = 本只 SI 分配到的 intendedTarget（压力均衡由 SISpawn_PickTarget 保底）。
 // 调 L4D_GetRandomPZSpawnPosition(target, class, attempts) 拿引擎给的点，
-// 保留快速重试保护（trigger_hurt 陷阱 / NavPath 不通），新增距离硬门(≥250) +
+// 保留快速重试保护（trigger_hurt 陷阱 / NavPath 不通），新增距离硬门 +
 // 可见性优先（可见立即采用，不可见追踪最近兜底，防饿死）。
+// v6.1.3: 补位(30% reserve)用 250 硬门保证必补，首发用 400 保证反应时间
 // 返回 false = 无合法点（欠账 catch-up，失败不耗波次预算）。
-bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float outPos[3]) {
+bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float outPos[3], bool isReplacement=false) {
 
 	if (intendedTarget <= 0 || intendedTarget > MaxClients
 		|| !IsClientInGame(intendedTarget) || GetClientTeam(intendedTarget) != 2
@@ -2170,10 +2176,19 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 			&& !L4D2_NavAreaBuildPath(nav, targetNav, g_fNavPathMax, L4D_TEAM_INFECTED, false))
 			continue;
 
-		// 距离硬门：离最近生还者必须 >= guard_min(250)，防贴脸不变式
+		// 距离硬门：离最近生还者必须 >= guard_min，防贴脸不变式
+		// v6.1.3: 补位用250保证必补，首发用400保证2.5s反应
 		float dist = DistanceToNearestSurvivor(p);
-		if (dist < g_cSpawnRangeGuardMin.FloatValue)
+		float minDist = isReplacement ? 250.0 : g_cSpawnRangeGuardMin.FloatValue;
+		if (dist < minDist)
 			continue;
+
+		// v6.1.4 分散刷：与本波已刷点位保持 400u 以上（防挤一处，透视聚堆）
+		bool tooClose = false;
+		for (int k = 0; k < g_iBatchSpawnPosCount; k++) {
+			if (GetVectorDistance(p, g_fBatchSpawnPos[k]) < 400.0) { tooClose = true; break; }
+		}
+		if (tooClose) continue;
 
 		// 可见优先：候选点至少能看见一个生还者 → 立即采用
 		if (IsPosVisibleToAnySurvivor(p)) {
@@ -2310,7 +2325,7 @@ int SISpawn_PlaceOne(int zombieClass0, int dir, int refMin, int refMax, bool isR
 	if (g_iTargetCounts[target] < 9999)	// 防溢出
 		g_iTargetCounts[target]++;
 	float vPos[3];
-	if (!SISpawn_FindPosition(index, dir, target, vPos))
+	if (!SISpawn_FindPosition(index, dir, target, vPos, isReplacement))
 		return 0;
 
 	vPos[2] += 5.0;
@@ -2329,6 +2344,13 @@ int SISpawn_PlaceOne(int zombieClass0, int dir, int refMin, int refMax, bool isR
 	g_bSIRecovered[zombie] = false;
 	g_bSIRelocated[zombie] = false;
 	g_fSILastNavDist[zombie] = -1.0;
+	// v6.1.4 分散刷：记录本波已刷点位
+	if (g_iBatchSpawnPosCount < 48) {
+		g_fBatchSpawnPos[g_iBatchSpawnPosCount][0] = vPos[0];
+		g_fBatchSpawnPos[g_iBatchSpawnPosCount][1] = vPos[1];
+		g_fBatchSpawnPos[g_iBatchSpawnPosCount][2] = vPos[2];
+		g_iBatchSpawnPosCount++;
+	}
 
 	SISpawn_ApplyTargetInject(zombie, target);
 
