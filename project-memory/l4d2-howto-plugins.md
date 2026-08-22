@@ -147,6 +147,7 @@ python3 /home/administrator/suli-l4d2-server-toolkit/bin/rcons.py 'sm_cvar cvar�
 ```
 
 ## 关联
+- [[l4d2-rcon-hotreload-workflow]] — 完整热加载方案（含已知问题清单）
 - [[l4d2-deployment-rules]] — 踩坑清单
 - [[l4d2-permissions-pitfall]] — 权限 700 坑
 - [[l4d2-32bit-architecture-pitfall]] — 32 位架构坑

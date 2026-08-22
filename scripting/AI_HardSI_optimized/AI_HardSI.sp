@@ -191,7 +191,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "5.26.0",
+    version = "5.27.1",
     url = "github.com/breezyplease"
 };
 

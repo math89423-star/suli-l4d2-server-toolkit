@@ -115,3 +115,27 @@ EquipPlayerWeapon + ApplyReserveAmmo（备弹 100 同步）。
 直接抱手上（`IsCarryingProp` 检测活动武器）；**已抱着物品时购买 → 才掉落地面**
 （一次只能抱一个）；其余商品 GivePlayerItem 直发（武器同步备弹），GivePlayerItem
 失败才地面兜底防丢。
+
+## v1.12.0 近战盲盒 → 固定武士刀（2026-08-20 用户拍板）
+
+- **背景**：用户报告近战盲盒"还能抽到特感手臂"。排查：部署二进制(v1.11.11)反编译确认
+  奖池只有 9 把普通近战 + 电锯，**不含** `weapon_*_claw`（特感爪武器来自 `cc_tankgod.vpk`
+  等 addon，为独立 classname，不在盲盒奖池）。
+- **拍板**：不再纠结奖池——**统一改成武士刀，不再叫盲盒**。近战盲盒名称→`武士刀`
+  （classname 仍 `melee_box`，价格沿用 2500）：ShopBuy 分支固定发放 katana
+  （`weapon_melee` + `melee_script_name=katana` + DispatchSpawn + EquipPlayerWeapon），
+  删随机 roll / 电锯 / `g_MeleePool`（`MELEE_POOL_COUNT`）/ 12 把近战 precache
+  → 只 precache `w_katana.mdl` + `v_katana.mdl`。发放失败退款保安全。
+- **连带**：电锯不再从商店可得（原并入盲盒，v1.11.3 起无独立售卖）；ammo价表仍认
+  `weapon_chainsaw`（地图/掉落持有者补弹判定，保留）。
+- 已编译 v1.12.0 部署 + RCON reload，运行中；备份 `compiled/l4d2_shop_v1.11.11_backup.smx`。
+
+## v1.12.1 电锯单独重上（2026-08-20 用户拍板，价格改 2850）
+
+- **背景**：v1.12.0 固定武士刀后电锯从商店消失；用户先后要求"单独加电锯"，最终定价 **2850**。
+- **改动**：SHOP_SLOTS 24→25；表尾追加 `{ "电锯", "weapon_chainsaw", 2850, 0, 0 }`
+  （不动 WALLHACK_SLOT 8）；ShopBuy 新增 `weapon_chainsaw` 专用分支
+  CreateEntityByName + DispatchSpawn + EquipPlayerWeapon 直接入手（v1.11.5 同路径，
+  燃料自带无需备弹同步），失败退款。电锯 precache 沿用既有 w/v_chainsaw（v1.7.44 注）。
+- 已编译 v1.12.1 部署 + RCON reload，运行中。
+

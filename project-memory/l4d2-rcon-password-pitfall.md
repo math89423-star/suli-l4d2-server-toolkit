@@ -45,3 +45,4 @@ command: >
 ## 关联
 - [[l4d2-cfg-mount-pitfall]] — valve.rc 缺失导致 server.cfg 不执行，RCON 密码不生效
 - [[l4d2-deployment-rules]] — 部署 checklist
+- [[l4d2-rcon-hotreload-workflow]] — 完整热加载方案

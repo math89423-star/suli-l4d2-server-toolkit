@@ -400,16 +400,17 @@ stock int BT_CreateSpitterTree() {
     int openS0_Approach = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateIsNotInRange(800.0),
+        BT_CreateIsNotInRange(900.0),
         BT_CreateAction(ACT_FlankApproach)
     );
     // v5.6: +SpitReady 冷却门 + LOS/距离口径统一
+    // v5.27: 800->900 对齐defaultSpit(900)与z_spit_range实测900，消除800-900假Approach
     int openS0_Spit = BT_CreateSequence(7,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateSpitReady(),
         BT_CreateAction(ACT_AcquireClosestTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(800.0),
+        BT_CreateIsTargetInRange(900.0),
         BT_CreateAction(SpitterAct_Spit)
     );
     // Strat 1: Direct spit — standard behavior (falls through to defaultSpit)
@@ -433,12 +434,13 @@ stock int BT_CreateSpitterTree() {
     // v5.6 FIX: 据守改 300-600u 距离带 —— v5.4.2 的 StrafeApproach（横移+前进）
     // 从 600u 进入后一路直线走进生还者脸上（无下界、无后退，观感"吐完送脸"）。
     // 300-600u：StrafeRandom 横移守位；<300u：Retreat 后撤拉开。
+    // v5.27: StrafeRandom(纯横移) -> StrafeApproach(横移+前进)，避免纯横移贴墙Stuck跳
     int postSpitHold = BT_CreateSequence(5,
         BT_CreatePostSpitMode(2),
         BT_CreateIsInRange(600.0),
         BT_CreateInverter(BT_CreateIsInRange(300.0)),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateAction(ACT_StrafeRandom)
+        BT_CreateAction(ACT_StrafeApproach)
     );
     int postSpitHoldClose = BT_CreateSequence(3,
         BT_CreatePostSpitMode(2),

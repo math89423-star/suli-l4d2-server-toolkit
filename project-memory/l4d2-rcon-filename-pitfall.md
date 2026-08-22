@@ -48,3 +48,4 @@ Python 的模块搜索顺序：**脚本所在目录优先于 site-packages**。
 
 ## 关联
 - [[l4d2-howto-plugins]] — RCON 客户端路径已更新为 rcons.py
+- [[l4d2-rcon-hotreload-workflow]] — 完整热加载方案

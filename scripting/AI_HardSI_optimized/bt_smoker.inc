@@ -221,8 +221,29 @@ BT_Status SmokerAct_SteerPinToAcid(int client) {
                 return BT_RUNNING;
             }
         }
+        // v5.27: >=850不再纯SUCCESS静止(观感傻站)，横向微移保持活性，
+        // 舌头由引擎托管拉，不后退防断舌
+        float now2 = GetGameTime();
+        float nextSwitch = BB_GetFloat(client, "_smoker_pin_strafe_next", 0.0);
+        if (nextSwitch <= 0.0 || now2 >= nextSwitch) {
+            BB_SetBool(client, "_smoker_pin_strafe_left", GetRandomInt(0,1)==0);
+            BB_SetFloat(client, "_smoker_pin_strafe_next", now2 + GetRandomFloat(0.4, 0.9));
+        }
+        if (BB_GetBool(client, "_smoker_pin_strafe_left", false)) {
+            BT_AddButton(client, IN_MOVELEFT);
+            BT_RemoveButton(client, IN_MOVERIGHT);
+        } else {
+            BT_AddButton(client, IN_MOVERIGHT);
+            BT_RemoveButton(client, IN_MOVELEFT);
+        }
+        float vPos2[3], dir2[3], ang2[3];
+        GetClientAbsOrigin(victim, vPos2);
+        MakeVectorFromPoints(myPos, vPos2, dir2);
+        GetVectorAngles(dir2, ang2);
+        BT_SetAimAngles(client, ang2[0], ang2[1], ang2[2]);
+        return BT_RUNNING;
     }
-    return BT_SUCCESS;  // 无酸液/距离危险：引擎托管拉
+    return BT_SUCCESS;  // 无victim/无酸液：引擎托管拉(极短帧)
 }
 
 // ============================================================================
@@ -396,6 +417,13 @@ BT_Status SmokerAct_AcquireBoomedTarget(int client) {
     return BT_FAILURE;
 }
 
+// v5.27: Backoff期走位 —— 射程内有LOS但舌头在Backoff时拉人簇FAIL，
+// approachAct(需!InRange)与closeRangeStrafe(需!LOS)均FAIL -> 零移动一帧。
+// 此分支接管InRange+Backoff场景横移找角度，不让树漏到零移动retarget。
+BT_Status SmokerCond_BackoffActive(int client) {
+    return SI_AbilityBackoffActive(client, "_smoker") ? BT_SUCCESS : BT_FAILURE;
+}
+
 // ============================================================================
 // Tree builder
 // ============================================================================
@@ -551,6 +579,17 @@ stock int BT_CreateSmokerTree() {
         BT_CreateAction(ACT_StrafeApproach)
     );
 
+    // v5.27: Backoff期横移 —— 射程内有LOS但舌头在Backoff(0.5s)时拉人簇FAIL，
+    // approachAct(需!InRange)与closeRangeStrafe(需!LOS)均FAIL -> 零移动。
+    // 此分支InRange+有LOS+Backoff时横移找角度，避免落到零移动retarget。
+    int backoffStrafe = BT_CreateSequence(5,
+        BT_CreateIsInRange(850.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateCondition(SmokerCond_BackoffActive),
+        BT_CreateAction(ACT_AcquirePinnableTarget),
+        BT_CreateAction(ACT_StrafeApproach)
+    );
+
     // ==========================================
     // v4.0.3: 拉人冷却簇 —— 舌头与近战共享 IN_ATTACK。
     // 引擎舌头冷却 (smoker_tongue_delay=1.0) 期间按 ATTACK = 近战挠击，
@@ -610,6 +649,7 @@ stock int BT_CreateSmokerTree() {
     BT_AddChild(root, openS0_Approach);       // 4c. open strat0 → flank approach
     BT_AddChild(root, openS1_Approach);       // 5b. open strat1 → erratic approach
     BT_AddChild(root, closeRangeStrafe);      // 6. v3.6: close + noLOS → strafe, don't approach
+    BT_AddChild(root, backoffStrafe);         // 6b. v5.27: InRange+有LOS+Backoff → 横移找角度(防零移动)
     BT_AddChild(root, ledgeRetargetGated);    // 7. v4.0.3: ledge 附近 → 90% 拉最远（门控）
     BT_AddChild(root, retargetCooldown);      // 8. standard retarget（孤立度选人）
     BT_AddChild(root, approachAct);           // 9. approach (only when far)

@@ -842,9 +842,11 @@ stock int BT_CreateHunterTree() {
     // 上大量时间在爬不在扑）。现在只在"最近生还者 1000-1600u"才爬高：
     //   ≤1000u：直接扑（closePounce/fastPounce 分支处理，不再爬高）
     //   >1600u：爬了够不着，交给 sprintApproach 快跑接近
-    int highPounceSeq = BT_CreateSequence(6,
+    // v5.27: 移除 CND_IsDucking 前置条件 —— Hunter 远距离接近时通常未蹲伏，
+    //         该条件使 highPounce 分支几乎永不触发（死代码）。ClimbHighGround
+    //         内部已处理蹲伏/跳跃逻辑，无需前置门控。
+    int highPounceSeq = BT_CreateSequence(5,
         BT_CreateCondition(CND_OnGround),
-        BT_CreateCondition(CND_IsDucking),
         BT_CreateCondition(HunterCond_HasHighGround),
         BT_CreateIsNotInRange(fPounceRange),        // 扑击范围内不爬高，直接扑
         BT_CreateIsInRange(fPounceRange + 600.0),   // 1600u 外爬了没用

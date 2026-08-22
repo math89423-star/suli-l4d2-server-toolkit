@@ -284,7 +284,6 @@ BT_Status ChargerAct_TryCharge(int client) {
         //   目标贴墙（150u 内有几何）→ 45% 墙冲（撞墙顺带震墙边）
         //   普通情况 → 30%（v5.31 原设定兜底）
         float wallProb = 0.30;
-        bool blockedPath = false;
         int target = BB_GetInt(client, "target", -1);
         if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
             float myPos[3], tPos[3];
@@ -592,7 +591,8 @@ BT_Status ChargerAct_StepBackCharge(int client) {
     // v3.8 FIX: Re-check LOS before charging. During the 0.4s back-up,
     // the survivor may have moved behind cover. If LOS is lost, abort
     // and let the selector try another branch (approach/blind charge).
-    if (GetEntProp(client, Prop_Send, "m_hasVisibleThreats") <= 0) {
+    // v5.27: m_hasVisibleThreats -> HasTargetLOS (engine标志在BT接管视角后失真)
+    if (CND_HasTargetLOS(client) != BT_SUCCESS) {
         BB_SetFloat(client, "_charger_backup_until", 0.0);
         return BT_FAILURE;
     }

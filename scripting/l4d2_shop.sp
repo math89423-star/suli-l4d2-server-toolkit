@@ -342,7 +342,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.11.6"
+#define PLUGIN_VERSION "1.12.1"   // v1.12.0: 近战盲盒 → 固定武士刀；v1.12.1: 电锯单独重上 2850（用户拍板）
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -509,9 +509,7 @@ ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2�
 #define ART3_BREAK_PARTICLE  "boomer_explosion"
 #define ART3_CHASE_DURATION  8.0      // 吸引实体存活秒数（控场时长）
 
-#define SHOP_SLOTS      24      // v1.4.6: +3（胆汁/土质炸弹/燃烧瓶 投掷类）；v1.7.1: 24→23（v1.7.0 删复活币后仅 23 行，末槽零初始化=菜单 0 分幽灵商品）；v1.7.3: 23→24（弹药补充）；v1.8.0: 24→25（火力支援IV-AGM导弹）——⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
-
-#define MELEE_POOL_COUNT   12
+#define SHOP_SLOTS      25      // v1.12.1: 电锯单独重上（表尾追加一行）→ 24→25。⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
 
 #define WALLHACK_SLOT       8      // g_ShopTable 槽位（= 透视特感）；v1.11.3: 9→8（电锯行删除使透视前移 1）
 #define WALLHACK_DURATION   180.0   // v1.8.2: 3 分钟（2026-08-03 用户改回，原 v1.8.1 定稿 300=5 分钟）
@@ -595,7 +593,7 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // v1.7.0: "复活币 8500" 商品已删除（复活体系改为积分复活，见 si_hud v1.12.0）
     // v1.7.1: 删除后透视特感滑到槽 11，WALLHACK_SLOT 已同步改 11
     { "透视特感",    "wallhack",                         5000,  0,  3 },   // v1.8.6: 涨价 4000→5000
-    { "近战盲盒",    "melee_box",                        2500,  0,  0 },   // v1.11.3: 电锯并入后涨价 1000→2500（用户拍板）
+    { "武士刀",      "melee_box",                        2500,  0,  0 },   // v1.12.0: 近战盲盒→固定武士刀（用户拍板：统一改成武士刀、不再抽奖/不再叫盲盒）；价格沿用 2500
     { "烟花",        "weapon_fireworkcrate",             1200,  0,  1 },   // v1.7.96: 用户定稿 1200（原 2500）
     // v1.4.3: 按价格重排编号（用户拍板）——胆汁雨 3500 最低 = I、轰炸 5500 = II、
     // 燃烧 6500 = III（原 III-胆汁雨/I-轰炸/II-燃烧）；v1.4.5 定名：绿色雨幕/地狱烈火/地毯轰炸
@@ -635,20 +633,12 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // 轻盒 3000：SMG×3/单喷×2/scout/猎枪 + M60 彩蛋 5%；重盒 5500：连喷×2/AR×4/连狙/awp + M60/榴弹彩蛋各 5%
     , { "轻武器盲盒",  "weapon_box_light",                 3000,  0,  0 }
     , { "重武器盲盒",  "weapon_box_heavy",                 5500,  0,  0 }
+    // v1.12.1: 电锯单独重上（用户拍板 2850 分；原 v1.11.3 并入近战盲盒，现盲盒已改固定武士刀）——
+    // 表尾追加不动 WALLHACK_SLOT 8；直接入手走专用分支（v1.11.5 同路径）
+    , { "电锯",        "weapon_chainsaw",                  2850,  0,  0 }
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
-
-// v1.7.72: 近战盲盒奖池（12 把，不含电锯）——2D 字符数组初始化规则
-// （spcomp64 实测）：尺寸全显式 + 行数必须与初始化行数一致（[12][16] 配
-// 2 行 → error 047；const + 省略首维 → parse error）
-// v1.7.76 FIX: 抽取下标用显式常量 MELEE_POOL_COUNT——sizeof(x)/sizeof(x[])
-// 在全局数组上实测算出 0（GetRandomInt(0,0) 永远棒球棍）
-char g_MeleePool[MELEE_POOL_COUNT][16] = {
-    "baseball_bat", "cricket_bat", "crowbar", "electric_guitar",
-    "fireaxe", "frying_pan", "golfclub", "katana",
-    "knife", "machete", "tonfa", "shovel"
-};
 
 // ============================================================================
 // 全局状态
@@ -1115,20 +1105,10 @@ public void OnMapStart()
     PrecacheModel("models/v_models/v_chainsaw.mdl");
     // v1.7.46b: 激光升级包附件模型（三方图可能缺 precache → 升级包隐形/不 spawn）
     PrecacheModel("models/w_models/weapons/w_laser_sights.mdl");
-    // v1.7.72: 近战盲盒——12 把近战世界模型 precache（与 M60/榴弹同坑：
-    // 非战役图不 precache → 生成的近战隐形）
-    PrecacheModel("models/weapons/melee/w_bat.mdl");
-    PrecacheModel("models/weapons/melee/w_cricket_bat.mdl");
-    PrecacheModel("models/weapons/melee/w_crowbar.mdl");
-    PrecacheModel("models/weapons/melee/w_guitar.mdl");
-    PrecacheModel("models/weapons/melee/w_fireaxe.mdl");
-    PrecacheModel("models/weapons/melee/w_frying_pan.mdl");
-    PrecacheModel("models/weapons/melee/w_golfclub.mdl");
+    // v1.12.0: 武士刀（原近战盲盒）——固定发放 katana，w/v 模型 precache
+    // （与 M60/榴弹同坑：非战役图不 precache → 生成的近战隐形）
     PrecacheModel("models/weapons/melee/w_katana.mdl");
-    PrecacheModel("models/weapons/melee/w_knife.mdl");
-    PrecacheModel("models/weapons/melee/w_machete.mdl");
-    PrecacheModel("models/weapons/melee/w_tonfa.mdl");
-    PrecacheModel("models/weapons/melee/w_shovel.mdl");
+    PrecacheModel("models/weapons/melee/v_katana.mdl");
     // v1.7.72: 烟花（道具类）——非战役图缺 precache 会隐形（M60/榴弹同坑）
     PrecacheModel("models/w_models/weapons/w_firework_crate.mdl");
     // v1.7.80: 火炮支援1——瞄准标记特效（TE 模型必须 precache，否则光柱/圆圈不渲染）
@@ -1415,8 +1395,7 @@ int ShopSpawn(const char[] cls, float pos[3])
     return ent;
 }
 
-// v1.7.72: 近战盲盒——生成指定近战武器（melee_script_name keyvalue 必须
-// 在 DispatchSpawn 前；trace 落地面 + glow 与 ShopSpawn 一致）
+// v1.12.0: （旧 v1.7.72 近战盲盒生成辅助已随固定武士刀废弃；近战发放统一走 ShopBuy 内 melee_box 分支）
 
 // ============================================================================
 // v1.5.1: 复活套装 — 监听 si_hud v1.9.2 的 SH_OnClientRespawned 全局 forward
@@ -1645,48 +1624,28 @@ void ShopBuy(int client, int slot)
         return;
     }
 
-    // v1.7.72: 近战盲盒——随机掉落一把非电锯近战武器
+    // v1.7.72: 近战盲盒——随机掉落近战武器
     if (StrEqual(g_ShopTable[slot].classname, "melee_box"))
     {
-        // v1.11.3: 电锯并入盲盒（用户拍板）——13 等份：12 把近战 + 电锯
-        int roll = GetRandomInt(0, MELEE_POOL_COUNT);
-        bool isChainsaw = (roll == MELEE_POOL_COUNT);
-        char picked[32];
-        if (isChainsaw)
-            strcopy(picked, sizeof(picked), "weapon_chainsaw");
-        else
-            strcopy(picked, sizeof(picked), g_MeleePool[roll]);
-
-        // v1.11.5: 直接入手（不再地面生成）——近战/电锯 EquipPlayerWeapon 即装到手上
-        int ent;
-        if (isChainsaw)
+        // v1.12.0: 用户拍板——统一改成武士刀，不再抽奖、不再叫盲盒。
+        // 固定发放一把 katana；direct-equip 直接入手（v1.11.5 同路径）。
+        char sKatana[16] = "katana";
+        int ent = CreateEntityByName("weapon_melee");
+        if (ent != -1)
         {
-            ent = CreateEntityByName("weapon_chainsaw");
-            if (ent != -1)
-            {
-                DispatchSpawn(ent);
-                EquipPlayerWeapon(client, ent);
-            }
-        }
-        else
-        {
-            ent = CreateEntityByName("weapon_melee");
-            if (ent != -1)
-            {
-                DispatchKeyValue(ent, "melee_script_name", picked);
-                DispatchSpawn(ent);
-                EquipPlayerWeapon(client, ent);
-            }
+            DispatchKeyValue(ent, "melee_script_name", sKatana);
+            DispatchSpawn(ent);
+            EquipPlayerWeapon(client, ent);
         }
         if (ent <= 0)
         {
             SH_AddWallet(client, price);
             g_iShopBought[client][slot]--;
-            PrintToChat(client, "\x04[商店]\x01 近战盲盒生成失败，积分已退回");
+            PrintToChat(client, "\x04[商店]\x01 武士刀发放失败，积分已退回");
             return;
         }
-        PrintToChat(client, "\x04[商店]\x01 已购买 \x05近战盲盒\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：开出 \x05%s\x01",
-            price, SH_GetWallet(client), isChainsaw ? "电锯" : picked);
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05武士刀\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：获得 \x05武士刀\x01",
+            price, SH_GetWallet(client));
         return;
     }
 
@@ -1725,6 +1684,29 @@ void ShopBuy(int client, int slot)
         EquipPlayerWeapon(client, ent);
         ApplyReserveAmmo(client, ent);
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05马格南\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）",
+            price, SH_GetWallet(client));
+        return;
+    }
+
+    // v1.12.1: 电锯——单独售卖（用户拍板 2850 分）直接入手
+    // （v1.11.5 同路径 CreateEntityByName + EquipPlayerWeapon 保证上手，不落地；
+    // 电锯燃料随实体自带，无需备弹同步）
+    if (StrEqual(g_ShopTable[slot].classname, "weapon_chainsaw"))
+    {
+        int ent = CreateEntityByName("weapon_chainsaw");
+        if (ent != -1)
+        {
+            DispatchSpawn(ent);
+            EquipPlayerWeapon(client, ent);
+        }
+        if (ent <= 0)
+        {
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            PrintToChat(client, "\x04[商店]\x01 电锯发放失败，积分已退回");
+            return;
+        }
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05电锯\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01），已直接入手",
             price, SH_GetWallet(client));
         return;
     }

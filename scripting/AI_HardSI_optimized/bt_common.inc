@@ -21,11 +21,11 @@
 // 注意：本函数定义在文件头部 —— 被 ACT_MoveToTarget/ACT_ErraticApproach
 // 等前置 action 调用，SourcePawn 单遍编译需要先定义。
 // ============================================================================
-#define STUCK_CHECK_INTERVAL 0.4   // v5.25: 0.75→0.4 —— 顶墙 0.75s 才反应太慢（撞墙观感明显）
-#define STUCK_MOVE_THRESHOLD 20.0
+#define STUCK_CHECK_INTERVAL 0.6   // v5.27: 0.4→0.6 横移守位(300-600u Strafe)每0.4s贴墙即跳→反复跳观感，0.6降频
+#define STUCK_MOVE_THRESHOLD 15.0 // v5.27: 20→15 横移微位移(5-10u抖动)不误判为卡死，贴墙0u仍判卡
 #define STUCK_DETOUR_TIME_MIN 1.5
 #define STUCK_DETOUR_TIME_MAX 2.5
-#define STUCK_JUMP_ROUNDS 3    // v5.26: 连续 3 轮停滞 → 升级长跳窗口（原"跳一下"单帧）
+#define STUCK_JUMP_ROUNDS 4    // v5.27: 3→4 横移守位连续3轮即长跳过于频繁，4轮再长跳
 #define STUCK_JUMP_TIME 0.4    // v5.26: 停滞即跳的短跳窗口（秒，多帧注入 IN_JUMP）
 #define STUCK_JUMP_TIME_LONG 0.8  // v5.26: 连续 3 轮仍卡 → 长跳窗口（翻更高障碍）
 
@@ -1621,6 +1621,8 @@ BT_Status ACT_HoldChokepoint(int client) {
     }
     // Don't move forward — just face the target and hold position
     // (Tank will punch, Boomer will vomit, etc.)
+    // v5.27: Clear move direction to prevent engine AI drift on non-decision frames
+    BT_ClearMoveDirection(client);
     return BT_SUCCESS;
 }
 
@@ -1650,6 +1652,8 @@ BT_Status ACT_HoldPosition(int client) {
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
     // NO movement buttons — just face target and wait for ability cooldown
+    // v5.27: Clear move direction to prevent engine AI drift on non-decision frames
+    BT_ClearMoveDirection(client);
     return BT_RUNNING;
 }
 

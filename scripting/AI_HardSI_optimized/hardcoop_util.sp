@@ -682,10 +682,16 @@ stock SI_GetCoordinatedTarget(si, preferClass = -1) {
 	//   mode 4 (猎手集群) —— 多 Hunter 必须分散扑不同目标，不 dogpile
 	//   mode 6 (巨兽协同) —— Tank 已锁定一个目标，其他 SI 分散控制更多
 	//                        生还者，减轻 Tank 被集火压力
+	// v5.27: 控制类 SI（Smoker/Hunter/Charger/Jockey）不能 pin 已被 pin 的目标，
+	//         直接返回会导致无效技能尝试。Boomer 仍可对 pin 目标呕吐（覆盖救援者）。
 	//（下方 candidates 逻辑会排除已 pin 者，自然分散。）
 	if (SI_IsAttackWindow() && g_iActiveMode != 4 && g_iActiveMode != 6 && g_iSIPinTarget > 0
 		&& IsSurvivor(g_iSIPinTarget) && IsPlayerAlive(g_iSIPinTarget)) {
-		return g_iSIPinTarget;
+		// Boomer (class 2) benefits from pin target (vomit on rescuer cluster);
+		// control SI (1,3,5,6) skip — they can't re-pin an already-pinned survivor
+		int siClass = GetInfectedClass(si);
+		if (siClass == 2 || !IsPinned(g_iSIPinTarget))
+			return g_iSIPinTarget;
 	}
 
 	new Float:siPos[3];

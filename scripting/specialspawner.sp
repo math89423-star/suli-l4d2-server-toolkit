@@ -184,6 +184,8 @@ float
 	g_fPhaseEnterTime,			// v2.0.0 压力期开始时刻（收尾期 120s 硬上限锚点）
 	g_fWaveStartTime,			// v2.5.1 波次开始时刻（剿灭得分时间倍率起算; retry 波不重置）
 	g_bRandomDirection,
+	// v6.1.2 LOS + 距离过滤恢复: v6.1.0 过度信任引擎(无 LOS/距离检查) → 幽灵处决率高;
+	// 恢复"可见优先 + 不可见最近兜底 + 距离 ≥ guard_min(250) 硬门"轻过滤, 不做 v6.0.0 复杂打分.
 	// v6.1.0 信任引擎方案: 参数缓存
 	g_fNavPathMax,				// NavPath 快速重试保护①: 候选点到目标的最大路径长度
 	g_fOrigSafetyRange,			// v6.1.1: 覆盖前保存的 z_spawn_safety_range 原值(OnMapEnd 恢复用)
@@ -349,7 +351,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "6.1.1",		// v6.1.1 移除击杀/刷新/补位/波次结算聊天刷屏(保留剿灭提示+LogMessage); v6.1.0 信任引擎取点详见6.1.0注释
+	version = "6.1.2",		// v6.1.2 恢复 LOS+距离轻过滤(防处决) + 紧凑队伍方向分散 + cfg 清理旧覆盖; v6.1.1 移除聊天刷屏; v6.1.0 信任引擎取点
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -2123,11 +2125,12 @@ bool SISpawn_InHurtTrigger(const float pos[3]) {
 }
 
 
-// 候选点主入口（v6.1.0 方案1）: 信任引擎取点，不再二次打分/排序。
+// 候选点主入口（v6.1.2）: 信任引擎取点 + LOS/距离轻过滤。
 // 参照锚 = 本只 SI 分配到的 intendedTarget（压力均衡由 SISpawn_PickTarget 保底）。
-// 直接调 L4D_GetRandomPZSpawnPosition(target, class, attempts) 拿引擎给的点；
-// 只保留两条快速重试保护（trigger_hurt 陷阱 / NavPath 不通），其余质量判定全交引擎。
-// 返回 false = 引擎取不到合法点（欠账 catch-up，失败不耗波次预算）。
+// 调 L4D_GetRandomPZSpawnPosition(target, class, attempts) 拿引擎给的点，
+// 保留快速重试保护（trigger_hurt 陷阱 / NavPath 不通），新增距离硬门(≥250) +
+// 可见性优先（可见立即采用，不可见追踪最近兜底，防饿死）。
+// 返回 false = 无合法点（欠账 catch-up，失败不耗波次预算）。
 bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float outPos[3]) {
 
 	if (intendedTarget <= 0 || intendedTarget > MaxClients
@@ -2144,6 +2147,10 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 		attempts = 2;
 
 	float p[3];
+	float bestInvisPos[3];
+	float bestInvisDist = 999999.0;
+	bool hasInvisFallback = false;
+
 	for (int t = 0; t < attempts; t++) {
 		g_iDirection = dir;		// 引擎 GetRandomPZSpawnPosition 读 PreferredSpecialDirection
 		if (!L4D_GetRandomPZSpawnPosition(intendedTarget, zombieClass, 10, p))
@@ -2163,7 +2170,28 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 			&& !L4D2_NavAreaBuildPath(nav, targetNav, g_fNavPathMax, L4D_TEAM_INFECTED, false))
 			continue;
 
-		outPos = p;
+		// 距离硬门：离最近生还者必须 >= guard_min(250)，防贴脸不变式
+		float dist = DistanceToNearestSurvivor(p);
+		if (dist < g_cSpawnRangeGuardMin.FloatValue)
+			continue;
+
+		// 可见优先：候选点至少能看见一个生还者 → 立即采用
+		if (IsPosVisibleToAnySurvivor(p)) {
+			outPos = p;
+			return true;
+		}
+
+		// 不可见候选：追踪距离最近的作为兜底（近 = 走几步就能看见）
+		if (dist < bestInvisDist) {
+			bestInvisDist = dist;
+			bestInvisPos = p;
+			hasInvisFallback = true;
+		}
+	}
+
+	// 全部尝试后无可见点 → 用最近的不可见点兜底（防饿死，目標注入 + 看门狗兜）
+	if (hasInvisFallback) {
+		outPos = bestInvisPos;
 		return true;
 	}
 
@@ -2410,8 +2438,22 @@ void SpawnSliced(int from, int to) {
 			refMin = 0;
 			refMax = g_iBatchSurvivorCount - 1;
 		} else if (!g_bBatchSegs) {
-			// 紧凑队伍/未分段：v1.6.0 原逻辑
-			dir = g_bBatchRetry ? (g_bBatchFind ? SPAWN_IN_FRONT_OF_SURVIVORS : (g_bRandomDirection ? SPAWN_NO_PREFERENCE : SPAWN_LARGE_VOLUME)) : SPAWN_NO_PREFERENCE;
+			// 紧凑队伍/未分段：v6.1.2 每只 SI 轮换方向，强制分散来向（防全聚一面）
+			if (g_bBatchRetry) {
+				dir = g_bBatchFind ? SPAWN_IN_FRONT_OF_SURVIVORS
+					: (g_bRandomDirection ? SPAWN_NO_PREFERENCE : SPAWN_LARGE_VOLUME);
+			} else if (g_bRandomDirection) {
+				// 4 方向轮换：前/后/上/随机，每只不同
+				static const int dirCycle[4] = {
+					SPAWN_NO_PREFERENCE,
+					SPAWN_IN_FRONT_OF_SURVIVORS,
+					SPAWN_BEHIND_SURVIVORS,
+					SPAWN_ABOVE_SURVIVORS
+				};
+				dir = dirCycle[i & 3];
+			} else {
+				dir = SPAWN_LARGE_VOLUME;
+			}
 			refMin = 0;
 			refMax = g_iBatchSurvivorCount - 1;
 		} else {
