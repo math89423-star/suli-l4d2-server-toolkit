@@ -9,6 +9,8 @@
  *     ShopSpawn/SpawnMelee、透视特感（wallhack）、火炮支援 I/II、
  *     g_iShopBought 限购计数、si_hud_shop_enable + si_hud_art_* cvar。
  *
+ * v1.12.4（2026-08-22）：**复活火斧回退修（用户实测）**——`fireaxe` 未 `Precache` 致 `weapon_melee` 随机回退 `claw`，补 `w/v_fireaxe` + 复活前 `Strip Slot1` 清旧 `claw`。
+ *
  * v1.12.3（2026-08-22）：**透视边框改粉色（用户拍板）**——特感透视 `m_glowColorOverride`
  * 蓝 `0,0,255` → 粉 `255,105,180` (HOT PINK)，与幸存者轮廓区分；Witch 同步。
  *
@@ -329,7 +331,7 @@
  * 3500→**4500**、II-地狱烈火 6500→**8500**、III-地毯轰炸 7500→**10000**
  * （时长/范围/机制全不变，只改价格）。
  * v1.4.9（2026-08-03）：分类涨价（用户拍板）——投掷品 ×1.5：胆汁 1275/
- * 土质炸弹 1350/燃烧瓶 3750；补给品 ×1.25：药/肾上腺素 1250、电击器 4375、
+ * 土质炸弹 1350/燃烧瓶 3750；补给品 ×1.25：药/肾上腺素 1250→1450、电击器 4375、
  * 医疗包 3750、燃烧弹包/高爆弹包 625。
  * v1.5.0（2026-08-03）：火力支援III 改名「区域轰炸」（用户拍板，仅显示名，
  * 覆盖商店表/cvar 描述/注释全部文案；classname/kind/价格机制全不变）。
@@ -350,7 +352,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.12.3"   // v1.12.3: 透视改粉色 255,105,180 HOT PINK（用户拍板）
+#define PLUGIN_VERSION "1.12.5"   // v1.12.5: 复活回退小手枪（fireaxe非fireaxe即pistol，不给claw）
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -384,6 +386,11 @@ native void SS_PauseSpawning(float seconds);
 
 // v1.8.24: l4d2_max_common 暂停刷新 native（AGM 爆炸后暂停小僵尸刷新）——可选绑定
 native void MC_PauseCommon(float seconds);
+
+// v1.13.3: 商店信号弹（weaponless直射）——l4d2_flare_gun 提供的信号弹技能
+native int ShopFlare_Give(int client, int charges);
+native int ShopFlare_GetCharges(int client);
+native int ShopFlare_HasActive(int client);
 
 ConVar g_cvSIHudEnable;      // si_hud 总开关（FindConVar 读；null 视为开启）
 
@@ -517,10 +524,11 @@ ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2�
 #define ART3_BREAK_PARTICLE  "boomer_explosion"
 #define ART3_CHASE_DURATION  8.0      // 吸引实体存活秒数（控场时长）
 
-#define SHOP_SLOTS      25      // v1.12.1: 电锯单独重上（表尾追加一行）→ 24→25。⚠ 必须与 g_ShopTable 初始化行数严格一致：少了 spcomp 静默截断末行（末尾商品消失），多了末槽零初始化（菜单 0 分幽灵商品）
+#define SHOP_SLOTS      27      // v1.13.3: 信号弹单发化 + 信号棒下架→ 28→27。⚠ 必须与 g_ShopTable 初始化行数严格一致
 
 #define WALLHACK_SLOT       8      // g_ShopTable 槽位（= 透视特感）；v1.11.3: 9→8（电锯行删除使透视前移 1）
 #define WALLHACK_DURATION   180.0   // v1.8.2: 3 分钟（2026-08-03 用户改回，原 v1.8.1 定稿 300=5 分钟）
+#define FALLIMMUNE_DURATION 30.0    // v1.13.0: 坠落免疫持续 30 秒
 // v1.0.10: 生效期间不可重复购买 → WALLHACK_CAP（900s 续费封顶）已删除
 
 // ============================================================================
@@ -594,7 +602,7 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "煤气罐",      "weapon_oxygentank",                100,  0,  1 },   // v1.7.96: 用户定稿 100
     { "汽油桶",      "weapon_gascan",                    3500,  0,  1 },   // v1.7.96: 用户定稿 3500（原 5000）
     { "止痛药",      "weapon_pain_pills",                1250,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 1000）
-    { "肾上腺素",    "weapon_adrenaline",                1250,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 1000）
+    { "肾上腺素",    "weapon_adrenaline",                1450,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 1000）→1450
     { "电击器",      "weapon_defibrillator",             4375,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3500）
     { "医疗包",      "weapon_first_aid_kit",             3750,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3000）
     { "激光瞄准",    "weapon_upgradepack_laser_sight",   1500,  0,  0 },   // v1.7.96: 用户定稿 1500（原 3500）
@@ -644,6 +652,10 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // v1.12.1: 电锯单独重上（用户拍板 2850 分；原 v1.11.3 并入近战盲盒，现盲盒已改固定武士刀）——
     // 表尾追加不动 WALLHACK_SLOT 8；直接入手走专用分支（v1.11.5 同路径）
     , { "电锯",        "weapon_chainsaw",                  2850,  0,  0 }
+    // v1.13.0: 坠落免疫——60 秒内免疫坠落伤害（用户定稿 2500 分）
+    , { "坠落免疫",    "fall_immunity",                    3000,  0,  3 }   // cat 3 = 其他
+    // v1.13.3: 信号弹——weaponless直射（200分，上限10枚，道具类）
+    , { "信号弹",      "flare",                             200,  0,  1 }   // cat 1 = 道具类
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -659,6 +671,12 @@ Handle    g_hWallhackTimer[MAXPLAYERS + 1];     // 到期计时器
 Handle    g_hWallhackWarnTimer[MAXPLAYERS + 1]; // v1.7.68: 结束前 30 秒提醒计时器
 Handle    g_hWallhackSyncTimer;                 // 补光心跳（0.5s，无购买者自动停）
 ArrayList g_hWitchList;                         // 当前 Witch 实体索引（自家独立维护；si_hud 另有伤害 hook 用的列表）
+
+// v1.13.0: 坠落免疫（!shop 特殊商品）——60 秒内免疫坠落伤害
+bool      g_bFallImmune[MAXPLAYERS + 1];        // 坠落免疫生效中
+float     g_fFallImmuneEnd[MAXPLAYERS + 1];     // 效果结束的 GameTime
+Handle    g_hFallImmuneTimer[MAXPLAYERS + 1];   // 到期计时器
+
 Handle    g_hShopMenu[MAXPLAYERS + 1];          // 当前打开的商店菜单
 int       g_iShopCat[MAXPLAYERS + 1];           // 当前打开的商品分类（购买后重开同分类刷新）
 // v1.8.22: 商店菜单实时刷新——钱包/弹药价格随时变化时自动重绘打开的菜单
@@ -734,6 +752,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
     // v1.8.24: SS_PauseSpawning / MC_PauseCommon 可选——对应插件未加载则跳过 AGM 暂停刷新
     MarkNativeAsOptional("SS_PauseSpawning");
     MarkNativeAsOptional("MC_PauseCommon");
+    MarkNativeAsOptional("ShopFlare_Give");
+    MarkNativeAsOptional("ShopFlare_GetCharges");
+    MarkNativeAsOptional("ShopFlare_HasActive");
     return APLRes_Success;
 }
 
@@ -1117,6 +1138,9 @@ public void OnMapStart()
     // （与 M60/榴弹同坑：非战役图不 precache → 生成的近战隐形）
     PrecacheModel("models/weapons/melee/w_katana.mdl");
     PrecacheModel("models/weapons/melee/v_katana.mdl");
+    // v1.12.4: 复活火斧（fireaxe）同坑补 precache（未 precache→weapon_melee 回退爪）
+    PrecacheModel("models/weapons/melee/w_fireaxe.mdl");
+    PrecacheModel("models/weapons/melee/v_fireaxe.mdl");
     // v1.7.72: 烟花（道具类）——非战役图缺 precache 会隐形（M60/榴弹同坑）
     PrecacheModel("models/w_models/weapons/w_firework_crate.mdl");
     // v1.7.80: 火炮支援1——瞄准标记特效（TE 模型必须 precache，否则光柱/圆圈不渲染）
@@ -1149,12 +1173,15 @@ public void OnClientPutInServer(int client)
 {
     // v1.0.4: 玩家受伤 hook——油桶/烟花爆炸震退距离门控
     SDKHook(client, SDKHook_OnTakeDamage, Can_PlayerStagger);
+    // v1.13.0: 坠落免疫 hook
+    SDKHook(client, SDKHook_OnTakeDamage, FallImmune_OnTakeDamage);
 }
 
 public void OnClientDisconnect(int client)
 {
     ArtEndDesignate(client, true);          // 断线取消火炮瞄准（退款须在 si_hud 存档前，见加载顺序说明）
     WallhackEnd(client, true);             // 断线清理透视（克隆/计时器）
+    FallImmuneEnd(client, true);           // v1.13.0: 断线清理坠落免疫
     g_hShopMenu[client] = null;            // 断线菜单句柄失效
     // v1.8.22: 断线清理商店刷新心跳
     g_iShopView[client] = 0;
@@ -1176,6 +1203,7 @@ public void OnClientDisconnect(int client)
 public void OnPluginEnd()
 {
     WallhackEndAll();                        // 卸载/reload 清理透视
+    FallImmuneEndAll();                      // v1.13.0: 卸载/reload 清理坠落免疫
     Art_CleanupAll();                        // 卸载/reload 清理火炮瞄准状态/残留罐子
 }
 
@@ -1465,14 +1493,33 @@ public void SH_OnClientRespawned(int client)
                 continue;
 
             // 近战:weapon_melee|fireaxe（melee_script_name 键值，与 SpawnMelee 同法）
+            // v1.12.4: 先清旧近战再发火斧（防复活前手持 claw 残留→Equip 失败仍持 claw）
+            // v1.12.5: 回退小手枪（用户拍板：就不该有任何特感东西，fireaxe 非 fireaxe 即给 pistol）
             char parts[2][64];
             if (ExplodeString(items[i], "|", parts, sizeof(parts), sizeof(parts[])) == 2)
             {
+                int oldMelee = GetPlayerWeaponSlot(client, 1);
+                if (oldMelee != -1) { RemovePlayerItem(client, oldMelee); AcceptEntityInput(oldMelee, "Kill"); }
                 int ent = CreateEntityByName("weapon_melee");
                 if (ent == -1)
+                {
+                    int fb = GivePlayerItem(client, "weapon_pistol");
+                    if (fb != -1) EquipPlayerWeapon(client, fb);
+                    LogMessage("[respawn-gear] %N melee=%s FAILED fb=pistol ent=%d", client, parts[1], fb);
                     continue;
+                }
                 DispatchKeyValue(ent, "melee_script_name", parts[1]);
                 DispatchSpawn(ent);
+                // 校验是否真为 fireaxe，非 fireaxe（如 claw 回退）则给小手枪
+                char mdl[128]; GetEntPropString(ent, Prop_Data, "m_ModelName", mdl, sizeof(mdl));
+                if (StrContains(mdl, "fireaxe", false) == -1 && StrContains(mdl, "w_fireaxe", false) == -1)
+                {
+                    AcceptEntityInput(ent, "Kill");
+                    int fb = GivePlayerItem(client, "weapon_pistol");
+                    if (fb != -1) EquipPlayerWeapon(client, fb);
+                    LogMessage("[respawn-gear] %N melee=%s 回退 pistol (mdl=%s) fb=%d", client, parts[1], mdl, fb);
+                    continue;
+                }
                 EquipPlayerWeapon(client, ent);
                 LogMessage("[respawn-gear] %N melee=%s ent=%d", client, parts[1], ent);
             }
@@ -1629,6 +1676,58 @@ void ShopBuy(int client, int slot)
     if (StrEqual(g_ShopTable[slot].classname, "wallhack"))
     {
         WallhackStart(client, price);
+        return;
+    }
+
+    // v1.13.0: 坠落免疫——60 秒内免疫坠落伤害
+    if (StrEqual(g_ShopTable[slot].classname, "fall_immunity"))
+    {
+        if (g_bFallImmune[client])
+        {
+            PrintToChat(client, "\x04[商店]\x01 坠落免疫正在生效中，无法重复购买（剩余 \x03%d\x01 秒）",
+                RoundToCeil(g_fFallImmuneEnd[client] - GetGameTime()));
+            return;
+        }
+        FallImmuneStart(client, price);
+        return;
+    }
+
+    // v1.13.3: 信号弹——weaponless直射（200分，道具类，单发待发射，地图生效不限）
+    if (StrEqual(g_ShopTable[slot].classname, "flare"))
+    {
+        if( GetFeatureStatus(FeatureType_Native, "ShopFlare_Give") != FeatureStatus_Available )
+        {
+            PrintToChat(client, "\x04[商店]\x01 信号弹功能暂不可用（flare_gun 未加载），积分已退回");
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            return;
+        }
+        if( ShopFlare_GetCharges(client) >= 1 )
+        {
+            PrintToChat(client, "\x04[商店]\x01 已有待发射信号弹，请先发射后再购买");
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            return;
+        }
+        int res = ShopFlare_Give(client, 1);
+        if( res == -1 )
+        {
+            PrintToChat(client, "\x04[商店]\x01 已有待发射信号弹");
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            return;
+        }
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05信号弹\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）——下一发射击自动打出！",
+            price, SH_GetWallet(client));
+        return;
+    }
+
+    // v1.13.2: 信号棒——已下架
+    if (StrEqual(g_ShopTable[slot].classname, "hand_flare"))
+    {
+        PrintToChat(client, "\x04[商店]\x01 信号棒已下架，请购买信号弹");
+        SH_AddWallet(client, price);
+        g_iShopBought[client][slot]--;
         return;
     }
 
@@ -2770,6 +2869,96 @@ Action Timer_WallhackWarn(Handle timer, int userId)
     {
         g_hWallhackWarnTimer[client] = null;   // 一次性——先置空防 WallhackEnd 杀已关句柄
         PrintToChatAll("\x04[商店]\x01 特感透视剩余 \x0330\x01 秒");
+    }
+    return Plugin_Continue;
+}
+
+// ============================================================================
+// v1.13.0: 坠落免疫（!shop「轻功鞋」）——60 秒内免疫坠落伤害
+// ============================================================================
+
+void FallImmuneStart(int client, int price)
+{
+    float total = FALLIMMUNE_DURATION;
+    float now = GetGameTime();
+
+    g_bFallImmune[client] = true;
+    g_fFallImmuneEnd[client] = now + total;
+
+    // 到期计时器
+    if (g_hFallImmuneTimer[client] != null)
+    {
+        KillTimer(g_hFallImmuneTimer[client]);
+        g_hFallImmuneTimer[client] = null;
+    }
+    g_hFallImmuneTimer[client] = CreateTimer(total, Timer_FallImmuneExpire,
+        GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+
+    LogMessage("[fallimmune] start client=%N wallet=%d total=%.0fs",
+        client, SH_GetWallet(client), total);
+
+    PrintToChat(client, "\x04[商店]\x01 已购买 \x05坠落免疫\x01（-\x03%d\x01 可用积分）：\x05%d\x01 秒内免疫坠落伤害",
+        price, RoundToNearest(total));
+    PrintHintText(client, " ");
+    CreateTimer(0.1, Timer_FallImmuneTeach, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+
+    PrintToChatAll("\x04[商店]\x01 \x05%N\x01 购买了坠落免疫（\x03%d\x01 秒坠落免疫）",
+        client, RoundToNearest(total));
+}
+
+public Action Timer_FallImmuneTeach(Handle timer, int userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client <= 0 || !IsClientInGame(client)) return Plugin_Stop;
+    PrintHintText(client, "[商店] 坠落免疫已开启，%d 秒内免疫坠落伤害", RoundToNearest(FALLIMMUNE_DURATION));
+    return Plugin_Stop;
+}
+
+void FallImmuneEnd(int client, bool silent = false)
+{
+    g_bFallImmune[client] = false;
+    g_fFallImmuneEnd[client] = 0.0;
+    if (g_hFallImmuneTimer[client] != null)
+    {
+        KillTimer(g_hFallImmuneTimer[client]);
+        g_hFallImmuneTimer[client] = null;
+    }
+    LogMessage("[fallimmune] end client=%N silent=%d", client, silent ? 1 : 0);
+    if (!silent && IsClientInGame(client))
+        PrintToChat(client, "\x04[商店]\x01 坠落免疫效果已结束");
+}
+
+void FallImmuneEndAll()
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (g_bFallImmune[i])
+            FallImmuneEnd(i, true);
+    }
+}
+
+Action Timer_FallImmuneExpire(Handle timer, int userId)
+{
+    int client = GetClientOfUserId(userId);
+    if (client >= 1 && client <= MaxClients)
+    {
+        g_hFallImmuneTimer[client] = null;
+        FallImmuneEnd(client);
+    }
+    return Plugin_Continue;
+}
+
+// 坠落伤害 hook——检测 DMG_FALL 拦截
+public Action FallImmune_OnTakeDamage(int victim, int &attacker, int &inflictor, float &damage, int &damagetype)
+{
+    if (victim < 1 || victim > MaxClients || !IsClientInGame(victim))
+        return Plugin_Continue;
+    if (!g_bFallImmune[victim])
+        return Plugin_Continue;
+    // DMG_FALL = 1 << 5 = 32
+    if (damagetype & DMG_FALL)
+    {
+        return Plugin_Handled;   // 拦截坠落伤害
     }
     return Plugin_Continue;
 }
