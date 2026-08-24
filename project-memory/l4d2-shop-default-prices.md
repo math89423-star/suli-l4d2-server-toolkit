@@ -21,7 +21,7 @@ metadata:
 | 1 | 煤气罐 | weapon_oxygentank | 100 | 1 |
 | 2 | 汽油桶 | weapon_gascan | 3500 | 1 |
 | 3 | 止痛药 | weapon_pain_pills | 1250 | 2 |
-| 4 | 肾上腺素 | weapon_adrenaline | 1250 | 2 |
+| 4 | 肾上腺素 | weapon_adrenaline | 1450 | 2 |
 | 5 | 电击器 | weapon_defibrillator | 4375 | 2 |
 | 6 | 医疗包 | weapon_first_aid_kit | 3750 | 2 |
 | 7 | 激光瞄准 | weapon_upgradepack_laser_sight | 1500 | 0 |
@@ -138,4 +138,11 @@ EquipPlayerWeapon + ApplyReserveAmmo（备弹 100 同步）。
   CreateEntityByName + DispatchSpawn + EquipPlayerWeapon 直接入手（v1.11.5 同路径，
   燃料自带无需备弹同步），失败退款。电锯 precache 沿用既有 w/v_chainsaw（v1.7.44 注）。
 - 已编译 v1.12.1 部署 + RCON reload，运行中。
+
+## v1.12.2 肾上腺素涨价（2026-08-22 用户拍板）
+
+- **背景**：用户要求将肾上腺素价格从 1250 调整至 1450。
+- **改动**：`g_ShopTable` 槽位 4 `weapon_adrenaline` 价格 1250→1450。
+- **影响**：止痛药仍为 1250，肾上腺素比止痛药贵 200（功能更强，合理溢价）。
+- 已编译 v1.12.2 部署 + RCON reload，运行中。
 

@@ -392,6 +392,11 @@ native int ShopFlare_Give(int client, int charges);
 native int ShopFlare_GetCharges(int client);
 native int ShopFlare_HasActive(int client);
 
+// 空中照明弹——l4d2_aerial_flare 插件（白炽光悬挂式照明）
+native int AerialFlare_Buy(int client);
+native int AerialFlare_IsAiming(int client);
+native int AerialFlare_GetCount();
+
 ConVar g_cvSIHudEnable;      // si_hud 总开关（FindConVar 读；null 视为开启）
 
 bool SH_Ready()
@@ -524,7 +529,7 @@ ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2�
 #define ART3_BREAK_PARTICLE  "boomer_explosion"
 #define ART3_CHASE_DURATION  8.0      // 吸引实体存活秒数（控场时长）
 
-#define SHOP_SLOTS      27      // v1.13.3: 信号弹单发化 + 信号棒下架→ 28→27。⚠ 必须与 g_ShopTable 初始化行数严格一致
+#define SHOP_SLOTS      28      // v1.13.3: 信号弹单发化 + 信号棒下架→ 28→27；+空中照明弹→28。⚠ 必须与 g_ShopTable 初始化行数严格一致
 
 #define WALLHACK_SLOT       8      // g_ShopTable 槽位（= 透视特感）；v1.11.3: 9→8（电锯行删除使透视前移 1）
 #define WALLHACK_DURATION   180.0   // v1.8.2: 3 分钟（2026-08-03 用户改回，原 v1.8.1 定稿 300=5 分钟）
@@ -601,8 +606,8 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     { "瓦斯罐",      "weapon_propanetank",               100,  0,  1 },   // v1.7.96: 用户定稿 100
     { "煤气罐",      "weapon_oxygentank",                100,  0,  1 },   // v1.7.96: 用户定稿 100
     { "汽油桶",      "weapon_gascan",                    3500,  0,  1 },   // v1.7.96: 用户定稿 3500（原 5000）
-    { "止痛药",      "weapon_pain_pills",                1250,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 1000）
-    { "肾上腺素",    "weapon_adrenaline",                1450,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 1000）→1450
+    { "止痛药",      "weapon_pain_pills",                1750,  0,  2 },   // 1250+500
+    { "肾上腺素",    "weapon_adrenaline",                1950,  0,  2 },   // 1450+500
     { "电击器",      "weapon_defibrillator",             4375,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3500）
     { "医疗包",      "weapon_first_aid_kit",             3750,  0,  2 },   // v1.4.9: 补给品 ×1.25（原 3000）
     { "激光瞄准",    "weapon_upgradepack_laser_sight",   1500,  0,  0 },   // v1.7.96: 用户定稿 1500（原 3500）
@@ -633,8 +638,8 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // ShopSpawn 通用生成路径，与激光瞄准同类）
     // v1.4.3: 燃烧弹包/高爆弹包移入道具类（cat 3→1）
     , { "马格南",      "weapon_pistol_magnum",          2000,  0,  0 }
-    , { "燃烧弹包",    "weapon_upgradepack_incendiary",  625,  0,  2 }   // v1.4.9: 补给品 ×1.25（原 500）
-    , { "高爆弹包",    "weapon_upgradepack_explosive",   625,  0,  2 }   // v1.4.9: 补给品 ×1.25（原 500）
+    , { "燃烧弹包",    "weapon_upgradepack_incendiary",  15000,  0,  2 }
+    , { "高爆弹包",    "weapon_upgradepack_explosive",   15000,  0,  2 }
     // v1.4.6: 投掷类新增商品（用户定稿）——胆汁 850 / 土质炸弹(pipe_bomb) 900 /
     // 燃烧瓶(molotov) 2500；cat=5 投掷（菜单第 4 类，火力支援/其他顺移）；
     // 走 ShopSpawn 通用生成路径（投掷物实体直接生成可拾取）
@@ -656,6 +661,8 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     , { "坠落免疫",    "fall_immunity",                    3000,  0,  3 }   // cat 3 = 其他
     // v1.13.3: 信号弹——weaponless直射（200分，上限10枚，道具类）
     , { "信号弹",      "flare",                             200,  0,  1 }   // cat 1 = 道具类
+    // 空中照明弹——白炽光悬挂式照明（800分，道具类）
+    , { "照明弹",      "aerial_flare",                      800,  0,  1 }   // cat 1 = 道具类
 };
 
 int       g_iShopBought[MAXPLAYERS + 1][SHOP_SLOTS];   // 每图已购次数（OnMapEnd 清零）
@@ -755,6 +762,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
     MarkNativeAsOptional("ShopFlare_Give");
     MarkNativeAsOptional("ShopFlare_GetCharges");
     MarkNativeAsOptional("ShopFlare_HasActive");
+    MarkNativeAsOptional("AerialFlare_Buy");
+    MarkNativeAsOptional("AerialFlare_IsAiming");
+    MarkNativeAsOptional("AerialFlare_GetCount");
     return APLRes_Success;
 }
 
@@ -1718,6 +1728,30 @@ void ShopBuy(int client, int slot)
             return;
         }
         PrintToChat(client, "\x04[商店]\x01 已购买 \x05信号弹\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）——下一发射击自动打出！",
+            price, SH_GetWallet(client));
+        return;
+    }
+
+    // 空中照明弹——白炽光悬挂式照明（调用 l4d2_aerial_flare 插件）
+    if (StrEqual(g_ShopTable[slot].classname, "aerial_flare"))
+    {
+        if( GetFeatureStatus(FeatureType_Native, "AerialFlare_Buy") != FeatureStatus_Available )
+        {
+            PrintToChat(client, "\x04[商店]\x01 空中照明弹功能暂不可用（aerial_flare 未加载），积分已退回");
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            return;
+        }
+        int res = AerialFlare_Buy(client);
+        if( res == 0 )
+        {
+            // Native handles its own error messages (cooldown, max flares, etc.)
+            // Refund since it failed
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            return;
+        }
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05空中照明弹\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）——瞄准目标后开枪确认！",
             price, SH_GetWallet(client));
         return;
     }

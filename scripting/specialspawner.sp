@@ -162,7 +162,12 @@ ConVar
 	g_cClearTankMult,
 	// v2.5.1 剿灭得分时间倍率（用户设计: 刷新播报起 1.5×, 每秒 -0.015, 下限 1.0）
 	g_cClearTimeMultStart,
-	g_cClearTimeMultDecay;
+	g_cClearTimeMultDecay,
+	// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩 + 剿灭得分补偿
+	g_cLossCompEnable,
+	g_cLossRestScale,
+	g_cLossRestMin,
+	g_cLossScoreScale;
 
 float
 	g_fSpawnTimeMin,
@@ -194,7 +199,11 @@ float
 	g_fRelocateTime,
 	// v6.0.2: 波次泄气推进 + 场上无 SI 计时
 	g_fStallAdvance,
-	g_fWaveNoSITime;
+	g_fWaveNoSITime,
+	// v6.2.0 损失率补偿参数缓存
+	g_fLossRestScale,
+	g_fLossRestMin,
+	g_fLossScoreScale;
 
 static const char
 	g_sZombieClass[SI_MAX_SIZE][] = {
@@ -323,10 +332,13 @@ bool
 	g_bWaveDowned[MAXPLAYERS + 1],	// 波内倒地/死亡去重标记
 	g_bSIInjected[MAXPLAYERS + 1],	// v6.0.0 本只 SI 是否处于目标注入状态(生效期间)
 	g_bSIRecovered[MAXPLAYERS + 1],	// v6.0.0 本只 SI 是否已做过 retarget(recover 修理)
-	g_bSIRelocated[MAXPLAYERS + 1];	// v6.0.0 本只 SI 是否已做过 unstick/relocate 修理
+	g_bSIRelocated[MAXPLAYERS + 1],	// v6.0.0 本只 SI 是否已做过 unstick/relocate 修理
+	g_bLossCompEnable;			// v6.2.0 损失率补偿开关缓存
 
 // v5.33: 全局波次计数（日志用）——独立声明，避免被上面 bool 声明块吞成 bool（历史 bug）
 int g_iWaveNumber;
+int g_iWaveSystemKills;		// v6.2.0 本波系统处决数（非玩家击杀）
+float g_fWaveLossRate;			// v6.2.0 本波损失率缓存（0-1，用于冷静期+得分）
 
 // v2.0.0 波间三态: 当前相位（初始 = IDLE）
 WavePhase
@@ -354,7 +366,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "6.1.2",		// v6.1.2 恢复 LOS+距离轻过滤(防处决) + 紧凑队伍方向分散 + cfg 清理旧覆盖; v6.1.1 移除聊天刷屏; v6.1.0 信任引擎取点
+	version = "6.2.0",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -620,6 +632,11 @@ public void OnPluginStart() {
 	// 清剿越快奖励越高（替代已废弃的高光时刻加分方案）。
 	g_cClearTimeMultStart =		CreateConVar("ss_clear_time_mult_start",	"1.5",						"剿灭得分时间倍率-起始值(波次刷新播报时刻)", _, true, 1.0, true, 5.0);
 	g_cClearTimeMultDecay =		CreateConVar("ss_clear_time_mult_decay",	"0.015",					"剿灭得分时间倍率-每秒衰减量(下限1.0; 1.5-0.015/s≈30s回1×)", _, true, 0.0, true, 1.0);
+	// v6.2.0 损失率补偿（系统处决占比 → 冷静期压缩 + 剿灭得分扣减）
+	g_cLossCompEnable =			CreateConVar("ss_loss_comp_enable",		"1",						"损失率补偿开关: 1=启用(系统处决缩短冷静期+扣减得分) | 0=关闭", _, true, 0.0, true, 1.0);
+	g_cLossRestScale =			CreateConVar("ss_loss_rest_scale",		"1.0",						"冷静期补偿系数: 修正后冷静期 = 原冷静期 * (1 - 损失率*系数), 1.0=30%损失压30%时间", _, true, 0.0, true, 2.0);
+	g_cLossRestMin =				CreateConVar("ss_loss_rest_min",		"10.0",						"损失率补偿后冷静期最低秒数(保底, 防过短)", _, true, 1.0, true, 60.0);
+	g_cLossScoreScale =			CreateConVar("ss_loss_score_scale",		"1.0",						"剿灭得分扣减系数: 扣减后得分 = 原得分 * (1 - 损失率*系数), 1.0=30%损失扣30%分(200→140)", _, true, 0.0, true, 2.0);
 
 	g_cSpawnRange =					FindConVar("z_spawn_range");
 	g_cDiscardRange =				FindConVar("z_discard_range");
@@ -658,6 +675,10 @@ public void OnPluginStart() {
 	g_cRecoverTime.AddChangeHook(CvarChanged_General);
 	g_cRelocateTime.AddChangeHook(CvarChanged_General);
 	g_cStallAdvance.AddChangeHook(CvarChanged_General);
+	g_cLossCompEnable.AddChangeHook(CvarChanged_General);
+	g_cLossRestScale.AddChangeHook(CvarChanged_General);
+	g_cLossRestMin.AddChangeHook(CvarChanged_General);
+	g_cLossScoreScale.AddChangeHook(CvarChanged_General);
 
 	g_cTankStatusAction.AddChangeHook(CvarChanged_TankStatus);
 	g_cTankStatusLimits.AddChangeHook(CvarChanged_TankCustom);
@@ -830,10 +851,7 @@ Action tmrForceSuicide(Handle timer) {
 		} else {
 			victim = GetSurVictim(i, class);
 			if (victim > 0) {
-				if (GetEntProp(victim, Prop_Send, "m_isIncapacitated"))
-					KillInactiveSI(i);		// 控倒地者无效 → 处决
-				else
-					healthy = true;			// 正在控人 → 续命
+				healthy = true;			// 控任何人（站立/倒地）均有效，不处决（用户拍板：控倒地也算）
 			}
 		}
 
@@ -862,6 +880,8 @@ Action tmrForceSuicide(Handle timer) {
 		// -------- 无行动：分阶段修理，而不是一杆子 25s 处决 --------
 		float idle = time - g_fActionTimes[i];
 		if (idle >= g_fSuicideTime) {
+			float posTmp2[3]; GetClientAbsOrigin(i, posTmp2);
+			LogMessage("[SS] 处决 %N (class=%d) 原因=自杀计时 idle=%.1fs dist=%.0f pos=(%.0f,%.0f,%.0f) visible=%d nav=%.0f", i, class, idle, DistanceToNearestSurvivor(posTmp2), posTmp2[0], posTmp2[1], posTmp2[2], GetEntProp(i, Prop_Send, "m_hasVisibleThreats"), g_fSILastNavDist[i]);
 			KillInactiveSI(i);
 			continue;
 		}
@@ -1259,6 +1279,11 @@ void GetCvars_General() {
 	g_fRecoverTime = g_cRecoverTime.FloatValue;
 	g_fRelocateTime = g_cRelocateTime.FloatValue;
 	g_fStallAdvance = g_cStallAdvance.FloatValue;
+	// v6.2.0 损失率补偿参数缓存
+	g_bLossCompEnable = g_cLossCompEnable.BoolValue;
+	g_fLossRestScale = g_cLossRestScale.FloatValue;
+	g_fLossRestMin = g_cLossRestMin.FloatValue;
+	g_fLossScoreScale = g_cLossScoreScale.FloatValue;
 }
 
 void CvarChanged_TankStatus(ConVar convar, const char[] oldValue, const char[] newValue) {
@@ -1503,6 +1528,11 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
 		LogMessage("[SS] SI#%d-%d DIED: class=%s(%.0fs alive) killer='%s' weapon='%s' headshot=%d",
 			waveNum, siID, (siClass >= 0 && siClass < SI_MAX_SIZE) ? g_sZombieClass[siClass] : "?",
 			lifespan, killerName, weapon, headshot);
+		// v6.1.5 系统处决疑似：短寿命 + 世界/自杀 击杀 → 额外标记，便于统计“刷不出或被处决”原因
+		if (lifespan < 10.0 && (attacker <= 0 || attacker == client || StrContains(weapon, "world") != -1 || StrContains(weapon, "trigger") != -1)) {
+			float dpos[3]; GetEntPropVector(client, Prop_Send, "m_vecOrigin", dpos);
+			LogMessage("[SS] 系统处决疑似 SI#%d-%d class=%s %.1fs killer='%s' weapon='%s' pos=(%.0f,%.0f,%.0f) dist=%.0f", waveNum, siID, (siClass >= 0 && siClass < SI_MAX_SIZE) ? g_sZombieClass[siClass] : "?", lifespan, killerName, weapon, dpos[0], dpos[1], dpos[2], DistanceToNearestSurvivor(dpos));
+		}
 		// v5.33: 聊天播报击杀（v6.1.1 起移除——防刷屏；保留 LogMessage 生命周期追踪）
 		if (attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker) && GetClientTeam(attacker) == 2) {
 			// PrintToChatAll("\x04[击杀]\x01 %s#\x05%d-%d\x01 被 \x03%s\x01 击杀（%.1fs）",
@@ -1527,6 +1557,20 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
 		// 非本插件生成的 SI（引擎 director 生成的残留）
 		LogMessage("[SS] SI DIED (untracked): class=%d killer='%s' weapon='%s' headshot=%d",
 			siClass, killerName, weapon, headshot);
+	}
+
+	// v6.2.0 损失率统计：非玩家击杀的本波 SI 记为系统处决（与玩家击杀互斥）
+	if (g_bWaveActive && siID > 0 && g_iSIWaveNum[client] == g_iWaveNumber) {
+		bool isSurvivorKill = (attacker >= 1 && attacker <= MaxClients && IsClientInGame(attacker) && GetClientTeam(attacker) == 2);
+		if (!isSurvivorKill) {
+			g_iWaveSystemKills++;
+			if (g_iWaveBudget > 0) {
+				float _loss = float(g_iWaveSystemKills) / float(g_iWaveBudget);
+				if (_loss > 1.0) _loss = 1.0;
+				g_fWaveLossRate = _loss;
+			}
+			LogMessage("[SS] Wave #%d system loss: SI#%d-%d class=%s sysKills=%d/%d loss=%.0f%%", g_iWaveNumber, g_iSIWaveNum[client], siID, (siClass >= 0 && siClass < SI_MAX_SIZE) ? g_sZombieClass[siClass] : "?", g_iWaveSystemKills, g_iWaveBudget, g_fWaveLossRate * 100.0);
+		}
 	}
 
 	// v5.33: 70/30 Wave Budget — 击杀累计计数 + 补位
@@ -2014,10 +2058,13 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	g_fWaveNoSITime = 0.0;
 
 	// v5.33: 70/30 Wave Budget — 首发 70%，补位 30%（v6.1.3: 用户拍板取消补位，一次全刷，人数*2.5）
+	// v6.2.0 损失率：本波系统处决清零（冷静期+得分补偿用）
 	g_iWaveBudget = spawnSize;
 	g_iWaveInitial = spawnSize; // 100% 首发，无保留
 	g_iWaveReserve = 0;
 	g_iWaveKills = 0;
+	g_iWaveSystemKills = 0;
+	g_fWaveLossRate = 0.0;
 	g_iWaveReserveSpawned = 0;
 	g_iWaveSICount = 0;   // v5.33: 波次内 SI 序号重置
 	// 新波次开始时清理上一波的 reserve wait timer
@@ -2156,39 +2203,52 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 	float bestInvisPos[3];
 	float bestInvisDist = 999999.0;
 	bool hasInvisFallback = false;
+	int failEngine=0, failTrap=0, failNav=0, failDist=0, failClose=0;
 
 	for (int t = 0; t < attempts; t++) {
 		g_iDirection = dir;		// 引擎 GetRandomPZSpawnPosition 读 PreferredSpecialDirection
-		if (!L4D_GetRandomPZSpawnPosition(intendedTarget, zombieClass, 10, p))
+		if (!L4D_GetRandomPZSpawnPosition(intendedTarget, zombieClass, 10, p)) {
+			failEngine++;
 			continue;			// 引擎取点失败 → 下一轮
+		}
 
 		// 快速重试保护①: 伤害触发器(陷阱)内 → 出生即死，重试
 		if (SISpawn_InHurtTrigger(p)) {
 			g_iBatchGuardTrap++;
+			failTrap++;
 			continue;
 		}
 
 		// 快速重试保护②: 候选点到 target 的 NavPath 不通 → 重试
 		Address nav = L4D_GetNearestNavArea(p, 300.0, false, false, false, L4D_TEAM_INFECTED);
-		if (nav == Address_Null)
+		if (nav == Address_Null) {
+			failNav++;
 			continue;
+		}
 		if (targetNav != Address_Null
-			&& !L4D2_NavAreaBuildPath(nav, targetNav, g_fNavPathMax, L4D_TEAM_INFECTED, false))
+			&& !L4D2_NavAreaBuildPath(nav, targetNav, g_fNavPathMax, L4D_TEAM_INFECTED, false)) {
+			failNav++;
 			continue;
+		}
 
 		// 距离硬门：离最近生还者必须 >= guard_min，防贴脸不变式
 		// v6.1.3: 补位用250保证必补，首发用400保证2.5s反应
 		float dist = DistanceToNearestSurvivor(p);
 		float minDist = isReplacement ? 250.0 : g_cSpawnRangeGuardMin.FloatValue;
-		if (dist < minDist)
+		if (dist < minDist) {
+			failDist++;
 			continue;
+		}
 
-		// v6.1.4 分散刷：与本波已刷点位保持 400u 以上（防挤一处，透视聚堆）
+		// v6.1.4 分散刷：与本波已刷点位保持 250u 以上（防挤一处，透视聚堆）
 		bool tooClose = false;
 		for (int k = 0; k < g_iBatchSpawnPosCount; k++) {
-			if (GetVectorDistance(p, g_fBatchSpawnPos[k]) < 400.0) { tooClose = true; break; }
+			if (GetVectorDistance(p, g_fBatchSpawnPos[k]) < 250.0) { tooClose = true; break; }
 		}
-		if (tooClose) continue;
+		if (tooClose) {
+			failClose++;
+			continue;
+		}
 
 		// 可见优先：候选点至少能看见一个生还者 → 立即采用
 		if (IsPosVisibleToAnySurvivor(p)) {
@@ -2210,6 +2270,7 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 		return true;
 	}
 
+	LogMessage("[SS] FindPosition FAILED class=%d target=%N attempts=%d failEngine=%d failTrap=%d failNav=%d failDist=%d failClose=%d hasInvis=%d", zombieClass, intendedTarget, attempts, failEngine, failTrap, failNav, failDist, failClose, hasInvisFallback);
 	return false;
 }
 
@@ -2500,6 +2561,7 @@ void SpawnSliced(int from, int to) {
 		else {
 			g_iBatchGuardBlocked++;	// 观测: 被 Hard Gate 拦下的槽位数（饿死率）
 			g_iBatchDebt++;			// v6.0.0: 失败不消耗波次预算，欠账稍后 catch-up 重采样
+			LogMessage("[SS] Spawn FAILED class=%s targetRange=[%d,%d] dir=%d debt=%d", g_sZombieClass[zClass0], refMin, refMax, dir, g_iBatchDebt);
 		}
 	}
 	g_iBatchNext = to;
@@ -2637,6 +2699,10 @@ void FinishWave() {
 			}
 		}
 		LogMessage("[SS] Wave #%d lifecycle: total_spawned=%d alive=%d killed=%d", g_iWaveNumber, waveSI, waveAlive, waveKilled);
+		// v6.2.0 损失率预览（最终损失率在 EnterRest 结算，处决可能发生在 CLEARING 轮询期间）
+		if (g_iWaveBudget > 0 && g_iWaveSystemKills > 0) {
+			LogMessage("[SS] Wave #%d loss preview: sysKills=%d budget=%d loss=%.0f%% playerKills=%d", g_iWaveNumber, g_iWaveSystemKills, g_iWaveBudget, float(g_iWaveSystemKills)/float(g_iWaveBudget)*100.0, g_iWaveKills);
+		}
 		// v5.33 波次结算聊天摘要：v6.1.1 起移除（防刷屏；保留 LogMessage；剿灭提示仍保留）
 		// PrintToChatAll("\x04[SI]\x01 第 \x05%d\x01 波结算：实际刷新 \x03%d\x01，玩家击杀 \x05%d\x01，补位 \x05%d\x01，存活 \x03%d\x01",
 		// 	g_iWaveNumber, waveSI, g_iWaveKills, g_iWaveReserveSpawned, waveAlive);
@@ -2739,12 +2805,42 @@ void EnterRest() {
 	float rest = Math_GetRandomFloat(g_cRestMin.FloatValue, g_cRestMax.FloatValue);
 	if (rest < 1.0)
 		rest = 1.0;
+	// v6.2.0 损失率补偿：系统处决占比 → 缩短冷静期找回节奏
+	// 公式 rest' = rest * (1 - loss*scale), 钳制 ≥ ss_loss_rest_min (保底 10s)
+	// loss = 系统处决数 / 本波预算（例 10应刷/3处决=30% → 20s*0.7=14s）
+	float restOrig = rest;
+	if (g_bLossCompEnable && g_fLossRestScale > 0.0 && g_bWaveStarted && g_iWaveBudget > 0) {
+		float lossRate = float(g_iWaveSystemKills) / float(g_iWaveBudget);
+		if (lossRate < 0.0) lossRate = 0.0;
+		if (lossRate > 1.0) lossRate = 1.0;
+		g_fWaveLossRate = lossRate;
+		if (lossRate > 0.001) {
+			float restComp = rest * (1.0 - lossRate * g_fLossRestScale);
+			if (restComp < g_fLossRestMin)
+				restComp = g_fLossRestMin;
+			if (restComp < 1.0)
+				restComp = 1.0;
+			if (restComp < rest) {
+				LogMessage("[SS] Loss comp REST: budget=%d sysKill=%d loss=%.0f%% rest %.1f->%.1f (scale=%.2f min=%.1f)", g_iWaveBudget, g_iWaveSystemKills, lossRate*100.0, rest, restComp, g_fLossRestScale, g_fLossRestMin);
+				rest = restComp;
+			}
+		}
+	} else {
+		// 非补偿波：清零损失率（零波/关闭时不带入下一波）
+		if (!g_bWaveStarted || g_iWaveBudget <= 0)
+			g_fWaveLossRate = 0.0;
+		else if (!g_bLossCompEnable)
+			g_fWaveLossRate = 0.0;
+	}
 	g_Phase = PHASE_REST;
 	if (g_hRestTimer != null && IsValidHandle(g_hRestTimer))
 		delete g_hRestTimer;
 	g_hRestTimer = CreateTimer(rest, tmrRestEnd);
 	g_fRestEndTime = GetEngineTime() + rest;   // v2.5.4: 记录到期时刻（暂停冻结用）
-	LogMessage("[SS] phase: CLEARING -> REST (%.1fs)", rest);
+	if (rest != restOrig)
+		LogMessage("[SS] phase: CLEARING -> REST (%.1fs orig %.1fs, loss %.0f%%)", rest, restOrig, g_fWaveLossRate*100.0);
+	else
+		LogMessage("[SS] phase: CLEARING -> REST (%.1fs)", rest);
 
 	// v2.2.0 触发 REST forward（传入总倒计时秒数，供外部插件预警）
 	float totalCountdown = rest + GetPostRestInterval();
@@ -2805,6 +2901,16 @@ void SettleWaveClearScore(float totalCountdown) {
 			timeMult = 1.0;
 		if (timeMult > 1.0)
 			score = RoundToNearest(float(score) * timeMult);
+
+		// v6.2.0 损失率得分扣减：系统处决占比 → 扣减剿灭得分（少威胁少奖励）
+		// 公式 score' = score * (1 - loss*scale), 例 200*(1-0.3)=140；钳 ≥0
+		if (g_bLossCompEnable && g_fLossScoreScale > 0.0 && g_fWaveLossRate > 0.001) {
+			int scoreOrig = score;
+			float lossFactor = 1.0 - g_fWaveLossRate * g_fLossScoreScale;
+			if (lossFactor < 0.0) lossFactor = 0.0;
+			score = RoundToNearest(float(score) * lossFactor);
+			LogMessage("[SS] Loss deduct SCORE: loss=%.0f%% scale=%.2f %d->%d (timeMult=%.2f)", g_fWaveLossRate*100.0, g_fLossScoreScale, scoreOrig, score, timeMult);
+		}
 	}
 
 	if (score > 0) {
@@ -2818,9 +2924,10 @@ void SettleWaveClearScore(float totalCountdown) {
 		// v2.5.3 FIX: LogMessage 格式串参数不匹配（v2.5.0-2.5.2: downDeaths=%d/%d 缺
 		// 第二个值 + tank=%s 传 int）→ 每次结算抛 "String formatted incorrectly"
 		// 异常 → 函数中断 → 剿灭播报永远不显示（分已入账）。8 格式符 ↔ 8 参数。
-		LogMessage("[SS] Clear score: tier=%s score=%d downDeaths=%d/%d base=%d tank=%d next=%ds (timeMult=%.2f)",
+		LogMessage("[SS] Clear score: tier=%s score=%d downDeaths=%d/%d base=%d tank=%d next=%ds (timeMult=%.2f loss=%.0f%% sys=%d/%d)",
 			tier, score, g_iWaveDownDeaths, g_iWaveBase, g_iWaveBase,
-			g_bWaveHadTank ? 1 : 0, total, timeMult);
+			g_bWaveHadTank ? 1 : 0, total, timeMult, g_fWaveLossRate*100.0, g_iWaveSystemKills, g_iWaveBudget);
+		// v6.2.0 损失补偿静默生效：不公示扣减/冷静压缩细节，保持原播报格式
 		PrintToChatAll("\x04[特感]\x01 本波次剿灭完成，\x03%s%s\x01全体 \x05+%d\x01 分，下一波来袭 \x05%d\x01 秒",
 			tankTag, tier, score, total);
 	} else {

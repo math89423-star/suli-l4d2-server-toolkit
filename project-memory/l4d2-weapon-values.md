@@ -15,7 +15,7 @@ metadata:
 
 # L4D2 武器数值对照表
 
-> 更新时间: 2026-08-17（M16 cycletime 0.088→0.086 用户拍板 0.084 太凶；马格南 damage
+> 更新时间: 2026-08-22（SMG×3 +10% 36/40/44 600/615/586DPS；SG552 0.0825→0.08 12.5RPS 612DPS；M16 53→52 实验100→52；Scout 315→295 AWP 475→385 仓库与部署对齐，用户核验；M16 0.088→0.086 0.084 太凶；马格南
 > **105→108 用户拍板**（Hunter 3枪/Jockey 4枪差异化 108×3=324<325 + Witch 15→14发，
 > 原文件 115 是 08-17 00:06 未生效改动，已覆盖为 108），RCON 均已即时生效；
 > ⚠️ **2026-07-29 衰减重构**: rangemod — 步枪/SMG/狙击→1.00(零衰减), 手枪/霰弹→0.92(8%衰减), gainrange 贴近 range
@@ -82,29 +82,29 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 
 | 武器 | 属性 | 当前值 | 默认值 |
 |------|------|--------|--------|
-| **smg** | damage | 33 | 20 |
+| **smg** | damage | 36 | 20 |
 | | range | 4200 | 2500 |
 | | rangemod | 1.00 | 0.84 |
 | | gainrange | 4100 | — |
-| | cycletime | 0.0625 | 0.0625 |
+| | cycletime | 0.060 | 0.0625 |
 | | minstandspread | 0.45 | — |
 | | minmovespread | 0.50 | — |
 | | mincrouchspread | 0.30 | — |
 | | penpower | 50 | 30 |
 | | penlayers | 2 | 2 |
 | | clipsize | — | 50 |
-| **smg_silenced** | damage | 37 | 25 |
+| **smg_silenced** | damage | 40 | 25 |
 | | range | 4200 | 2200 |
 | | rangemod | 1.00 | 0.84 |
 | | gainrange | 4100 | 900 |
-| | cycletime | 0.0625 | 0.0625 |
+| | cycletime | 0.065 | 0.0625 |
 | | minstandspread | 0.40 | — |
 | | minmovespread | 0.45 | — |
 | | mincrouchspread | 0.26 | — |
 | | penpower | 50 | 30 |
 | | penlayers | 2 | 2 |
 | | clipsize | — | 50 |
-| **smg_mp5** | damage | 40 | 24 |
+| **smg_mp5** | damage | 44 | 24 |
 | | range | 4300 | 2500 |
 | | rangemod | 1.00 | 0.84 |
 | | gainrange | 4200 | — |
@@ -120,40 +120,40 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 
 | 武器 | 属性 | 当前值 | 默认值 |
 |------|------|--------|--------|
-| **rifle** (M16) | damage | 50 | 33 |
+| **rifle** (M16) | damage | 52 | 33 |
 | | range | 4800 | 3000 |
 | | rangemod | 1.00 | 0.97 |
 | | gainrange | 4700 | 1500 |
 | | cycletime | **0.086** | 0.0875 |
-| | minstandspread | 0.30 | — |
-| | minmovespread | 0.46 | — |
-| | mincrouchspread | 0.05 | — |
+| | minstandspread | 0.35 | — |
+| | minmovespread | 0.44 | — |
+| | mincrouchspread | 0.15 | — |
 | | penpower | 65 | 50 |
 | | penlayers | 3 | 2 |
 | | clipsize | — | 50 |
-| **rifle_sg552** | damage | 48 | 33 |
+| **rifle_sg552** | damage | 49 | 33 |
 | | range | 4700 | 3000 |
 | | rangemod | 1.00 | 0.97 |
 | | gainrange | 4600 | 1500 |
-| | cycletime | 0.0825 | 0.0825 |
+| | cycletime | 0.08 | 0.0825 |
 | | minstandspread | 0.30 | — |
 | | minmovespread | 0.42 | — |
 | | mincrouchspread | 0.05 | — |
 | | penpower | 65 | 50 |
 | | penlayers | 3 | 2 |
 | | clipsize | — | 50 |
-| **rifle_ak47** | damage | 65 | 58 |
+| **rifle_ak47** | damage | 67 | 58 |
 | | range | 4500 | 3000 |
 | | rangemod | 1.00 | 0.97 |
 | | gainrange | 4400 | 1500 |
 | | cycletime | 0.113 | 0.13 |
 | | minstandspread | 0.42 | — |
 | | minmovespread | 0.50 | — |
-| | mincrouchspread | 0.32 | — |
+| | mincrouchspread | 0.2 | — |
 | | penpower | 80 | 50 |
 | | penlayers | 4 | 2 |
 | | clipsize | 40 | 40 |
-| **rifle_desert** | damage | 68 | 44 |
+| **rifle_desert** | damage | 55 | 44 |
 | | range | 5200 | 3000 |
 | | rangemod | 1.00 | 0.97 |
 | | gainrange | 5100 | 1500 |
@@ -161,10 +161,10 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 | | minstandspread | 0.24 | — |
 | | minmovespread | 0.28 | — |
 | | mincrouchspread | 0.05 | — |
-| | penpower | 80 | 50 |
-| | penlayers | 4 | 2 |
+| | penpower | 65 | 50 |
+| | penlayers | 3 | 2 |
 | | clipsize | — | 60 |
-| **rifle_m60** | damage | 80 | 50 |
+| **rifle_m60** | damage | 78 | 50 |
 | | range | 5200 | 3000 |
 | | rangemod | 1.00 | 0.97 |
 | | gainrange | 5100 | 1500 |
@@ -180,7 +180,7 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 
 | 武器 | 属性 | 当前值 | 默认值 |
 |------|------|--------|--------|
-| **hunting_rifle** | damage | 130 | 90 |
+| **hunting_rifle** | damage | 115 | 90 |
 | | range | 7000 | 8192 |
 | | rangemod | 1.00 | 1.0 |
 | | gainrange | 6900 | — |
@@ -191,7 +191,7 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 | | penpower | 65 | 50 |
 | | penlayers | 3 | 2 |
 | | clipsize | — | 15 |
-| **sniper_military** | damage | 175 | 90 |
+| **sniper_military** | damage | 145 | 90 |
 | | range | 7000 | 8192 |
 | | rangemod | 1.00 | 1.0 |
 | | gainrange | 6900 | — |
@@ -202,7 +202,7 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 | | penpower | 100 | 50 |
 | | penlayers | 4 | 2 |
 | | clipsize | — | 30 |
-| **sniper_scout** | damage | 315 | 90 |
+| **sniper_scout** | damage | 295 | 90 |
 | | range | 8192 | 8192 |
 | | rangemod | 1.00 | 1.0 |
 | | gainrange | 8092 | — |
@@ -213,7 +213,7 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 | | penpower | 120 | 50 |
 | | penlayers | 5 | 2 |
 | | clipsize | — | 15 |
-| **sniper_awp** | damage | 475 | 115 |
+| **sniper_awp** | damage | 385 | 115 |
 | | range | 8400 | 8192 |
 | | rangemod | 1.00 | 1.0 |
 | | gainrange | 8300 | — |
@@ -289,18 +289,18 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 |------|------|------|-----------|-----|-----|------|------|
 | pistol | 40 | 1 | 0.14 | 7.1 | **286** | 15 | 600 |
 | magnum | 108 | 1 | 0.30 | 3.3 | **360** | 8 | 864 |
-| smg | 33 | 1 | 0.0625 | 16.0 | **528** | 50 | 1,650 |
-| smg_silenced | 37 | 1 | 0.0625 | 16.0 | **592** | 50 | 1,850 |
-| smg_mp5 | 40 | 1 | 0.075 | 13.3 | **533** | 50 | 2,000 |
-| rifle (M16) | 50 | 1 | 0.086 | 11.6 | **581** | 50 | 2,500 |
-| rifle_sg552 | 48 | 1 | 0.0825 | 12.1 | **582** | 50 | 2,400 |
-| rifle_ak47 | 65 | 1 | 0.113 | 8.8 | **575** | 40 | 2,600 |
-| rifle_desert | 68 | 1 | ~0.111 | 9.0 | **612** | 60 | 4,080 |
-| rifle_m60 | 80 | 1 | 0.11 | 9.1 | **727** | 254 | 20,320 |
-| hunting_rifle | 130 | 1 | 0.213 | 4.7 | **610** | 15 | 1,950 |
-| sniper_military | 175 | 1 | 0.25 | 4.0 | **700** | 30 | 5,250 |
-| sniper_scout | 315 | 1 | 0.765 | 1.3 | **412** | 15 | 4,725 |
-| sniper_awp | 475 | 1 | 0.9975 | 1.0 | **476** | 20 | 9,500 |
+| smg | 36 | 1 | 0.060 | 16.7 | **600** | 50 | 1,800 |
+| smg_silenced | 40 | 1 | 0.065 | 15.4 | **615** | 50 | 2,000 |
+| smg_mp5 | 44 | 1 | 0.075 | 13.3 | **586** | 50 | 2,200 |
+| rifle (M16) | 52 | 1 | 0.086 | 11.6 | **605** | 50 | 2,600 |
+| rifle_sg552 | 49 | 1 | 0.08 | 12.5 | **612** | 50 | 2,450 |
+| rifle_ak47 | 67 | 1 | 0.113 | 8.8 | **593** | 40 | 2,680 |
+| rifle_desert | 55 | 1 | ~0.111 | 9.0 | **495** | 60 | 3,300 |
+| rifle_m60 | 78 | 1 | 0.11 | 9.1 | **709** | 150 | 11,700 |
+| hunting_rifle | 115 | 1 | 0.213 | 4.7 | **540** | 15 | 1,725 |
+| sniper_military | 145 | 1 | 0.25 | 4.0 | **580** | 30 | 4,350 |
+| sniper_scout | 295 | 1 | 0.765 | 1.3 | **385** | 15 | 4,425 |
+| sniper_awp | 385 | 1 | 0.9975 | 1.0 | **386** | 20 | 7,700 |
 | grenade_launcher | 750 | 1 | 1.2 | 0.83 | **625** | 1 | 750 |
 | pumpshotgun | 45 | 10 | 0.435 | 2.3 | **1,034** | 8 | 3,600 |
 | shotgun_chrome | 51 | 8 | 0.435 | 2.3 | **938** | 8 | 3,264 |
@@ -315,18 +315,18 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 |------|------|------------|-------------|--------------|-----------|------------|
 | pistol | 40 | 7发 0.84s | 9发 1.12s | 15发 1.96s | 17发 2.24s | 100发 13.9s |
 | magnum | 108 | 3发 0.60s | 4发 0.90s | 6发 1.50s | 7发 1.80s | 38发 11.1s |
-| smg | 33 | 8发 0.44s | 10发 0.56s | 19发 1.12s | 21发 1.25s | 122发 7.6s |
-| smg_silenced | 37 | 7发 0.38s | 9发 0.50s | 17发 1.00s | 19发 1.13s | 109发 6.8s |
-| smg_mp5 | 40 | 7发 0.45s | 9发 0.60s | 15发 1.05s | 17发 1.20s | 100发 7.4s |
-| rifle M16 | 50 | 5发 0.34s | 7发 0.52s | 12发 0.95s | 14发 1.12s | 80发 6.8s |
+| smg | 36 | 7发 0.36s | 10发 0.54s | 17发 0.96s | 19发 1.08s | 112发 6.7s |
+| smg_silenced | 40 | 7发 0.39s | 9发 0.52s | 15发 0.91s | 17发 1.04s | 100发 6.4s |
+| smg_mp5 | 44 | 6发 0.38s | 8发 0.53s | 14发 0.98s | 16发 1.13s | 91发 6.8s |
+| rifle M16 | 52 | 5发 0.34s | 7发 0.52s | 12发 0.95s | 14发 1.12s | 77发 6.6s |
 | rifle SG552 | 48 | 6发 0.41s | 7发 0.50s | 13发 0.99s | 14发 1.07s | 84发 6.8s |
 | rifle AK47 | 65 | 4发 0.34s | 5发 0.45s | 10发 1.02s | 11发 1.13s | 62发 6.9s |
 | rifle SCAR | 68 | 4发 0.33s | 5发 0.44s | 9发 0.89s | 10发 1.00s | 59发 6.4s |
-| rifle M60 | 80 | 4发 0.33s | 5发 0.44s | 8发 0.77s | 9发 0.88s | 50发 5.4s |
-| hunting | 130 | **2发 0.21s** | 3发 0.43s | 5发 0.85s | 6发 1.07s | 31发 6.4s |
-| military | 175 | **2发 0.25s** | **2发 0.25s** | 4发 0.75s | 4发 0.75s | 23发 5.5s |
-| scout | 315 | **1发 🔥** | 2发 0.77s | 2发 0.77s | 3发 1.53s | 13发 9.2s |
-| awp | 475 | **1发 🔥** | **1发 🔥** | 2发 1.00s | 2发 1.00s | 9发 8.0s |
+| rifle M60 | 78 | 4发 0.33s | 5发 0.44s | 8发 0.77s | 20发 2.09s | 52发 5.6s |
+| hunting | 115 | 3发 0.43s | 3发 0.43s | 6发 1.07s | 14发 2.77s | 35发 7.2s |
+| military | 165 | **2发 0.25s** | **2发 0.25s** | 4发 0.75s | 5发 1.00s | 25发 6.0s |
+| scout | 295 | **1发 🔥** | 2发 0.77s | 3发 1.53s | 3发 1.53s | 14发 9.9s |
+| awp | 385 | **1发 🔥** | **1发 🔥** | 2发 1.00s | 2发 1.00s | 11发 10.0s |
 | GL | 750 | **1发 AoE** | **1发 AoE** | **1发 AoE** | **1发 AoE** | 6发 6.0s |
 | pump | 45×10 | **1发 🔥** | **1发 🔥** | 2发 0.44s | 2发 0.44s | 9发 3.5s |
 | chrome | 51×8 | **1发 🔥** | **1发 🔥** | 2发 0.44s | 2发 0.44s | 10发 3.9s |
@@ -396,7 +396,7 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 | SPAS | 0.75 | **0.58** | ✅ -23% |
 | Military | 0.50 | **0.06** | ✅ -88% |
 | GL | 0.40 | — | 未设 |
-| M16 | 0.40 | **0.30** | ✅ -25% |
+| M16 | 0.40 | **0.35** | ✅ -12% |
 | SG552 | 0.40 | **0.30** | ✅ -25% |
 | SCAR | 0.35 | **0.24** | ✅ -31% |
 | Hunting | 0.10 | **0.08** | ✅ -20% |
@@ -414,7 +414,7 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 | SPAS | 1.50 | **0.72** | ✅ -52% |
 | 铬喷 | 1.50 | **0.68** | ✅ -55% |
 | AK47 | 6.00 | **0.50** | ✅ -92% |
-| M16 | 5.00 | **0.46** | ✅ -91% |
+| M16 | 5.00 | **0.44** | ✅ -91% |
 | SG552 | 5.00 | **0.42** | ✅ -92% |
 | Military | 5.00 | **0.53** | ✅ -89% |
 | GL | 5.00 | — | 未设 |
@@ -436,10 +436,10 @@ else:                         multiplier = 1.0 + (RangeModifier - 1.0) × (dista
 | 消音SMG | 0.85 | **0.26** | ✅ -69% |
 | MP5 | 0.75 | **0.26** | ✅ -65% |
 | SMG | 0.70 | **0.30** | ✅ -57% |
-| AK47 | 0.50 | **0.32** | ✅ -36% |
+| AK47 | 0.50 | **0.20** | ✅ -60% |
 | 手枪 | 0.50 | **0.26** | ✅ -48% |
 | 马格南 | 0.50 | **0.30** | ✅ -40% |
-| M16 | 0.05 | **0.05** | = 原版 |
+| M16 | 0.05 | **0.15** | ✅ +200% |
 | SG552 | 0.05 | **0.05** | = 原版 |
 | SCAR | 0.05 | **0.05** | = 原版 |
 | Military | 0.05 | **0.05** | = 原版 |

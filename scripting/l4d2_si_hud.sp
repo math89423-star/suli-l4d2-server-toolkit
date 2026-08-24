@@ -816,7 +816,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.13.5"
+#define PLUGIN_VERSION "1.13.6"
 
 // ============================================================================
 // ConVar handles
@@ -872,6 +872,10 @@ ConVar g_cvPointsRescue;                 // v1.7.51: 救援奖励分
 ConVar g_cvScoreboardEnable;
 ConVar g_cvScoreboardTop;
 ConVar g_cvScoreboardInterval;
+// v1.13.6: 常驻左上 EMS 得分榜（替代聊天刷屏）
+ConVar g_cvScoreHudEnable;
+ConVar g_cvScoreHudInterval;
+ConVar g_cvScoreHudTop;
 ConVar g_cvRespawnEnable;      // v1.7.28
 ConVar g_cvRespawnBase;        // v1.7.28
 ConVar g_cvRespawnDelay;       // v1.7.28
@@ -900,6 +904,8 @@ ConVar g_cvStreakSnd6;
 // Global state
 // ============================================================================
 
+Handle    g_hScoreHudTimer;                           // v1.13.6: 常驻左上 EMS 得分榜刷新 timer
+bool      g_bScoreHudVScriptLoaded = false;            // VScript 是否已 IncludeScript("scoreboard")
 Handle    g_hHPHideTimer[MAXPLAYERS + 1];             // per-client HP/banner hide timer
 Handle    g_hStreakTimer[MAXPLAYERS + 1];            // per-client streak settle timer (v1.6.6)
 float     g_fLastKillSoundTime[MAXPLAYERS + 1];       // sound cooldown
@@ -922,11 +928,13 @@ char      g_sPrevCampaign[64];                        // 上一张图的战役�
 bool      g_bFreshMapStart;                           // OnMapStart 置 true，round_start 消费
 int       g_iSaveTotalScore[MAXPLAYERS + 1];
 int       g_iSaveSIKills[MAXPLAYERS + 1];
+int       g_iSaveCommonKills[MAXPLAYERS + 1];
 int       g_iSaveDeaths[MAXPLAYERS + 1];
 int       g_iSaveFFDamage[MAXPLAYERS + 1];
 int       g_iSaveBlacked[MAXPLAYERS + 1];
 int       g_iSaveWallet[MAXPLAYERS + 1];
 int       g_iSIKills[MAXPLAYERS + 1];                 // v1.7.7: session SI/Witch/Tank kills
+int       g_iCommonKills[MAXPLAYERS + 1];             // v1.13.6+: 小僵尸击杀（与特感分离，总击杀=特感+小僵）
 int       g_iDeaths[MAXPLAYERS + 1];                  // v1.7.7: survivor deaths
 int       g_iJoinCheckLeft[MAXPLAYERS + 1];           // v1.12.1: 入队即死兜底复活重试剩余次数（0=无检测）
 int       g_iFFDamage[MAXPLAYERS + 1];                // v1.7.7: friendly-fire damage dealt
@@ -1276,6 +1284,13 @@ public void OnPluginStart()
         "Scoreboard shows this many top entries, then a divider and your own score.", FCVAR_NOTIFY, true, 1.0, true, 24.0);
     g_cvScoreboardInterval = CreateConVar("si_hud_scoreboard_interval", "45.0",
         "Auto-broadcast the scoreboard to every survivor every N seconds (0=off).", FCVAR_NOTIFY, true, 0.0, true, 600.0);
+    // v1.13.6: 常驻左上 EMS 得分榜（替代聊天刷屏，上游已验证 bf_killfeed EMS 链路）
+    g_cvScoreHudEnable = CreateConVar("si_hud_score_hud_enable", "1",
+        "Enable persistent top-left EMS scoreboard HUD (updates every si_hud_score_hud_interval).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvScoreHudInterval = CreateConVar("si_hud_score_hud_interval", "1.0",
+        "Interval (sec) to refresh the EMS scoreboard HUD.", FCVAR_NOTIFY, true, 0.2, true, 10.0);
+    g_cvScoreHudTop = CreateConVar("si_hud_score_hud_top", "4",
+        "How many top entries to show in the EMS scoreboard HUD (excluding title/footer).", FCVAR_NOTIFY, true, 1.0, true, 5.0);
 
 
     // v1.7.28: respawn limit — 每图初始复活次数 + 复活秒数 + 总开关
@@ -1381,6 +1396,8 @@ public void OnPluginStart()
     // v1.7.6: periodic per-player broadcast (45s default; 0=off via cvar
     // check inside the callback; interval change needs plugin reload)
     CreateTimer(45.0, Timer_ScoreboardBroadcast, INVALID_HANDLE, TIMER_REPEAT);
+    // v1.13.6: 常驻左上 EMS 得分榜（1s 刷新，cvar 热控）
+    g_hScoreHudTimer = CreateTimer(1.0, Timer_ScoreHud, INVALID_HANDLE, TIMER_REPEAT);
 
     // v1.7.32d FIX: plugin reload 不触发 OnClientPutInServer —— 已在线的玩家
     // 复活次数/复活币/钱包全是 0（reload 清零副作用）。补全初始化：
@@ -1396,6 +1413,7 @@ public void OnPluginStart()
         g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
         g_iTotalScore[i] = 0;
         g_iSIKills[i] = 0;
+        g_iCommonKills[i] = 0;
         g_iDeaths[i] = 0;
         g_iFFDamage[i] = 0;
         g_iBlacked[i] = 0;
@@ -1425,6 +1443,9 @@ public void OnPluginEnd()
     // 必须先重新 Init（BuildPath 纯函数可重复调用）。
     ScoreSave_Init();
     ScoreSave_All();
+    // v1.13.6: 卸载时隐藏常驻 HUD
+    if (GetFeatureStatus(FeatureType_Native, "L4D2_ExecVScriptCode") == FeatureStatus_Available)
+        L4D2_ExecVScriptCode("SB_Hide()");
     // v1.9.2 复活 forward 句柄不手动销毁：include/ 被裁剪无 forward.inc
     // （DestroyForward 未定义），SM HandleSystem 在插件卸载时自动释放。
 }
@@ -1571,6 +1592,109 @@ public Action Cmd_Scoreboard(int client, int args)
     return Plugin_Handled;
 }
 
+// v1.13.6: 常驻左上 EMS 得分榜 — 1s 轮询，cvar 热控
+public Action Timer_ScoreHud(Handle timer)
+{
+    if (!g_cvEnable.BoolValue || !g_cvScoreHudEnable.BoolValue)
+    {
+        // 开关关闭时清空 HUD（防残留）
+        if (GetFeatureStatus(FeatureType_Native, "L4D2_ExecVScriptCode") == FeatureStatus_Available)
+            L4D2_ExecVScriptCode("SB_Hide()");
+        return Plugin_Continue;
+    }
+    UpdateScoreHud();
+    return Plugin_Continue;
+}
+
+public Action Timer_ScoreHud_Initial(Handle timer)
+{
+    UpdateScoreHud();
+    return Plugin_Stop;
+}
+
+void UpdateScoreHud()
+{
+    if (GetFeatureStatus(FeatureType_Native, "L4D2_ExecVScriptCode") != FeatureStatus_Available)
+        return;
+    // v1.13.6: 确保 VScript 已加载（热重载/中途安装时 coop.nut 未重载，SB_Set 不存在）
+    if (!g_bScoreHudVScriptLoaded)
+    {
+        L4D2_ExecVScriptCode("try{IncludeScript(\"scoreboard\")}catch(e){}");
+        g_bScoreHudVScriptLoaded = true;
+    }
+
+    // 收集并排序（复用 ShowScoreboardTo 逻辑，但取全队含 0分者按钱包兜底，HUD 始终有内容）
+    int count = 0;
+    int clients[MAXPLAYERS + 1];
+    int scores[MAXPLAYERS + 1];
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && GetClientTeam(i) == 2)
+        {
+            clients[count] = i;
+            scores[count] = g_iTotalScore[i];
+            count++;
+        }
+    }
+    if (count == 0)
+    {
+        L4D2_ExecVScriptCode("SB_SetSimple(\"[得分榜] 暂无数据\")");
+        return;
+    }
+    // 排序权重：积分 > 特感 > 击杀（总击杀=特感+小僵）
+    for (int i = 1; i < count; i++)
+    {
+        int ks = scores[i]; int kc = clients[i];
+        int kSI = g_iSIKills[kc];
+        int kKill = g_iSIKills[kc] + g_iCommonKills[kc];
+        int j = i - 1;
+        while (j >= 0)
+        {
+            int sScore = scores[j];
+            int sSI = g_iSIKills[clients[j]];
+            int sKill = g_iSIKills[clients[j]] + g_iCommonKills[clients[j]];
+            bool less = false;
+            if (sScore < ks) less = true;
+            else if (sScore == ks && sSI < kSI) less = true;
+            else if (sScore == ks && sSI == kSI && sKill < kKill) less = true;
+            if (!less) break;
+            scores[j+1] = scores[j]; clients[j+1] = clients[j]; j--;
+        }
+        scores[j+1]=ks; clients[j+1]=kc;
+    }
+    int top = g_cvScoreHudTop.IntValue;
+    if (top > count) top = count;
+    if (top > 5) top = 5; // EMS 单槽 127 字符限制，最多 5 行排名
+
+    char title[64]; Format(title, sizeof(title), "得分榜 TOP%d  积分>特感>击杀", top);
+    char l1[128] = "", l2[128] = "", l3[128] = "", l4[128] = "", l5[128] = "", foot[128] = "";
+
+    char name[32];
+    for (int k = 0; k < top; k++)
+    {
+        int c = clients[k];
+        GetClientName(c, name, sizeof(name));
+        for (int i = 0; name[i] != '\0'; i++) { if (name[i] < 0x20 || name[i] == '"' || name[i] == '\\') name[i] = '?'; }
+        if (strlen(name) > 8) name[8] = '\0';
+        int kills = g_iSIKills[c] + g_iCommonKills[c];
+        char line[128];
+        // 五属性：积分/特感/击杀(小僵+特感)/友伤/被黑，权重 积分>特感>击杀（用户定）——UI 用全称
+        Format(line, sizeof(line), "#%d %s %d分 特感%d 击杀%d 友伤%d 被黑%d", k+1, name, scores[k], g_iSIKills[c], kills, g_iFFDamage[c], g_iBlacked[c]);
+        if (k==0) strcopy(l1, sizeof(l1), line);
+        else if (k==1) strcopy(l2, sizeof(l2), line);
+        else if (k==2) strcopy(l3, sizeof(l3), line);
+        else if (k==3) strcopy(l4, sizeof(l4), line);
+        else if (k==4) strcopy(l5, sizeof(l5), line);
+    }
+    Format(foot, sizeof(foot), "共%d人 | !rank个人 !shop商店 %d分复活", count, g_cvReviveCost.IntValue);
+
+    // 转义单引号/双引号后拼 VScript 调用（用单引号包裹参数，外层双引号由 SM 串处理）
+    char code[512];
+    // 需转义内部双引号：已在 name 中替换为 ?，title/l* 无引号，可直接用双引号包裹
+    Format(code, sizeof(code), "SB_Set(\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\")", title, l1, l2, l3, l4, l5, foot);
+    L4D2_ExecVScriptCode(code);
+}
+
 void ShowScoreboardTo(int client)
 {
     int count = 0;
@@ -1588,7 +1712,6 @@ void ShowScoreboardTo(int client)
 
     if (count == 0)
     {
-        PrintToChat(client, "\x04[得分榜]\x01 还没有得分，杀点特感吧！");
         return;
     }
 
@@ -1714,6 +1837,13 @@ public void OnMapStart()
     // v1.7.30: 每图开始存档（用户："每一个Map开始时，要有一个存档"）——
     // 此时 OnMapEnd 已把本关积分清零，存档 = 开局 0 分状态；团灭重开回滚用
     SaveScoreState();
+
+    // v1.13.6: 常驻左上 EMS 得分榜 — 地图加载后 2s 刷新一次（VScript 已 IncludeScript，随 coop.nut 自动加载）
+    g_bScoreHudVScriptLoaded = false;
+    if (g_hScoreHudTimer == null)
+        g_hScoreHudTimer = CreateTimer(1.0, Timer_ScoreHud, INVALID_HANDLE, TIMER_REPEAT);
+    // 立即刷新一次，避免 1s 空窗
+    CreateTimer(2.0, Timer_ScoreHud_Initial, INVALID_HANDLE);
 }
 
 void SaveScoreState()
@@ -1722,6 +1852,7 @@ void SaveScoreState()
     {
         g_iSaveTotalScore[i] = g_iTotalScore[i];
         g_iSaveSIKills[i] = g_iSIKills[i];
+        g_iSaveCommonKills[i] = g_iCommonKills[i];
         g_iSaveDeaths[i] = g_iDeaths[i];
         g_iSaveFFDamage[i] = g_iFFDamage[i];
         g_iSaveBlacked[i] = g_iBlacked[i];
@@ -1735,6 +1866,7 @@ void RestoreScoreState()
     {
         g_iTotalScore[i] = g_iSaveTotalScore[i];
         g_iSIKills[i] = g_iSaveSIKills[i];
+        g_iCommonKills[i] = g_iSaveCommonKills[i];
         g_iDeaths[i] = g_iSaveDeaths[i];
         g_iFFDamage[i] = g_iSaveFFDamage[i];
         g_iBlacked[i] = g_iSaveBlacked[i];
@@ -1909,6 +2041,10 @@ public void OnMapEnd()
         g_bMapEndBroadcasted = true;
     }
 
+    // v1.13.6: 常驻 HUD 换图隐藏（防残留，新图由 scoreboard.nut 重建）
+    if (GetFeatureStatus(FeatureType_Native, "L4D2_ExecVScriptCode") == FeatureStatus_Available)
+        L4D2_ExecVScriptCode("SB_Hide()");
+    g_hScoreHudTimer = null;
     // HP hide timers are TIMER_FLAG_NO_MAPCHANGE — auto-cleaned on map end.
     // Clean up per-client AoE batch state and streak settle timers
     for (int i = 1; i <= MaxClients; i++)
@@ -1925,6 +2061,7 @@ public void OnMapEnd()
         g_iRevivesLeft[i] = 0;             // v1.7.28: 本图次数（OnMapStart 重置）
         KillRespawnTimer(i);               // v1.7.28
         g_iSIKills[i] = 0;                 // v1.7.7
+        g_iCommonKills[i] = 0;
         g_iDeaths[i] = 0;
         g_iFFDamage[i] = 0;
         g_iBlacked[i] = 0;
@@ -2029,6 +2166,7 @@ public void OnClientPutInServer(int client)
     g_iRevivesLeft[client] = g_cvRespawnBase.IntValue;
     g_iTotalScore[client] = 0;
     g_iSIKills[client] = 0;
+    g_iCommonKills[client] = 0;
     g_iDeaths[client] = 0;
     g_iFFDamage[client] = 0;
     g_iBlacked[client] = 0;
@@ -2071,6 +2209,7 @@ public void OnClientDisconnect(int client)
     g_iJoinCheckLeft[client] = 0;          // v1.12.1: 停止入队即死检测（userid 失效，timer 下次回调自停）
     KillRespawnTimer(client);              // v1.7.28
     g_iSIKills[client] = 0;                // v1.7.7
+    g_iCommonKills[client] = 0;
     g_iDeaths[client] = 0;
     g_iFFDamage[client] = 0;
     g_iBlacked[client] = 0;
@@ -2966,7 +3105,10 @@ void StackStreakKill(int client, int points, bool isCommon)
         g_iRescueStreak[client] = 0;     // v1.7.51: rescue count shares the window
     }
     if (isCommon)
+    {
         g_iCommonStreak[client]++;
+        g_iCommonKills[client]++;          // v1.13.6: 击杀=特感+小僵，小僵单独计数
+    }
     else
     {
         g_iKillStreak[client]++;

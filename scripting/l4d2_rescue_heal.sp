@@ -27,7 +27,7 @@ native int SH_AddWallet(int client, int amount);
 // v1.7: 递药改单向（用户 2026-08-16 定稿）——只有递药者 +3 实血，吃药者
 //   不再加血（与 v1.5 打包修改一致）；清理 Reward 的 toSubject 双向死分支
 
-#define PLUGIN_VERSION "1.7"
+#define PLUGIN_VERSION "1.8"
 
 ConVar g_hCvarEnable;
 ConVar g_hCvarIncap;
@@ -41,6 +41,7 @@ ConVar g_hCvarAnnounce;
 ConVar g_hCvarIncapScore;   // 拉起倒地队友积分
 ConVar g_hCvarMedkitScore;  // 给队友打包积分
 ConVar g_hCvarDefibScore;   // v1.6: 电击复活队友积分
+ConVar g_hCvarLedgeScore;   // v1.8: 挂边拉起积分
 
 // 状态镜像（0.2s 轮询），用于区分 revive_success 三种来源：挂边拉起 / 电击复活 / 救助倒地
 // L4D2 只有 revive_success 一个复活事件（无 defibrillated 事件），需靠事件前状态区分
@@ -60,6 +61,12 @@ int g_iPillGiverTime[MAXPLAYERS+1]; // 递药记录时间戳（5s 有效期，�
 // pills_used 时查 5s 内"失去药"的最近玩家 = 递药者（排除吃药者本人）
 int g_iPillSlotEnt[MAXPLAYERS + 1];   // [玩家] = health 槽当前 pills/adrenaline 实体（0=无）
 float g_fPillLostTime[MAXPLAYERS + 1]; // [玩家] = 上次实体消失时刻（0=未失去过）
+
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
+{
+    MarkNativeAsOptional("SH_AddWallet");
+    return APLRes_Success;
+}
 
 public Plugin myinfo =
 {
@@ -96,14 +103,17 @@ public void OnPluginStart()
     g_hCvarAnnounce = CreateConVar("l4d2_rescue_heal_announce", "1",
         "0=OFF, 1=ON. Announce reward in chat.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    // v1.5: 积分奖励（用户 2026-08-16 定稿：打包 800 / 拉起倒地 600）
-    g_hCvarIncapScore = CreateConVar("l4d2_rescue_heal_incap_score", "600",
+    // v1.5: 积分奖励（用户 2026-08-16 定稿：打包 800 / 拉起倒地 800）
+    g_hCvarIncapScore = CreateConVar("l4d2_rescue_heal_incap_score", "800",
         "Score (wallet) rewarded for reviving an incapped teammate (0=off).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
     g_hCvarMedkitScore = CreateConVar("l4d2_rescue_heal_medkit_score", "800",
         "Score (wallet) rewarded for healing a teammate with a medkit (0=off).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
-    // v1.6: 电击积分（用户 2026-08-16 定稿 1000——电击器最稀缺，奖励最高档）
-    g_hCvarDefibScore = CreateConVar("l4d2_rescue_heal_defib_score", "1000",
+    // v1.6: 电击积分（用户 2026-08-16 定稿 800）
+    g_hCvarDefibScore = CreateConVar("l4d2_rescue_heal_defib_score", "800",
         "Score (wallet) rewarded for defibrillating a teammate (0=off).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+    // v1.8: 挂边积分（用户 2026-08-22 定稿 500）
+    g_hCvarLedgeScore = CreateConVar("l4d2_rescue_heal_ledge_score", "500",
+        "Score (wallet) rewarded for pulling a teammate up from a ledge (0=off).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
 
     AutoExecConfig(true, "l4d2_rescue_heal");
 
@@ -208,6 +218,8 @@ void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
     if (ledge)
     {
         Reward(rescuer, g_hCvarLedge, "把挂边队友拉起来");
+        // v1.8: 挂边积分奖励（用户定稿 500）
+        ScoreReward(rescuer, g_hCvarLedgeScore, "把挂边队友拉起来");
     }
     else if (defib)
     {
@@ -228,6 +240,16 @@ void Event_HealSuccess(Event event, const char[] name, bool dontBroadcast)
     // 本版本 heal_success 无打包者字段，打包者由 L4D2_OnStartUseAction 记录
     int subject = GetClientOfUserId(event.GetInt("subject"));
     if (subject < 1 || subject > MaxClients) return;
+
+    // 加强：被打包者固定回满100实血（覆盖 first_aid_heal_percent 0.8 的80）
+    if( IsClientInGame(subject) && IsPlayerAlive(subject) )
+    {
+        int maxHP = g_hCvarMax.IntValue;
+        if( maxHP < 100 ) maxHP = 100;
+        SetEntProp(subject, Prop_Send, "m_iHealth", maxHP);
+        SetEntPropFloat(subject, Prop_Send, "m_healthBuffer", 0.0);
+        LogMessage("[RescueHeal] HealSuccess: subject %N fixed to %d HP", subject, maxHP);
+    }
 
     int healer = g_iMedkitHealer[subject];
     g_iMedkitHealer[subject] = 0;

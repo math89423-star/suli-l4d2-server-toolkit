@@ -109,9 +109,22 @@ stock bool BT_StuckDetour(int client) {
             // v5.26: 跳跃窗口内每决策帧注入 IN_JUMP——多帧跳跃才能翻过
             // 矮墙/瓦砾/铁丝网/几何缝（用户实测：特感卡地形不会跳）。
             // 单帧按键会被引擎吞（boomer_vomit_delay 0.1s 风阻同款教训）。
-            float jumpUntil = BB_GetFloat(client, "_stuck_jump_until", 0.0);
-            if (jumpUntil > now)
-                BT_AddButton(client, IN_JUMP);
+            // v5.37: Smoker 拉人/瞄准时不跳——m_tongueVictim>0 表示正在拖拽，
+            // 跳跃会断舌或观感"原地蹦"。同理 Hunter 扑击中不跳。
+            bool skipJump = false;
+            int zClass = GetEntProp(client, Prop_Send, "m_zombieClass");
+            if (zClass == 1) {  // Smoker
+                int victim = GetEntPropEnt(client, Prop_Send, "m_tongueVictim");
+                if (victim > 0) skipJump = true;
+            } else if (zClass == 3) {  // Hunter
+                int victim = GetEntPropEnt(client, Prop_Send, "m_pounceVictim");
+                if (victim > 0) skipJump = true;
+            }
+            if (!skipJump) {
+                float jumpUntil = BB_GetFloat(client, "_stuck_jump_until", 0.0);
+                if (jumpUntil > now)
+                    BT_AddButton(client, IN_JUMP);
+            }
             // 绕行中：绝对朝向（v5.6：原版每 tick 读当前朝向再 ±90° 叠加
             // → 上一帧的偏移被再次叠加，绕行方向旋转成圈/甩头）
             float yaw = BB_GetFloat(client, "_stuck_yaw", 0.0);

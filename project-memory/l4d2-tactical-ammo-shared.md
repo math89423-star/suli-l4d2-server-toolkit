@@ -135,7 +135,7 @@ metadata:
 - `OnEntityDestroyed` `sp:659` 精简仅 `g_iWeaponUnlock[ent]=0`，不再触碰已销毁实体，消除 `m_iGlowType not found` 刷屏。
 - `SwitchMode` 霰弹分支 `sp:437` 补 `Pre=0` 初始化。
 
-验证：`spcomp64` 0 error / 3 warning，产物 `20:38 md5 ed606250` → `20:45 md5 9221738e` 均 `sm plugins reload` 成功，`Timestamp 20:45:44 running`。
+验证：`spcomp64` 0 error / 3 warning，产物 `20:38 md5 ed606250` → `20:45 md5 9221738e` → `21:09 Hash 6eed0cbb`（泵/连喷区分）均 `sm plugins reload` 成功。
 
 ## 2026-08-23 霰弹逐发UI与步枪二次重装补充修复
 
@@ -143,6 +143,16 @@ metadata:
 
 **根因**：见上3；霰弹自增与引擎双增叠加导致跳变，步枪首发普通需等 `0.3s HUD` 才纠正。
 
-**修复**：同上空闲即时纠正 + 霰弹引擎驱动，均为 `20:45` 热更一并部署。
+**修复**：同上空闲即时纠正 + 霰弹引擎驱动，`21:09` 热更 `isPump=(pumpshotgun||shotgun_chrome)` 区分泵喷逐发 `Pre+1/0.5s` 与连喷批量。
+
+## 2026-08-23 普通枪捡高爆/燃烧不解锁及备弹不回满修复
+
+**现象**：`20:50` 后普通枪（步枪/SMG）拾 `upgrade_ammo` 弹堆不解锁；已解锁后拾 `ammo` 弹药堆备弹不回满。
+
+**根因**：`EnsurePool:92` `L4D2_GetIntWeaponAttribute` 对无效 `wcls`（如近战切枪时空字串）抛 `Invalid weapon classname` 中断，`Event_Fire:242` 每发触发致 `Verify` 全失败；`EnsurePool:105` `m_iPrimaryAmmoType -1` 时 `GetEntProp m_iAmmo[-1]` 越界；`Timer_SyncAmmo:229` 对已解锁武器仅 `total=reserve+cur`，`reserve` 为引擎刚设的最大但被 `Timer_HUD 0.3s` `total-cur` 覆盖，且正常最大值回退缺失。
+
+**修复** `21:24 Hash e42993`：`EnsurePool:92` 前 `L4D2_IsValidWeapon` 守卫 `GetInt/FloatWeaponAttribute` `sp:92/210/407/614/873`；`sp:106` 增 `if(at<0||at>=32) return`；`Timer_SyncAmmo:229` 对 `b!=0` 已解锁武器按 `wcls` 回退 `shotgun 72/rifle 360/sniper 180/smg 650/m60 150` 取 `maxReserve`，`total=maxReserve+cur` 并 `Set m_iAmmo maxReserve` 双定时 `0.1s+0.25s` 抗HUD覆盖；`Event_Use:168` 弹药堆双定时。
+
+验证：`spcomp64 3 warning` `21:24:08` 热更成功，`errors_20260823.log` `20:56:02` 后无新增 `Invalid/-1`。
 
 相关：[[l4d2-loot-drop-v180]]（弹药包掉落源） [[l4d2-shop-decoupled]]/[[l4d2-shop-default-prices]]（商店弹药包） [[l4d2-weapon-attributes]]（ClipSize来源） [[l4d2-gl-splash-fix]]/[[l4d2-can-full-damage]]（自伤绕过FF思路）

@@ -66,10 +66,31 @@ Action Timer_BoostHeal(Handle timer, int userid)
     if (!IsPlayerAlive(client) || GetClientTeam(client) != 2)
         return Plugin_Stop;
 
-    float healAmount = g_cvHealAmount.FloatValue;
+    int curHP = GetClientHealth(client);
+    float curBuf = L4D_GetTempHealth(client);
+    int curBufInt = RoundToNearest(curBuf);
+    int add = RoundToNearest(g_cvHealAmount.FloatValue);
+    int newBuf = curBufInt + add;
+    if( curHP + newBuf > 100 ) newBuf = 100 - curHP;
+    if( newBuf < 0 ) newBuf = 0;
+    if( newBuf > 100 ) newBuf = 100;
+    L4D_SetTempHealth(client, float(newBuf));
+    LogMessage("[Pills] %N curHP %d curBuf %.1f add %d newBuf %d total %d", client, curHP, curBuf, add, newBuf, curHP+newBuf);
+    DataPack dp = new DataPack();
+    dp.WriteCell(GetClientUserId(client));
+    dp.WriteCell(newBuf);
+    CreateTimer(0.2, Timer_CheckHealth, dp, TIMER_FLAG_NO_MAPCHANGE);
+}
 
-    // 直接设置临时生命值为目标值（原版50 + 插件额外补到80）
-    L4D_SetTempHealth(client, healAmount);
-
+Action Timer_CheckHealth(Handle timer, DataPack dp)
+{
+    dp.Reset();
+    int client = GetClientOfUserId(dp.ReadCell());
+    int want = dp.ReadCell();
+    delete dp;
+    if( client <1 || !IsClientInGame(client) ) return Plugin_Stop;
+    int curHP = GetClientHealth(client);
+    float curBuf = L4D_GetTempHealth(client);
+    LogMessage("[Pills-Check] %N after 0.2s curHP %d curBuf %.1f total %.1f want %d", client, curHP, curBuf, curHP+curBuf, want);
     return Plugin_Stop;
 }

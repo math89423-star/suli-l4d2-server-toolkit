@@ -1,0 +1,90 @@
+"Games"
+{
+	"left4dead2"
+	{
+		// =====================================================================
+		// Suli Dual ViewModel Probe - gamedata
+		// =====================================================================
+		//
+		// 目标函数: CCSPlayer::CreateViewModel(int)
+		//
+		// 这个函数在 CCSPlayer vtable 中是一个 virtual function。
+		// Virtual index 需要通过分析 server_srv.so 确认。
+		//
+		// 当前值是通过二进制分析得到的初始猜测值。
+		// 如果 SDKCall 失败，需要调整 "CreateViewModel" 的 virtual index。
+		//
+		// 分析方法:
+		//   1. nm -C server_srv.so | grep CreateViewModel
+		//      → CCSPlayer::CreateViewModel(int) @ 0x00642b30
+		//      → CBasePlayer::CreateViewModel(int) @ 0x0079c4d0
+		//
+		//   2. 在 vtable 中搜索 0x00642b30 的 32 位引用
+		//   3. 计算相对 vtable 起始的 index
+		//
+		// 参考: AlliedModders Thread #340151 "L4DViewmodels" by foxhound27
+		//       https://forums.alliedmods.net/showthread.php?t=340151
+		//
+		"Offsets"
+		{
+			// CCSPlayer::CreateViewModel(int) virtual index in CCSPlayer vtable
+			//
+			// 初始值 0 — 探测插件会自动扫描找到正确值
+			// 一旦确定，固定在此处
+			//
+			// 注意: Linux 和 Windows 的 virtual index 可能不同
+			//       SourceMod 的 PrepSDKCall_SetVirtual 使用的是
+			//       entity dispatch vtable，不一定与 binary vtable 一致
+			//
+			"CreateViewModel"
+			{
+				"linux"		"0"
+				"windows"	"0"
+			}
+
+			// CBasePlayer::m_hViewModel 的 SendProp offset
+			// 用于验证 vtable offset 是否正确
+			// 这个值通过 GetSendPropOffset("CBasePlayer", "m_hViewModel") 获取
+			//
+			// 但这个 offset 是 per-array-element 的偏移
+			// m_hViewModel 是一个 m_hViewModel[2] 数组
+			// [0] = 主要 viewmodel (玩家当前持有的武器)
+			// [1] = 第二个 viewmodel (CreateViewModel(1) 创建的)
+			//
+			"m_hViewModel"
+			{
+				"linux"		"0"
+				"windows"	"0"
+			}
+		}
+
+		// =====================================================================
+		// Signatures (备用方案)
+		// =====================================================================
+		//
+		// 如果 virtual offset 方法失败，可以尝试直接 signature scan
+		//
+		"Signatures"
+		{
+			// CCSPlayer::CreateViewModel(int) 的函数签名
+			// 这是从 server_srv.so 反汇编得到的:
+			//   642b30: push %ebp
+			//   642b31: mov %esp,%ebp
+			//   642b33: push %edi
+			//   642b36: sub $0x2c,%esp
+			//   642b39: mov 0x8(%ebp),%ebx
+			//   642b3f: mov %ebx,(%esp)
+			//   642b42: mov %esi,0x4(%esp)
+			//   642b46: call CBasePlayer::GetViewModel(int)
+			//
+			// Windows signature (待确认):
+			"CCSPlayer::CreateViewModel"
+			{
+				"library"	"server"
+				"linux"		"@_ZN9CCSPlayer15CreateViewModelEi"
+				"windows"	"\x55\x8B\xEC\x83\xEC\x2A\xA1\x2A\x2A\x2A\x2A\x33\xC5\x89\x45\x2A\x56\x8B\xF1\x8B\x46\x2A\x85\xC0\x74"
+				/* 55 8B EC 83 EC ? A1 ? ? ? ? 33 C5 89 45 ? 56 8B F1 8B 46 ? 85 C0 74 */
+			}
+		}
+	}
+}

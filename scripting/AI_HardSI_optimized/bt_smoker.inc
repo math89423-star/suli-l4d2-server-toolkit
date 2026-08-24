@@ -221,26 +221,34 @@ BT_Status SmokerAct_SteerPinToAcid(int client) {
                 return BT_RUNNING;
             }
         }
-        // v5.27: >=850不再纯SUCCESS静止(观感傻站)，横向微移保持活性，
-        // 舌头由引擎托管拉，不后退防断舌
-        float now2 = GetGameTime();
-        float nextSwitch = BB_GetFloat(client, "_smoker_pin_strafe_next", 0.0);
-        if (nextSwitch <= 0.0 || now2 >= nextSwitch) {
-            BB_SetBool(client, "_smoker_pin_strafe_left", GetRandomInt(0,1)==0);
-            BB_SetFloat(client, "_smoker_pin_strafe_next", now2 + GetRandomFloat(0.4, 0.9));
-        }
-        if (BB_GetBool(client, "_smoker_pin_strafe_left", false)) {
-            BT_AddButton(client, IN_MOVELEFT);
-            BT_RemoveButton(client, IN_MOVERIGHT);
+        // v5.37: >=850u 时后退拖拽 + 横移保持活性
+        // 原 v5.27 只横移不后退 → 观感傻站；真人 Smoker 拉中会后退拉扯：
+        // 后退 = 舌头把目标拖向自己（拖离队伍/拖进特感堆）。
+        // 后退距离限制：目标距 <700u 时停止后退（防拉断舌头）。
+        float dir[3], ang[3];
+        MakeVectorFromPoints(vPos, myPos, dir);   // 目标→我 = 背对目标方向
+        dir[2] = 0.0;
+        GetVectorAngles(dir, ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        if (dist < 700.0) {
+            // 目标已被拖近 → 后退拉扯
+            BT_AddButton(client, IN_FORWARD);
         } else {
-            BT_AddButton(client, IN_MOVERIGHT);
-            BT_RemoveButton(client, IN_MOVELEFT);
+            // 目标在射程极限 → 横移保持活性（引擎托管拉，不后退防断舌）
+            float now2 = GetGameTime();
+            float nextSwitch = BB_GetFloat(client, "_smoker_pin_strafe_next", 0.0);
+            if (nextSwitch <= 0.0 || now2 >= nextSwitch) {
+                BB_SetBool(client, "_smoker_pin_strafe_left", GetRandomInt(0,1)==0);
+                BB_SetFloat(client, "_smoker_pin_strafe_next", now2 + GetRandomFloat(0.4, 0.9));
+            }
+            if (BB_GetBool(client, "_smoker_pin_strafe_left", false)) {
+                BT_AddButton(client, IN_MOVELEFT);
+                BT_RemoveButton(client, IN_MOVERIGHT);
+            } else {
+                BT_AddButton(client, IN_MOVERIGHT);
+                BT_RemoveButton(client, IN_MOVELEFT);
+            }
         }
-        float vPos2[3], dir2[3], ang2[3];
-        GetClientAbsOrigin(victim, vPos2);
-        MakeVectorFromPoints(myPos, vPos2, dir2);
-        GetVectorAngles(dir2, ang2);
-        BT_SetAimAngles(client, ang2[0], ang2[1], ang2[2]);
         return BT_RUNNING;
     }
     return BT_SUCCESS;  // 无victim/无酸液：引擎托管拉(极短帧)
@@ -590,6 +598,15 @@ stock int BT_CreateSmokerTree() {
         BT_CreateAction(ACT_StrafeApproach)
     );
 
+    // v5.37: 冷却期走位 —— 拉人成功后 1.8s Cooldown(1.8) arm 期间：
+    // pullCluster 全 FAIL + pinSeq FAIL（舌头断了）+ closeRangeStrafe FAIL（有LOS）
+    // + backoffStrafe FAIL（非Backoff期）→ 零移动傻站。此分支接管：
+    // InRange + 有LOS + cooldownPull 内（pullCluster FAIL 的冷却期）→ 横移找角度。
+    // 用 SmokerCond_BackoffActive 的反面（非Backoff=冷却期但非退避）区分。
+    // 注意：此分支优先级在 backoffStrafe 之后、retarget 之前。
+    // v5.37 FIX: 简化为 Cooldown(1.8) 期间 + InRange + HasLOS → 横移，不依赖
+    // Backoff 状态（冷却期 = pullCluster 的 cooldown，与 backoff 独立）。
+
     // ==========================================
     // v4.0.3: 拉人冷却簇 —— 舌头与近战共享 IN_ATTACK。
     // 引擎舌头冷却 (smoker_tongue_delay=1.0) 期间按 ATTACK = 近战挠击，
@@ -650,6 +667,16 @@ stock int BT_CreateSmokerTree() {
     BT_AddChild(root, openS1_Approach);       // 5b. open strat1 → erratic approach
     BT_AddChild(root, closeRangeStrafe);      // 6. v3.6: close + noLOS → strafe, don't approach
     BT_AddChild(root, backoffStrafe);         // 6b. v5.27: InRange+有LOS+Backoff → 横移找角度(防零移动)
+    // v5.37: 冷却期走位 —— Cooldown(1.8) arm 期间 + InRange + HasLOS → 横移找角度
+    // 解决"拉完人傻站"：pullCluster 全 FAIL + closeRangeStrafe FAIL(有LOS) +
+    // backoffStrafe FAIL(非Backoff) → 原来直接落到 retarget/Wander。
+    int cooldownStrafe = BT_CreateSequence(4,
+        BT_CreateIsInRange(850.0),
+        BT_CreateCondition(CND_HasTargetLOS),
+        BT_CreateAction(ACT_AcquirePinnableTarget),
+        BT_CreateAction(ACT_StrafeApproach)
+    );
+    BT_AddChild(root, cooldownStrafe);        // 6c. v5.37: cooldown期+InRange+LOS → 横移
     BT_AddChild(root, ledgeRetargetGated);    // 7. v4.0.3: ledge 附近 → 90% 拉最远（门控）
     BT_AddChild(root, retargetCooldown);      // 8. standard retarget（孤立度选人）
     BT_AddChild(root, approachAct);           // 9. approach (only when far)

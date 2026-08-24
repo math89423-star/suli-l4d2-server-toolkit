@@ -41,6 +41,11 @@
 // v2.7.1: 出生点nav校验 + 放宽主路径（用户拍板 1+2 合并）——
 //   · 主路径 TANK_SPAWN_MIN_DIST 800→700 + SAMPLES 20→40（室内段800+LOS 0%成功→100% fallback）
 //   · 全链路 IsNavReachable：主路径/fallback/重定位LOS后加 nav可达性，过滤Z=-2879虚空非nav点被导演秒删
+// v2.7.6: 修复 Tank 偶尔刷新到地面之下的 bug ——
+//   · 新增 FindGroundAbove：从候选点上方150u向下trace1500u找实际地面（+5u防z-fighting），
+//     解决 L4D_GetRandomPZSpawnPosition 返回的Z坐标偶尔低于可行走平面的问题
+//   · ValidateTankSpawnPoint 地面检测范围 120u→300u，覆盖更大几何间距
+//   · 三条生成路径（主/fallback/紧急兜底）均在生成前调用 FindGroundAbove 做二次校正
 #pragma semicolon 1
 #pragma newdecls required
 
@@ -48,7 +53,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.7.2"
+#define PLUGIN_VERSION "2.7.6"
 
 // 配置常量
 #define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
@@ -90,6 +95,7 @@ int g_iTanks[MAX_TRACKED_TANKS];    // 当前 Tank 波生成的 Tank client 索�
 int g_iTankCount = 0;               // 当前活跃 Tank 数量
 Handle g_hTankMonitor = null;       // Tank 状态监控定时器
 ConVar g_hCvarRestScale = null;     // v2.5.0: Tank 波前冷静期倍率
+ConVar g_hCvarFrontrunner = null; // v2.7.5: Tank 瞄领跑者开关
 // v2.6.0: 卡住看护状态（与 g_iTanks 同下标）
 float g_fTankLastPos[MAX_TRACKED_TANKS][3];   // 上次监控位置
 int   g_iTankStuckChecks[MAX_TRACKED_TANKS];  // 连续"没动"检查计数
@@ -114,6 +120,10 @@ public void OnPluginStart() {
     g_hCvarRestScale = CreateConVar("tank_wave_rest_scale", "1.5",
         "Tank 波前冷静期倍率（ss_rest_min/max 基准 × 本值；1.0 = 不放大）",
         FCVAR_NONE, true, 1.0, true, 3.0);
+    // v2.7.5: Tank 瞄领跑者（单独路径：以 flow 最高幸存者为参照采样，压力给到最前）
+    g_hCvarFrontrunner = CreateConVar("tank_spawn_frontrunner", "1",
+        "Tank 刷新瞄领跑者：1=以 flow 领跑者为参照采样（单独路径）| 0=任意生还者（旧逻辑）",
+        FCVAR_NONE, true, 0.0, true, 1.0);
 
     LogMessage("[Tank Mutator] Plugin loaded. Mutation: %.0f%%, Force: %d waves, Cooldown: %d waves",
                MUTATION_CHANCE * 100.0, FORCE_TANK_WAVES, TANK_COOLDOWN_WAVES);
@@ -297,9 +307,38 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
     ClearTankTracking();
 
     int spawned = 0;
+    // v2.7.5: 队首/队尾单独路径（单Tank瞄领跑者，双Tank一首一尾夹击前后）
+    bool useFront = (g_hCvarFrontrunner != null && g_hCvarFrontrunner.BoolValue);
+    int frontClient = -1, tailClient = -1;
+    if (useFront) {
+        frontClient = GetFrontrunner();
+        if (tankCount == 2) tailClient = GetTailRunner();
+        if (frontClient > 0) LogMessage("[Tank Mutator] Frontrunner path: front=%N flow=%.0f %s", frontClient, L4D2Direct_GetFlowDistance(frontClient), (tailClient>0? "tail assigned":""));
+        if (tailClient > 0) LogMessage("[Tank Mutator] Tail path: tail=%N flow=%.0f", tailClient, L4D2Direct_GetFlowDistance(tailClient));
+    }
     for (int n = 0; n < tankCount && spawned < MAX_TRACKED_TANKS; n++) {
-        // 每只 Tank 独立找参考幸存者
-        int client = GetAnyAliveSurvivor();
+        int client = -1;
+        if (useFront) {
+            if (tankCount == 2) {
+                // 双Tank：0→队首，1→队尾（前后夹击）
+                int want = (n == 0) ? frontClient : tailClient;
+                if (want > 0 && IsClientInGame(want) && IsPlayerAlive(want) && !GetEntProp(want, Prop_Send, "m_isIncapacitated"))
+                    client = want;
+                else
+                    client = (want == frontClient) ? tailClient : frontClient;
+                if (client <= 0 || !IsClientInGame(client) || !IsPlayerAlive(client))
+                    client = GetAnyAliveSurvivor();
+                LogMessage("[Tank Mutator] Tank #%d ref %s %N", n+1, (n==0?"front":"tail"), client);
+            } else {
+                // 单Tank：瞄领跑者
+                if (frontClient > 0 && IsClientInGame(frontClient) && IsPlayerAlive(frontClient))
+                    client = frontClient;
+                else
+                    client = GetAnyAliveSurvivor();
+            }
+        } else {
+            client = GetAnyAliveSurvivor();
+        }
         if (client <= 0) {
             LogMessage("[Tank Mutator] Tank spawn failed: no alive survivor found");
             break;
@@ -345,7 +384,8 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
                 continue;
 
             // 三角形夹角：两只相对玩家 60°-120°（水平面；同侧推进不包夹）
-            if (hasBuddy) {
+            // v2.7.5: 队首/队尾双Tank时禁用三角约束（前后夹击天然 180°，会误判为包夹）
+            if (hasBuddy && !(useFront && tankCount == 2)) {
                 float d1x = buddyPos[0] - refPos[0];
                 float d1y = buddyPos[1] - refPos[1];
                 float d2x = candidate[0] - refPos[0];
@@ -392,11 +432,48 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
                 }
             } else {
                 LogMessage("[Tank Mutator] Tank #%d fallback failed: no ground point front/back", n + 1);
+                // v2.7.3 紧急兜底：fallback 全灭时用 Director 任意 PZ 点必刷
+                // v2.7.4 加 400u 防贴脸：3次重抽 ≥400u，仍无则放行贴脸（保必刷）
+                float emergPos[3] = {0.0,0.0,0.0}; bool emergOk = false;
+                float cposTmp[3]; GetClientAbsOrigin(client, cposTmp);
+                for (int eTry=0; eTry<3; eTry++) {
+                    float tmpPos[3];
+                    if (!L4D_GetRandomPZSpawnPosition(client, 8, 5, tmpPos)) break;
+                    emergPos[0]=tmpPos[0]; emergPos[1]=tmpPos[1]; emergPos[2]=tmpPos[2];
+                    if (GetVectorDistance(emergPos, cposTmp) < 400.0) {
+                        emergOk = false;
+                        continue;
+                    }
+                    emergOk = true;
+                    break;
+                }
+                // 3次均 <400u 仍放行最后一次的 emergPos（保必刷）
+                if (!emergOk && emergPos[0]==0.0 && emergPos[1]==0.0 && emergPos[2]==0.0) {
+                    L4D_GetRandomPZSpawnPosition(client, 8, 5, emergPos);
+                }
+                if (emergPos[0]!=0.0 || emergPos[1]!=0.0 || emergPos[2]!=0.0) {
+                    // v2.7.6: 紧急兜底也做地面校正
+                    FindGroundAbove(emergPos, emergPos);
+                    int tank2 = L4D2_SpawnTank(emergPos, spawnAng);
+                    if (tank2 > 0 && IsClientInGame(tank2)) {
+                        g_iTanks[spawned] = tank2;
+                        GetClientAbsOrigin(tank2, g_fTankLastPos[spawned]);
+                        g_iTankStuckChecks[spawned] = 0;
+                        spawned++;
+                        LogMessage("[Tank Mutator] Tank #%d EMERGENCY spawned at (%.1f, %.1f, %.1f) dist=%.0f, client: %d", n+1, emergPos[0], emergPos[1], emergPos[2], GetVectorDistance(emergPos, cposTmp), tank2);
+                    } else {
+                        LogMessage("[Tank Mutator] Tank #%d emergency spawn failed: invalid entity", n+1);
+                    }
+                } else {
+                    LogMessage("[Tank Mutator] Tank #%d emergency spawn failed: no PZ position", n+1);
+                }
             }
             continue;
         }
 
         spawnPos[0] = bestPos[0]; spawnPos[1] = bestPos[1]; spawnPos[2] = bestPos[2];
+        // v2.7.6: 二次地面校正，防止引擎返回的坐标略低于地面导致 Tank 刷地底
+        FindGroundAbove(spawnPos, spawnPos);
 
         // 直接生成 Tank
         int tank = L4D2_SpawnTank(spawnPos, spawnAng);
@@ -690,6 +767,27 @@ bool IsNavReachable(float from[3], float to[3]) {
     return d >= 0.0;
 }
 
+// v2.7.6: 从 pos 上方 SAFE_HEIGHT 向下 trace 找实际地面，返回修正后的地面坐标。
+// 解决 L4D_GetRandomPZSpawnPosition 偶尔返回地面下坐标导致 Tank 刷地底的 bug。
+#define FIND_GROUND_SAFE_HEIGHT 150.0
+#define FIND_GROUND_TRACE_DIST  1500.0
+bool FindGroundAbove(float pos[3], float outPos[3]) {
+	float start[3];
+	start[0] = pos[0]; start[1] = pos[1]; start[2] = pos[2] + FIND_GROUND_SAFE_HEIGHT;
+	float end[3];
+	end[0] = pos[0]; end[1] = pos[1]; end[2] = pos[2] - FIND_GROUND_TRACE_DIST;
+	TR_TraceRayFilter(start, end, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
+	if (TR_GetFraction() > 0.0 && TR_GetFraction() < 1.0) {
+		float hitPos[3];
+		TR_GetEndPosition(hitPos);
+		outPos[0] = hitPos[0]; outPos[1] = hitPos[1]; outPos[2] = hitPos[2] + 5.0;
+		return true;
+	}
+	// 地面不可达（极罕见），原样返回
+	outPos[0] = pos[0]; outPos[1] = pos[1]; outPos[2] = pos[2];
+	return false;
+}
+
 bool ValidateTankSpawnPoint(float pos[3]) {
     // 1) 头顶空间检查：从 pos 向上 trace，确认有 ≥72u 净空
     float upEnd[3];
@@ -699,9 +797,9 @@ bool ValidateTankSpawnPoint(float pos[3]) {
         return false;
     }
 
-    // 2) 脚下地面检查：从 pos 向下 trace，确认有地面
+    // 2) 脚下地面检查：从 pos 向下 trace 300u，确认有地面（v2.7.6: 120→300 覆盖更大几何间距）
     float downEnd[3];
-    downEnd[0] = pos[0]; downEnd[1] = pos[1]; downEnd[2] = pos[2] - 120.0;
+    downEnd[0] = pos[0]; downEnd[1] = pos[1]; downEnd[2] = pos[2] - 300.0;
     TR_TraceRayFilter(pos, downEnd, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
     if (TR_GetFraction() >= 1.0) {
         return false;
@@ -798,7 +896,10 @@ bool SpawnTankFallback(int n, float spawnPos[3]) {
             end[0] = start[0]; end[1] = start[1]; end[2] = start[2] - 3000.0;
             TR_TraceRayFilter(start, end, MASK_SOLID, RayType_EndPoint, TraceFilter_World);
             if (TR_GetFraction() > 0.0 && TR_GetFraction() < 1.0) {
-                TR_GetEndPosition(spawnPos);
+                // v2.7.6: 用 FindGroundAbove 替代 TR_GetEndPosition，防止多层几何打到错误平面
+                float traceHit[3];
+                TR_GetEndPosition(traceHit);
+                FindGroundAbove(traceHit, spawnPos);
                 if (pass == 0) {
                     // 第一段：hull+nav 精选（防悬空/非nav被导演秒删）
                     if (ValidateTankSpawnPoint(spawnPos) && IsNavReachable(spawnPos, center))
@@ -838,6 +939,44 @@ int GetAnyAliveSurvivor() {
         }
     }
     return -1;
+}
+
+// v2.7.5: 领跑者（flow 最大且存活），沿用 specialspawner 领跑者定义
+int GetFrontrunner() {
+    int best = -1;
+    float bestFlow = -999999.0;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsClientInGame(i) || GetClientTeam(i) != 2 || !IsPlayerAlive(i)) continue;
+        // 倒地者不参与领跑者判定（specialspawner 同口径：IsPlayerAlive 对倒地 true，但领跑需站立）
+        if (GetEntProp(i, Prop_Send, "m_isIncapacitated")) continue;
+        float flow = L4D2Direct_GetFlowDistance(i);
+        if (flow == -9999.0 || flow == 0.0) continue;
+        if (flow > bestFlow) {
+            bestFlow = flow;
+            best = i;
+        }
+    }
+    if (best > 0) return best;
+    // 无站立领跑者（全倒/无 flow）回退到任意存活
+    return GetAnyAliveSurvivor();
+}
+
+// v2.7.5: 队尾（flow 最小且存活），双Tank时后置坦克锚点
+int GetTailRunner() {
+    int best = -1;
+    float bestFlow = 999999.0;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsClientInGame(i) || GetClientTeam(i) != 2 || !IsPlayerAlive(i)) continue;
+        if (GetEntProp(i, Prop_Send, "m_isIncapacitated")) continue;
+        float flow = L4D2Direct_GetFlowDistance(i);
+        if (flow == -9999.0 || flow == 0.0) continue;
+        if (flow < bestFlow) {
+            bestFlow = flow;
+            best = i;
+        }
+    }
+    if (best > 0) return best;
+    return GetAnyAliveSurvivor();
 }
 
 bool IsTank(int client) {
