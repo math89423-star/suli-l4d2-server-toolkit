@@ -60,7 +60,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.7.9"
+#define PLUGIN_VERSION "2.7.10"
 
 // 配置常量
 #define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
@@ -741,6 +741,13 @@ void RelocateStuckTank(int tank) {
         }
     }
 
+    if (bestDist < 0.0) {
+        // v2.7.10 终极兜底: 引擎原生"卡死传送"——挑最近有效 nav 落点,
+        // 地形再刁钻也保证 Tank 回到可行走网格(用户: "被地形卡住后没有办法")
+        LogMessage("[Tank Mutator] Stuck tank %d: all samples failed -> WarpToValidPosition", tank);
+        L4D_WarpToValidPositionIfStuck(tank);
+        return;
+    }
     if (bestDist < 0.0) {
         // v2.6.2: LOS 采样无解 → 随机方向 700u 地面点（用户否决"玩家正前方
         // 500u 糊脸"方案——随机方向大多数时候不在玩家眼前，距离也拉开些）

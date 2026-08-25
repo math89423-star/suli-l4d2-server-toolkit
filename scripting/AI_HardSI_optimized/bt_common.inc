@@ -188,7 +188,11 @@ stock bool BT_StuckDetour(int client) {
                 BB_SetInt(client, "_stuck_rounds", 0);
                 jumpTime = STUCK_JUMP_TIME_LONG;
             }
-            BB_SetFloat(client, "_stuck_jump_until", now + jumpTime);
+            // v5.44: Smoker 舌攻保护窗(8s)——攻击后的静止是合法状态,
+            // 注入原地跳观感极差; 绕行照常, 只豁免跳跃
+            float lastTongue = BB_GetFloat(client, "_last_tongue_action", -999.0);
+            if (now - lastTongue > 8.0)
+                BB_SetFloat(client, "_stuck_jump_until", now + jumpTime);
         } else {
             BB_SetBool(client, "_stuck_detour", false);
             BB_SetInt(client, "_stuck_rounds", 0);

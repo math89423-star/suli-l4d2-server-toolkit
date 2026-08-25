@@ -319,6 +319,10 @@ BT_Status SmokerAct_TryTongue(int client) {
         SI_AbilitySetState(client, "_smoker", ABILITY_TRYING);
         tryAt = now;
         BB_SetBool(client, "_smoker_tongue_trying", true);   // v5.39: 进入视角保真窗口
+        // v5.44: 舌攻动作时间戳——bt_common 卡死检测在攻击后静止期
+        // (弹道+收舌+失手退避)会误判"停滞"注入原地跳, 观感极差。
+        // 8s 覆盖发射+回收+miss_delay(7s) 全周期, 期间只允许绕行不允许跳。
+        BB_SetFloat(client, "_last_tongue_action", now);
     }
 
     // --- v5.33: 用锁定目标瞄准（不再读 BB target，防止 Sequence 重评换人）---
