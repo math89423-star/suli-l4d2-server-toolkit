@@ -936,7 +936,9 @@ Action CmdObjAim(int client, int args)
 	GetClientEyeAngles(client, ang);
 	GetAngleVectors(ang, dir, NULL_VECTOR, NULL_VECTOR);
 	float end[3];
-	for (int k = 0; k < 3; k++) end[k] = eye[k] + dir[k] * 3000.0;
+	GetAngleVectors(ang, dir, NULL_VECTOR, NULL_VECTOR);
+	// v0.9.4: 起点前移 16u 彻底逃离自身碰撞体
+	for (int k = 0; k < 3; k++) { eye[k] += dir[k] * 16.0; end[k] = eye[k] + dir[k] * 3000.0; }
 
 	// v0.9.3: 忽略所有玩家(含自己)——否则起射线先打中自己的碰撞体
 	TR_TraceRayFilter(eye, end, MASK_SOLID, RayType_EndPoint, TraceFilterIgnorePlayers);
@@ -959,8 +961,9 @@ Action CmdObjAim(int client, int args)
 		GetEntPropString(ent, Prop_Data, "m_ModelName", mdl, sizeof(mdl));
 	float c[3];
 	EntityCenter(ent, c);
-	PrintToChat(client, "[OBJ] ent=%d class=\x05%s\x01 name=\x05%s\x01", ent, cn, tn);
-	PrintToChat(client, "[OBJ] pos=(\x05%.0f %.0f %.0f\x01) model=%.70s", c[0], c[1], c[2], mdl);
+	// v0.9.4: 纯文本输出(颜色码会毁掉聊天复制粘贴), 全量同步服务器日志
+	PrintToChat(client, "[OBJ] ent=%d class=%s name=%s", ent, cn, tn);
+	PrintToChat(client, "[OBJ] pos=%.0f %.0f %.0f model=%s", c[0], c[1], c[2], mdl);
 	LogMessage("[PTGOBJ] aim: ent=%d class=%s name=%s pos=(%.0f %.0f %.0f) model=%s", ent, cn, tn, c[0], c[1], c[2], mdl);
 	return Plugin_Handled;
 }
