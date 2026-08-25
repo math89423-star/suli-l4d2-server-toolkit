@@ -33,6 +33,7 @@
 #include <sourcemod>
 #include <sdktools>
 #include <sdktools_entinput>
+#include <sdkhooks>
 #include <left4dhooks>
 
 #define PLUGIN_VERSION  "0.9 2026-08-25"
@@ -98,7 +99,6 @@ bool   g_bHLReady;
 #define HL_CFG_PATH   "configs/ptg_objectives_hl.cfg"
 ArrayList g_iGlowEnts;    // 已施加发光的实体引用(撤销用)
 int      g_iGlowCount;
-bool     g_bHLGlobalOn = true;   // v1.2 !obj 总开关
 
 ConVar g_hCvarAutoOn;
 ConVar g_hCvarColorR, g_hCvarColorG, g_hCvarColorB;
@@ -165,6 +165,7 @@ public void Event_RoundStart(Event e, const char[] n, bool d)
 	// 重初始化在 3s 定时器后, 窗口期 DrawForClient 访问空 ArrayList
 	// 会抛 Invalid index 异常导致玩家完全看不到线。
 	g_bChainLoaded = false;
+	UndoGlows();   // 移除上一回合的发光壳实体
 	ClearGlows();
 	for (int i = 0; i < g_iStepCount; i++)
 	{
@@ -181,7 +182,7 @@ void ClearGlows()
 	g_iGlowCount = 0;
 }
 
-// 熄灭所有道具发光(置 m_iGlowType=0)
+// 移除所有发光壳
 void UndoGlows()
 {
 	if (g_iGlowEnts == null) return;
@@ -189,7 +190,7 @@ void UndoGlows()
 	{
 		int ent = EntRefToEntIndex(g_iGlowEnts.Get(i));
 		if (ent > 0 && IsValidEntity(ent))
-			SetEntProp(ent, Prop_Send, "m_iGlowType", 0);
+			AcceptEntityInput(ent, "Kill");
 	}
 	g_iGlowEnts.Clear();
 	g_iGlowCount = 0;
@@ -673,27 +674,13 @@ Action CmdToggleGuide(int client, int args)
 		PrintToChat(client, "[OBJ] \x01本图无解密剧本, 请用 \x05!ptg\x01 常规导航");
 		return Plugin_Handled;
 	}
-	// v1.2: 高亮模式 = 全局总开关(发光+光柱一起熄灭/点亮)
+	// v1.3: 高亮模式 = 纯个人开关(发光壳按人过滤传输, 光柱本就单人绘制)
 	if (g_hMode.IntValue == 1)
 	{
-		g_bHLGlobalOn = !g_bHLGlobalOn;
-		if (!g_bHLGlobalOn)
-		{
-			UndoGlows();
-			for (int i = 1; i <= MaxClients; i++)
-			{
-				g_bGuideOn[i] = false;
-				g_hDrawTimer[i] = null;
-			}
-			PrintToChatAll("[OBJ] \x04关键道具高亮 OFF");
-		}
-		else
-		{
-			ClearGlows();
-			LoadHLConfig();
-			ApplyAutoOn();
-			PrintToChatAll("[OBJ] \x05关键道具高亮 ON");
-		}
+		g_bGuideOn[client] = !g_bGuideOn[client];
+		PrintToChat(client, g_bGuideOn[client] ? "[OBJ] \x05关键道具高亮 ON(仅自己)" : "[OBJ] \x04关键道具高亮 OFF");
+		if (g_bGuideOn[client] && g_hDrawTimer[client] == null)
+			g_hDrawTimer[client] = CreateTimer(REDRAW_INTERVAL, Timer_Draw, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 		return Plugin_Handled;
 	}
 	g_bGuideOn[client] = !g_bGuideOn[client];
@@ -794,14 +781,42 @@ void GlowByName(const char[] cls, const char[] tn)
 	}
 }
 
+// v1.3 个人化: 发光画在"隐形克隆壳"上, 本体零改动。
+// 壳通过 SetTransmit 只发给开着 !obj 的玩家 → 各人独立生效。
 void ApplyGlow(int ent)
 {
-	if (ent <= 0 || !IsValidEntity(ent)) return;
-	SetEntProp(ent, Prop_Send, "m_iGlowType", 3);
-	SetEntProp(ent, Prop_Send, "m_glowColorOverride", 0x00FFD800);
-	SetEntProp(ent, Prop_Send, "m_nGlowRange", 5000);
-	g_iGlowEnts.Push(EntIndexToEntRef(ent));
+	if (ent <= 0 || ent > MaxClients + 4096 || !IsValidEntity(ent)) return;
+	if (!HasEntProp(ent, Prop_Data, "m_ModelName")) return;
+	char mdl[96];
+	GetEntPropString(ent, Prop_Data, "m_ModelName", mdl, sizeof(mdl));
+	if (mdl[0] == 0) return;
+
+	float pos[3], ang[3];
+	GetEntPropVector(ent, Prop_Send, "m_vecOrigin", pos);
+	GetEntPropVector(ent, Prop_Send, "m_angRotation", ang);
+
+	int shell = CreateEntityByName("prop_dynamic_override");
+	if (shell == -1) return;
+	DispatchKeyValue(shell, "model", mdl);
+	DispatchKeyValue(shell, "solid", "0");
+	DispatchKeyValue(shell, "disableshadows", "1");
+	if (!DispatchSpawn(shell)) return;
+	TeleportEntity(shell, pos, ang, NULL_VECTOR);
+
+	SetEntProp(shell, Prop_Send, "m_nSolidType", 0);
+	SetEntProp(shell, Prop_Send, "m_iGlowType", 3);
+	SetEntProp(shell, Prop_Send, "m_glowColorOverride", 0x00FFD800);
+	SetEntProp(shell, Prop_Send, "m_nGlowRange", 5000);
+
+	SDKHook(shell, SDKHook_SetTransmit, Hook_HLTransmit);
+	g_iGlowEnts.Push(EntIndexToEntRef(shell));
 	g_iGlowCount++;
+}
+
+// 个人开关过滤: 关闭者的客户端不收这个发光壳
+public Action Hook_HLTransmit(int entity, int client)
+{
+	return g_bGuideOn[client] ? Plugin_Continue : Plugin_Handled;
 }
 
 // ────────────────────────── 高亮模式 ──────────────────────────
