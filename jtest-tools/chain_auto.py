@@ -170,6 +170,44 @@ def analyze(ents):
         return d
     for i in steps: dd(i)
     steps.sort(key=lambda i:(depth.get(i,0), gv(ents[i],'targetname')))
+
+    # ── 兜底: 出口关联缺失时(VScript 门控/触摸式切图), 切换为
+    #    "交互组件模式"——收集一切参与解锁链的交互物整体分层 ──
+    if len(steps) < 2:
+        nodes=set(); edges={}
+        for idx,e in enumerate(ents):
+            c=gv(e,'classname')
+            if c not in INTERACTIVE and c not in LOGIC: continue
+            tn=gv(e,'targetname')
+            if not tn: continue
+            for src,inp in feeds.get(tn,[]):
+                sc=gv(ents[src],'classname')
+                if inp not in ENABLERS: continue
+                if sc not in INTERACTIVE and sc not in LOGIC: continue
+                if src==idx: continue
+                nodes.add(idx); nodes.add(src)
+                edges.setdefault(src,set()).add(idx)
+        # 去掉没有出边也没有入边的孤点
+        has_edge=set()
+        for s,ds in edges.items():
+            has_edge.add(s); has_edge |= ds
+        nodes &= has_edge
+        isteps=[i for i in nodes if gv(ents[i],'classname') in INTERACTIVE]
+        dep2={}
+        def dd2(i, stack=frozenset()):
+            if i in dep2: return dep2[i]
+            d=0
+            for p in edges.get(i,()):
+                if p in stack or p not in dep2 and p!=i:
+                    pass
+                if p in stack: continue
+                d=max(d,(dd2(p,stack|{i})+1) if p in nodes else 0)
+            dep2[i]=d
+            return d
+        for i in isteps: dd2(i)
+        isteps.sort(key=lambda i:(dep2.get(i,0), gv(ents[i],'targetname')))
+        if len(isteps)>len(steps):
+            steps=isteps
     return steps, gates, None
 
 # ── 主流程 ───────────────────────────────────────────────────
