@@ -262,13 +262,12 @@ BT_Status ChargerAct_TryCharge(int client) {
         return BT_FAILURE;
     }
 
-    // 进入/续行尝试：非 TRYING（空闲或上次超时后的残留状态）或上次尝试已
-    // 过期（被高优先级分支中断后残留的陈旧 try_at）→ 重新标记开始时刻并
-    // 置 TRYING。SI_SignalAttack 只在尝试开始时发一次（同旧版按压时刻语义，
-    // 事件到达时 .sp 还会再发一次）。
+    // 进入尝试：仅【非 TRYING】时重置起点并置 TRYING（v5.39 FIX：原条件
+    // 含"已过期也重置"，到期 tick 刷新 tryAt → 底部超时分支永不可达 →
+    // 无限按 ATTACK。现到期不重置，交底部超时分支退避回 IDLE；被抢占
+    // 残留的陈旧 try_at 首个 tick 即触发超时自愈）。
     float tryAt = SI_AbilityGetTryAt(client, "_charger");
-    if (SI_AbilityGetState(client, "_charger") != ABILITY_TRYING ||
-        now - tryAt > CHARGER_TRY_TIMEOUT) {
+    if (SI_AbilityGetState(client, "_charger") != ABILITY_TRYING) {
         tryAt = now;
         SI_AbilityMarkTry(client, "_charger", tryAt);
         SI_AbilitySetState(client, "_charger", ABILITY_TRYING);

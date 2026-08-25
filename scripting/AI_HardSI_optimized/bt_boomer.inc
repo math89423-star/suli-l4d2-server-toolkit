@@ -26,6 +26,9 @@
 //   HIT：player_now_it 语义降级为"命中反馈"——SI_SignalBoomerHit 开团/霸体 +
 //     just_vomited（发起者得手）；10s 锁与后置行为改由 FIRE 事件负责。
 //   动作 1.2s 无 FIRE → 短退避 + FAILURE（不锁 10s）。
+// v5.39: FIX 超时死循环 —— 原写法到期 tick 先本地清零再无条件 MarkTry(now)，
+//   末尾超时判断永远新鲜 → 退避路径死代码 → 无限按吐键（冷却期空按+站桩）。
+//   改为仅【非 TRYING】时开新尝试；另补目标有效性守卫（目标死亡不再对空按）。
 // ============================================================================
 
 #if defined _bt_boomer_included
@@ -122,9 +125,15 @@ BT_Status BoomerAct_Vomit(int client) {
     // 短退避中（引擎刚拒绝过）：不按键直接失败，交走位分支
     if (SI_AbilityBackoffActive(client, "_boomer")) return BT_FAILURE;
 
-    // Aim at target
+    // v5.39 FIX: 目标有效性守卫 —— 原版无守卫且超时被重置循环吞掉（见下），
+    // 目标死亡/失效后仍对着空气无限按吐键。无效目标直接 FAILURE 交选人分支。
     int target = BB_GetInt(client, "target", -1);
-    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
+    if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
+        return BT_FAILURE;
+    }
+
+    // Aim at target
+    {
         float sPos[3], tPos[3], dir[3], ang[3];
         GetClientAbsOrigin(client, sPos);
         GetClientAbsOrigin(target, tPos);
@@ -133,10 +142,12 @@ BT_Status BoomerAct_Vomit(int client) {
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
 
-    // 尝试计时：首次进入或上次残留超时 → 重新计时（顺带清命中标记）
+    // 尝试计时（v5.39 FIX：超时死循环修复，同 SmokerAct_TryTongue）——
+    // 原写法到期 tick 先本地清零再无条件 MarkTry(now)，末尾超时判断永远新鲜
+    // → 超时/退避路径死代码 → 无限按吐键。现仅【非 TRYING】时开新尝试
+    // （顺带清命中标记）；到期 tick 不重置，交底部超时分支退避回 IDLE。
     float tryAt = SI_AbilityGetTryAt(client, "_boomer");
-    if (tryAt > 0.0 && (now - tryAt) > BOOMER_VOMIT_TRY_TIMEOUT) tryAt = 0.0;
-    if (tryAt <= 0.0) {
+    if (SI_AbilityGetState(client, "_boomer") != ABILITY_TRYING) {
         SI_AbilityMarkTry(client, "_boomer", now);
         SI_AbilitySetState(client, "_boomer", ABILITY_TRYING);
         BB_SetBool(client, "_boomer_vomit_hit", false);

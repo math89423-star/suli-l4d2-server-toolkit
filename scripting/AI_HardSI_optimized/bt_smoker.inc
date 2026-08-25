@@ -13,6 +13,12 @@
 //     末端改 SmokerAct_TryTongue：持续按压直到 m_tongueVictim>0（引擎拉中）确认
 //     成功（SUCCESS → 外层 Cooldown(1.8) arm），1.2s 超时未拉中 → 短退避 +
 //     FAILURE（不锁冷却）。动作不再"按了就算成功"。SteerPinToAcid 拖拽不受影响。
+// v5.39:
+//   - FIX: TryTongue 超时死循环 —— 原写法到期 tick 先本地清零再无条件
+//     MarkTry(now) 重开窗口 → 超时/退避路径永不可达 → 拉不中时无限按
+//     ATTACK（引擎冷却期变挠击+站桩）。改为仅【非 TRYING】开新尝试。
+//   - 视角保真窗口 _smoker_tongue_trying：配合 AI_HardSI.sp 非决策帧弹道角
+//     重放，消除舌头发射落在引擎帧时沿混合朝向飞歪的问题。
 // Key behaviors:
 //   - Mixed target: farthest (traditional) + closest (front-line)
 //   - Strafe approach to avoid being an easy snipe target
@@ -284,19 +290,28 @@ BT_Status SmokerAct_TryTongue(int client) {
         SI_AbilityMarkConfirmed(client, "_smoker", now);
         SI_AbilitySetState(client, "_smoker", ABILITY_CONFIRMED);
         SI_AttackClearTarget(client, "_smoker");   // v5.33: 释放锁定
+        BB_SetBool(client, "_smoker_tongue_trying", false);   // v5.39: 退出视角保真窗口
         return BT_SUCCESS;   // 触发外层 Cooldown arm（1.8s 反挠击窗口）
     }
 
-    // --- 尝试计时：首次进入或上次残留超时 → 重新计时 ---
+    // --- 尝试计时（v5.39 FIX：超时死循环修复）---
+    // 原写法在到期 tick 先把本地 tryAt 清零再无条件 MarkTry(now) 重开窗口，
+    // 末尾的超时判断拿到的永远是新鲜时间戳 → 超时/退避路径成死代码 →
+    // LOS+射程内拉不中时（舌头被栏杆挡/引擎几何拒绝）无限按 IN_ATTACK：
+    // 引擎冷却期按键全变近战挠击、树永不交还走位分支（站桩挠击根因）。
+    // 现对齐正确语义：仅【非 TRYING】时开新尝试（锁目标+记起点）；到期
+    // tick 不重置，落到底部超时分支 → Backoff(0.5)+FAILURE，Backoff 内部
+    // 置回 IDLE，退避结束自然开下一轮。残留陈旧 try_at（被抢占中断）自愈：
+    // 首个 tick 即触发超时分支重新走门控。
     float tryAt = SI_AbilityGetTryAt(client, "_smoker");
-    if (tryAt > 0.0 && (now - tryAt) > SMOKER_TONGUE_TRY_TIMEOUT) tryAt = 0.0;
-    if (tryAt <= 0.0) {
-        // v5.33: 首次进入 TRYING → 锁定当前 target，后续 tick 不再换人
+    if (SI_AbilityGetState(client, "_smoker") != ABILITY_TRYING) {
+        // v5.33: 新尝试开始 → 锁定当前 target，后续 tick 不再换人
         int bbTarget = BB_GetInt(client, "target", -1);
         SI_AttackLockTarget(client, "_smoker", bbTarget);
         SI_AbilityMarkTry(client, "_smoker", now);
         SI_AbilitySetState(client, "_smoker", ABILITY_TRYING);
         tryAt = now;
+        BB_SetBool(client, "_smoker_tongue_trying", true);   // v5.39: 进入视角保真窗口
     }
 
     // --- v5.33: 用锁定目标瞄准（不再读 BB target，防止 Sequence 重评换人）---
@@ -306,6 +321,7 @@ BT_Status SmokerAct_TryTongue(int client) {
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) {
         SI_AttackClearTarget(client, "_smoker");
         SI_AbilityBackoff(client, "_smoker", now, 0.3);
+        BB_SetBool(client, "_smoker_tongue_trying", false);   // v5.39: 退出视角保真窗口
         return BT_FAILURE;
     }
     {
@@ -331,6 +347,7 @@ BT_Status SmokerAct_TryTongue(int client) {
     if ((now - tryAt) > SMOKER_TONGUE_TRY_TIMEOUT) {
         SI_AttackClearTarget(client, "_smoker");   // v5.33: 超时释放锁定
         SI_AbilityBackoff(client, "_smoker", now, SMOKER_TONGUE_BACKOFF);
+        BB_SetBool(client, "_smoker_tongue_trying", false);   // v5.39: 退出视角保真窗口
         return BT_FAILURE;
     }
     return BT_RUNNING;   // 继续按住直到拉中或超时

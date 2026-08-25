@@ -525,10 +525,12 @@ BT_Status TankAct_TryThrowRock(int client) {
         return BT_SUCCESS;
     }
 
-    // 进入/续行尝试：非 TRYING 或上次尝试过期（被抢占残留）→ 重置尝试起点
+    // 进入尝试：仅【非 TRYING】时重置起点（v5.39 FIX：原条件含"已过期也
+    // 重置"，到期 tick 刷新 tryAt → 底部超时分支永不可达 → 无限按 ATTACK2。
+    // 现到期不重置，交底部超时分支退避回 IDLE；被抢占残留的陈旧 try_at
+    // 首个 tick 即触发超时自愈）
     float tryAt = SI_AbilityGetTryAt(client, "_tank_rock");
-    if (SI_AbilityGetState(client, "_tank_rock") != ABILITY_TRYING ||
-        now - tryAt > TANK_ROCK_TRY_TIMEOUT) {
+    if (SI_AbilityGetState(client, "_tank_rock") != ABILITY_TRYING) {
         tryAt = now;
         SI_AbilityMarkTry(client, "_tank_rock", tryAt);
         SI_AbilitySetState(client, "_tank_rock", ABILITY_TRYING);
