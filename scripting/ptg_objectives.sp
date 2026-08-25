@@ -94,6 +94,11 @@ ConVar g_hCvarHLExclude;     // 排除的 targetname 子串(逗号分隔)
 ArrayList g_hHLX, g_hHLY, g_hHLZ;
 bool   g_bHLReady;
 
+// ── v1.1 道具本体发光(glow shell): configs/ptg_objectives_hl.cfg 按图列 类名+目标名 ──
+#define HL_CFG_PATH   "configs/ptg_objectives_hl.cfg"
+ArrayList g_iGlowEnts;    // 已施加发光的实体引用
+int      g_iGlowCount;
+
 ConVar g_hCvarAutoOn;
 ConVar g_hCvarColorR, g_hCvarColorG, g_hCvarColorB;
 
@@ -113,6 +118,7 @@ public void OnPluginStart()
 	g_hCvarColorG  = CreateConVar("ptg_obj_color_g", "210", "引导线 G");
 	g_hCvarColorB  = CreateConVar("ptg_obj_color_b", "255", "引导线 B");
 
+	g_iGlowEnts = new ArrayList();
 	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
 }
 
@@ -144,7 +150,9 @@ Action Timer_PostStart_Init(Handle timer)
 		}
 	}
 	// 高亮模式(或无剧本图): 免配置通用路径
+	ClearGlows();
 	BuildHighlights();
+	LoadHLConfig();
 	ApplyAutoOn();
 	return Plugin_Stop;
 }
@@ -156,6 +164,7 @@ public void Event_RoundStart(Event e, const char[] n, bool d)
 	// 重初始化在 3s 定时器后, 窗口期 DrawForClient 访问空 ArrayList
 	// 会抛 Invalid index 异常导致玩家完全看不到线。
 	g_bChainLoaded = false;
+	ClearGlows();
 	for (int i = 0; i < g_iStepCount; i++)
 	{
 		g_Steps[i].doneCount = 0;
@@ -163,6 +172,12 @@ public void Event_RoundStart(Event e, const char[] n, bool d)
 	}
 	g_iCurStep = 0;
 	CreateTimer(3.0, Timer_PostStart_Init, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+void ClearGlows()
+{
+	if (g_iGlowEnts == null) return;
+	g_iGlowCount = 0;
 }
 
 void FreeRoundState()
@@ -282,9 +297,11 @@ Action CmdChainReload(int client, int args)
 	// v1.0: 模式感知——高亮模式重建光柱表, 剧本模式走原链路
 	if (g_hMode.IntValue == 1)
 	{
+		ClearGlows();
 		BuildHighlights();
+		LoadHLConfig();
 		ApplyAutoOn();
-		ReplyToCommand(client, "[PTGOBJ] 高亮模式: markers=%d", g_bHLReady ? g_hHLX.Length : 0);
+		ReplyToCommand(client, "[PTGOBJ] 高亮模式: markers=%d glows=%d", g_bHLReady ? g_hHLX.Length : 0, g_iGlowCount);
 		return Plugin_Handled;
 	}
 	FreeRoundState();
@@ -693,6 +710,59 @@ Action Timer_Draw(Handle timer, int userid)
 	if (g_bGuideOn[client] && IsClientInGame(client))
 		g_hDrawTimer[client] = CreateTimer(REDRAW_INTERVAL, Timer_Draw, userid, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
+}
+
+// ────────────────────────── 道具本体发光 (v1.1) ──────────────────────────
+// 原理: L4D2 引擎轮廓发光——对带模型实体设置 m_iGlowType=3 /
+// m_glowColorOverride / m_nGlowRange, 模型即以纯色描边渲染(穿墙可见)。
+// 清单来自 configs/ptg_objectives_hl.cfg: "图名" { "类名" "目标名" ... }
+
+void LoadHLConfig()
+{
+	char path[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, path, sizeof(path), HL_CFG_PATH);
+	if (!FileExists(path)) return;
+
+	KeyValues kv = new KeyValues("hl");
+	if (!kv.ImportFromFile(path)) { delete kv; return; }
+	if (!kv.JumpToKey(g_sMap)) { delete kv; return; }
+
+	if (kv.GotoFirstSubKey(false))
+	{
+		do
+		{
+			char cls[40], tn[48];
+			kv.GetSectionName(cls, sizeof(cls));
+			kv.GetString(NULL_STRING, tn, sizeof(tn));
+			GlowByName(cls, tn);
+		} while (kv.GotoNextKey(false));
+	}
+	delete kv;
+	LogMessage("[PTGOBJ] hl config applied: glows=%d", g_iGlowCount);
+}
+
+void GlowByName(const char[] cls, const char[] tn)
+{
+	int ent = -1;
+	while ((ent = FindEntityByClassname(ent, cls)) != -1)
+	{
+		if (tn[0] != 0)
+		{
+			char s[48];
+			GetEntPropString(ent, Prop_Data, "m_iName", s, sizeof(s));
+			if (!StrEqual(s, tn)) continue;
+		}
+		ApplyGlow(ent);
+	}
+}
+
+void ApplyGlow(int ent)
+{
+	if (ent <= 0 || !IsValidEntity(ent)) return;
+	SetEntProp(ent, Prop_Send, "m_iGlowType", 3);
+	SetEntProp(ent, Prop_Send, "m_glowColorOverride", 0x00FFD800);   // 青色 BGR? 用 0x00FFFF00 试黄青
+	SetEntProp(ent, Prop_Send, "m_nGlowRange", 5000);
+	g_iGlowCount++;
 }
 
 // ────────────────────────── 高亮模式 ──────────────────────────
