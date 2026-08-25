@@ -114,7 +114,7 @@ public void OnPluginStart()
 
 	g_hMode        = CreateConVar("ptg_obj_mode", "1", "0=关闭 1=机关高亮(默认,通用免配置) 2=chain剧本模式(需配置)", _, true, 0.0, true, 2.0);
 	g_hCvarHLExclude = CreateConVar("ptg_obj_hl_exclude", "take_,make_,herb,pill,adren,ammo", "高亮排除的 targetname 子串(逗号分隔)");
-	g_hCvarAutoOn  = CreateConVar("ptg_obj_auto_on", "1", "有 chain 配置的图中玩家默认自动开启引导线");
+	g_hCvarAutoOn  = CreateConVar("ptg_obj_auto_on", "0", "进图自动开启高亮(0=默认关, 玩家用 !obj 自行开启)");
 	g_hCvarColorR  = CreateConVar("ptg_obj_color_r", "0", "引导线 R");
 	g_hCvarColorG  = CreateConVar("ptg_obj_color_g", "210", "引导线 G");
 	g_hCvarColorB  = CreateConVar("ptg_obj_color_b", "255", "引导线 B");
