@@ -31,6 +31,10 @@
  * 躲避！"（红色图标），爆炸后自然消退（俯冲时长超时 + V1_Detonate
  * 兜底 stop）。
  *
+ * v1.16.0（2026-08-25）：**II/III 掉落总量 +约25（用户拍板）**——
+ * II 新增专用槽产 3-5/2s槽(原共享2-3) → 39-65 个；III 槽产 1-3→3-4 → 45-60 个。
+ * 频率维持 2s 一槽不变(落点密度提升而非节奏加快)
+ *
  * v1.15.0（2026-08-25）：**II/III 半径+50%、预警改 3s（用户拍板）**——
  * 汽油弹 459/321/229→688/482/344；榴弹雨 495/347/248→743/520/371；
  * 新增 si_hud_art_warn_time_ii_iii=3s（共享 si_hud_art_warn_time=8s 不动，I 仍 8s）
@@ -359,7 +363,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.15.0"   // v1.14.0: 火力支援全线+2000 (用户拍板 2026-08-25)——汽油弹12000/胆汁雨8500/榴弹雨16500/AGM20000
+#define PLUGIN_VERSION "1.16.0"   // v1.14.0: 火力支援全线+2000 (用户拍板 2026-08-25)——汽油弹12000/胆汁雨8500/榴弹雨16500/AGM20000
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -511,6 +515,8 @@ ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2�
 #define ART_MAX_TOTAL        600      // v1.7.95: 单次空袭罐数硬上限（防 cvar 误配超载）
 #define ART_CANS_MIN_PER_SEC 2        // v1.7.96: 每秒落罐数随机范围（用户拍板 2-3）
 #define ART_CANS_MAX_PER_SEC 3
+#define ART2_MIN_PER_SEC    3        // v1.16.0: 火力支援II 专用——总量+25(用户拍板), 频率由本插件把控
+#define ART2_MAX_PER_SEC    5        // 25s/2s槽×3-5 ≈ 39-65 个(原 26-39)
 // v1.1.0: 支援III-胆汁雨 每秒瓶数 1-2（单瓶胆汁覆盖半径大，2-3瓶/秒会重叠+卡顿）
 // v1.2.7: 用户嫌吵——若碎裂音效仍吵，可降为 1（MAX 改 1 即每秒 1 瓶）
 #define ART3_JARS_MIN_PER_SEC 1
@@ -520,8 +526,8 @@ ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2�
 #define ART4_GRENADES_MAX_PER_SEC 2
 // v1.3.0: V-混合轰炸每秒总件数（罐+榴弹混合，用户拍板可调）
 // v1.8.18: 改为每 2.5 秒 1-3 个（实测 1.5s×2-3 太快）
-#define ART5_MIN_PER_SEC 1
-#define ART5_MAX_PER_SEC 3
+#define ART5_MIN_PER_SEC 3        // v1.16.0: 总量+25(用户拍板) 30s/2s槽×3-4 ≈ 45-60(原 15-45)
+#define ART5_MAX_PER_SEC 4
 // v1.2.0: 引信 ~1.2s——生成高度特调 1500u（-900 初速 ≈1.1s 触地，贴近
 // 地面空爆）；罐子高度（1800-2600）会让榴弹在半空空爆，伤害打空浪费
 #define ART4_FUSE_HEIGHT 1500.0
@@ -3943,12 +3949,14 @@ void Art_LaunchBarrage(int client, const float target[3], int kind,
     if (seconds < 1) seconds = 1;
     int total = 0;
 
-    int minPerSec = (kind == 3) ? ART3_JARS_MIN_PER_SEC
+    int minPerSec = (kind == 2) ? ART2_MIN_PER_SEC
+        : ((kind == 3) ? ART3_JARS_MIN_PER_SEC
         : ((kind == 4) ? ART4_GRENADES_MIN_PER_SEC
-        : ((kind == 5) ? ART5_MIN_PER_SEC : ART_CANS_MIN_PER_SEC));
-    int maxPerSec = (kind == 3) ? ART3_JARS_MAX_PER_SEC
+        : ((kind == 5) ? ART5_MIN_PER_SEC : ART_CANS_MIN_PER_SEC)));
+    int maxPerSec = (kind == 2) ? ART2_MAX_PER_SEC
+        : ((kind == 3) ? ART3_JARS_MAX_PER_SEC
         : ((kind == 4) ? ART4_GRENADES_MAX_PER_SEC
-        : ((kind == 5) ? ART5_MAX_PER_SEC : ART_CANS_MAX_PER_SEC));
+        : ((kind == 5) ? ART5_MAX_PER_SEC : ART_CANS_MAX_PER_SEC)));
 
     // v1.4.0: kind==3 每 2 秒一槽（用户定稿：每 2 秒 1-2 罐，15s ≈ 8-16 瓶）
     // v1.8.5: kind==2/5 也改为每 2 秒一槽（火力2地狱烈火、火力3区域轰炸）
