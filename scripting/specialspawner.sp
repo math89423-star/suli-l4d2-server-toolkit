@@ -123,6 +123,7 @@ ConVar
 	g_cSpawnRangeMax,
 	g_cSpawnRangeGuard,
 	g_cSpawnRangeGuardMin,
+	g_cSpawnDistMax,
 	// v2.6.0 幽灵修复: 不可见兜底分档 —— v6.0.0 起语义废弃（不再决定 fallback 等级），
 	// 仅保留注册防旧 cfg 报错（报告 §16 建议逐步废掉），不再持有 handle。
 	// v6.0.0 调研落地: Hard Gate + Soft Score 参数
@@ -371,7 +372,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "6.4.1",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
+	version = "6.4.2",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -576,6 +577,7 @@ public void OnPluginStart() {
 	g_cSpawnRangeGuard =			CreateConVar("ss_spawnrange_guard",		"350.0",					"[v6.1.0仅观测] 落点距离观测阈值(引擎距离语义由 z_spawn_safety_range 负责)", _, true, 0.0, true, 1500.0);
 	// v1.3.9 保底阈值注释已废弃；保留注册防旧 cfg 报错。
 	g_cSpawnRangeGuardMin =			CreateConVar("ss_spawnrange_guard_min",	"250.0",					"[v6.1.0仅观测] 落点最近距离观测阈值下限", _, true, 0.0, true, 1500.0);
+	g_cSpawnDistMax =				CreateConVar("ss_spawn_dist_max",		"1200.0",					"v6.4.2: 生成距离上限——开阔地防刷出过远被闲置处决", _, true, 400.0, true, 3000.0);
 	// v2.6.0 幽灵修复双阈值（防贴脸偏好层）——v6.0.0 起语义废弃（报告 §16）：
 	// 不再决定 fallback 等级，仅保留注册防旧 cfg 报错；丢弃 handle 不持有。
 	CreateConVar("ss_spawnrange_guard_invis_min",	"350.0",	"[已废弃] 原不可见兜底A档下限，v6.0.0 起不再使用，仅保留注册", _, true, 0.0, true, 1500.0);
@@ -2220,6 +2222,9 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 	float bestInvisPos[3];
 	float bestInvisDist = 999999.0;
 	bool hasInvisFallback = false;
+	bool hasVisFallback = false;
+	float bestVisDist = -1.0;
+	float bestVisPos[3];
 	int failEngine=0, failTrap=0, failNav=0, failDist=0, failClose=0;
 
 	for (int t = 0; t < attempts; t++) {
@@ -2257,6 +2262,13 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 			continue;
 		}
 
+		// v6.4.2 距离上限: 大开阔地候选普遍偏远(无遮挡全可见), 刷出后
+		// 25s 闲置处决赶不到 → 硬门拒掉超远点(cvar 可调)
+		if (dist > g_cSpawnDistMax.FloatValue) {
+			failDist++;
+			continue;
+		}
+
 		// v6.1.4 分散刷：与本波已刷点位保持 250u 以上（防挤一处，透视聚堆）
 		bool tooClose = false;
 		for (int k = 0; k < g_iBatchSpawnPosCount; k++) {
@@ -2267,10 +2279,15 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 			continue;
 		}
 
-		// 可见优先：候选点至少能看见一个生还者 → 立即采用
+		// v6.4.2 可见候选择优: 追踪"最近可见点"(旧逻辑第一个可见即返回,
+		// 开阔地会选中过远点), 全扫完取最近
 		if (IsPosVisibleToAnySurvivor(p)) {
-			outPos = p;
-			return true;
+			if (bestVisDist < 0.0 || dist < bestVisDist) {
+				bestVisDist = dist;
+				bestVisPos = p;
+				hasVisFallback = true;
+			}
+			continue;
 		}
 
 		// 不可见候选：追踪距离最近的作为兜底（近 = 走几步就能看见）
@@ -2279,6 +2296,12 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 			bestInvisPos = p;
 			hasInvisFallback = true;
 		}
+	}
+
+	// v6.4.2: 有最近可见点 → 优先采用(可见>不可见优先级不变)
+	if (hasVisFallback) {
+		outPos = bestVisPos;
+		return true;
 	}
 
 	// 全部尝试后无可见点 → 用最近的不可见点兜底（防饿死，目標注入 + 看门狗兜）
