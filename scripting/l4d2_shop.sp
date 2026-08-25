@@ -31,6 +31,10 @@
  * 躲避！"（红色图标），爆炸后自然消退（俯冲时长超时 + V1_Detonate
  * 兜底 stop）。
  *
+ * v1.15.0（2026-08-25）：**II/III 半径+50%、预警改 3s（用户拍板）**——
+ * 汽油弹 459/321/229→688/482/344；榴弹雨 495/347/248→743/520/371；
+ * 新增 si_hud_art_warn_time_ii_iii=3s（共享 si_hud_art_warn_time=8s 不动，I 仍 8s）
+ *
  * v1.14.0（2026-08-25）：**火力支援全线涨价 +2000（用户拍板）**——
  * 汽油弹 10000→12000 / 胆汁雨 6500→8500 / 榴弹雨 14500→16500 / AGM导弹 18000→20000
  *
@@ -355,7 +359,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.14.0"   // v1.14.0: 火力支援全线+2000 (用户拍板 2026-08-25)——汽油弹12000/胆汁雨8500/榴弹雨16500/AGM20000
+#define PLUGIN_VERSION "1.15.0"   // v1.14.0: 火力支援全线+2000 (用户拍板 2026-08-25)——汽油弹12000/胆汁雨8500/榴弹雨16500/AGM20000
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -480,6 +484,7 @@ ConVar g_cvArtCooldown;
 ConVar g_cvArtNkRadiusOil;  // v1.0.5: 油桶/烟花震退触发距离（100）
 ConVar g_cvArtNkRadiusGas;  // v1.0.5: 瓦斯/煤气震退触发距离（200）
 ConVar g_cvArtWarnTime;     // v1.0.6: 确认后预警时长（5s）
+ConVar g_cvArtWarnTime25;   // v1.15.0: 火力支援II/III 专用预警时长
 ConVar g_cvArtRingOut;      // v1.0.7: 光圈显示半径-开阔地（750）
 ConVar g_cvArtRingMid;      // v1.0.7: 光圈显示半径-高顶（525）
 ConVar g_cvArtRingSmall;    // v1.0.7: 光圈显示半径-矮房（375）
@@ -830,18 +835,18 @@ public void OnPluginStart()
 
     // v1.0.1: II 独立半径组，收紧 10%：750→675 / 525→472.5 / 375→337.5
     // v1.8.5: 收紧20%：675→540 / 472.5→378 / 337.5→270
-    // v1.8.7: 再收紧15%：540→459 / 378→321.3 / 270→229.5（火焰蔓延实际范围更大）
-    g_cvArt2RadiusOut = CreateConVar("si_hud_art2_radius_out", "459.0",
+    // v1.15.0: +50%（用户拍板）459→688.5 / 321.3→482 / 229.5→344.3
+    g_cvArt2RadiusOut = CreateConVar("si_hud_art2_radius_out", "688.5",
         "Spread radius (units) of the 火力支援II-地狱烈火 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt2RadiusMid = CreateConVar("si_hud_art2_radius_mid", "321.3",
+    g_cvArt2RadiusMid = CreateConVar("si_hud_art2_radius_mid", "482.0",
         "Spread radius for ceiling >= 900 (火力支援II-地狱烈火).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt2RadiusSmall = CreateConVar("si_hud_art2_radius_small", "229.5",
+    g_cvArt2RadiusSmall = CreateConVar("si_hud_art2_radius_small", "344.3",
         "Spread radius for ceiling 600-900 (火力支援II-地狱烈火).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
@@ -900,17 +905,17 @@ public void OnPluginStart()
     g_cvArt5Duration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArt5Duration.SetBounds(ConVarBound_Lower, true, 5.0);
 
-    g_cvArt5RadiusOut = CreateConVar("si_hud_art5_radius_out", "495.0",
+    g_cvArt5RadiusOut = CreateConVar("si_hud_art5_radius_out", "742.5",
         "Spread radius (units) of the 火力支援III-区域轰炸 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt5RadiusMid = CreateConVar("si_hud_art5_radius_mid", "346.5",
+    g_cvArt5RadiusMid = CreateConVar("si_hud_art5_radius_mid", "519.8",
         "Spread radius for ceiling >= 900 (火力支援III-区域轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt5RadiusSmall = CreateConVar("si_hud_art5_radius_small", "247.5",
+    g_cvArt5RadiusSmall = CreateConVar("si_hud_art5_radius_small", "371.3",
         "Spread radius for ceiling 600-900 (火力支援III-区域轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
@@ -1024,6 +1029,12 @@ public void OnPluginStart()
         "Pre-strike warning seconds after confirm: target ring visible to all + chat broadcast, then cans start falling.", FCVAR_NOTIFY, true, 1.0, true, 30.0);
     g_cvArtWarnTime.SetBounds(ConVarBound_Upper, true, 30.0);
     g_cvArtWarnTime.SetBounds(ConVarBound_Lower, true, 1.0);
+
+    // v1.15.0: 火力支援II/III 专用预警时长（用户拍板 3s; 共享 cvar 保持 8s 供 I 等）
+    g_cvArtWarnTime25 = CreateConVar("si_hud_art_warn_time_ii_iii", "3.0",
+        "Pre-strike warning seconds for 火力支援II/III only.", FCVAR_NOTIFY, true, 1.0, true, 30.0);
+    g_cvArtWarnTime25.SetBounds(ConVarBound_Upper, true, 30.0);
+    g_cvArtWarnTime25.SetBounds(ConVarBound_Lower, true, 1.0);
 
     // v1.9.0: 准星 trace 最大距离（长街/浅角度瞄地；原 2000 硬编码 → 可热调）
     g_cvArtAimMaxDist = CreateConVar("l4d2_shop_art_aim_max_dist", "3000.0",
@@ -3717,7 +3728,10 @@ void Art_ConfirmStrike(int client, ArtTargetInfo info)
     g_fArtWarnDuration = duration;
     g_iArtWarnBuyer = client;
     // v1.8.0: V1 用自己的预警时长（默认 8s，比其它档长，给逃跑时间）
-    float warnTime = (kind == 6) ? g_cvArt6WarnTime.FloatValue : g_cvArtWarnTime.FloatValue;
+    // v1.15.0: II/III 用专用 3s 预警, 其余维持共享 cvar
+    float warnTime = (kind == 6) ? g_cvArt6WarnTime.FloatValue
+                   : (kind == 2 || kind == 5) ? g_cvArtWarnTime25.FloatValue
+                   : g_cvArtWarnTime.FloatValue;
     g_fArtWarnEnd = GetGameTime() + warnTime;
     g_iArtWarnLastSec = 999;   // v1.0.8: 心跳第一 tick 播首秒（prime 已就位）
 
@@ -3751,18 +3765,18 @@ void Art_ConfirmStrike(int client, ArtTargetInfo info)
     char kindName[16];
     Art_KindWarnName(kind, kindName, sizeof(kindName));
     PrintToChatAll("\x04[火力支援]\x01 \x05%N\x01 已呼叫\x05%s\x01火力支援，将在 \x03%.0f\x01 秒后到来，注意躲避！",
-        client, kindName, g_cvArtWarnTime.FloatValue);
+        client, kindName, warnTime);
     CreateTimer(endT, Timer_ArtNotifyEnd, INVALID_HANDLE, TIMER_FLAG_NO_MAPCHANGE);
 
     // v1.0.6: 预警光圈心跳（全员可见，I 蓝 / II 黄）+ 预警结束落罐
     g_hArtWarnTimer = CreateTimer(ART_TICK_INT, Timer_ArtWarn, INVALID_HANDLE,
         TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
-    CreateTimer(g_cvArtWarnTime.FloatValue, Timer_ArtWarnEnd, INVALID_HANDLE,
+    CreateTimer(warnTime, Timer_ArtWarnEnd, INVALID_HANDLE,
         TIMER_FLAG_NO_MAPCHANGE);
 
     LogMessage("[artillery] confirm client=%N target=(%.0f,%.0f,%.0f) env=%d clearance=%.0f warn=%.0fs dur=%.0fs r=%.0f h=%.0f corridor=%d",
         client, target[0], target[1], target[2], info.environment, info.clearance,
-        g_cvArtWarnTime.FloatValue, duration, radius, height, info.corridorIndex);
+        warnTime, duration, radius, height, info.corridorIndex);
 }
 
 // v1.10.1: 火力支援 HUD 预警——游戏内置 Instructor Hint（引擎自带 ⚠️ 图标，
