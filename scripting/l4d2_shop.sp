@@ -33,6 +33,10 @@
  *
  * v1.16.2（2026-08-25）：照明弹 800→500（用户拍板）
  *
+ * v1.16.3（2026-08-25）：**信号弹/空中照明弹 5s 未发射自动退款（用户拍板）**——
+ * 购买成功起 5s 计时, 到期仍处于待发射态 → 取消待发状态并全额退款;
+ * 新增 native: ShopFlare_Clear(flare_gun) / AerialFlare_Cancel(shop_flare)
+ *
  * v1.16.1（2026-08-25）：**榴弹雨总量再 +15%（用户拍板）**——槽产上限 4→5,
  * 30s×2s槽×3-5 ≈ 45-75 个（均值 52.5→60）
  *
@@ -368,7 +372,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.16.2"   // v1.14.0: 火力支援全线+2000 (用户拍板 2026-08-25)——汽油弹12000/胆汁雨8500/榴弹雨16500/AGM20000
+#define PLUGIN_VERSION "1.16.3"   // v1.14.0: 火力支援全线+2000 (用户拍板 2026-08-25)——汽油弹12000/胆汁雨8500/榴弹雨16500/AGM20000
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -407,12 +411,14 @@ native void MC_PauseCommon(float seconds);
 native int ShopFlare_Give(int client, int charges);
 native int ShopFlare_GetCharges(int client);
 native int ShopFlare_HasActive(int client);
+native int ShopFlare_Clear(int client);   // v1.16.3
 
 // 空中照明弹——l4d2_aerial_flare 插件（白炽光悬挂式照明）
 native int AerialFlare_Buy(int client);
 native int AerialFlare_IsAiming(int client);
 native int AerialFlare_GetCount();
 native int AerialFlare_HasFlare(int client);
+native int AerialFlare_Cancel(int client);   // v1.16.3
 
 ConVar g_cvSIHudEnable;      // si_hud 总开关（FindConVar 读；null 视为开启）
 
@@ -791,6 +797,52 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 // ============================================================================
 // OnPluginStart
 // ============================================================================
+
+// v1.16.3: 信号弹/照明弹 5s 未发射自动退款(用户拍板——卡住时打不出去)
+Action Timer_ShopFlareSignalRefund(Handle timer, DataPack dp) {
+    dp.Reset();
+    int client = GetClientOfUserId(dp.ReadCell());
+    int price = dp.ReadCell();
+    int slot = dp.ReadCell();
+    delete dp;
+    if (client <= 0 || !IsClientInGame(client)) return Plugin_Stop;
+    if (GetFeatureStatus(FeatureType_Native, "ShopFlare_GetCharges") == FeatureStatus_Available
+        && ShopFlare_GetCharges(client) >= 1)
+    {
+        bool cleared = false;
+        if (GetFeatureStatus(FeatureType_Native, "ShopFlare_Clear") == FeatureStatus_Available
+            && ShopFlare_Clear(client) > 0)
+            cleared = true;
+        SH_AddWallet(client, price);
+        g_iShopBought[client][slot]--;
+        PrintToChat(client, "\x04[商店]\x01 信号弹 5 秒未发射，已退款 \x03%d\x01 积分%s", price, cleared ? "" : "（待发状态清除失败，请重进刷新）");
+        LogMessage("[shop] flare signal auto-refund client=%d price=%d cleared=%d", client, price, cleared);
+    }
+    return Plugin_Stop;
+}
+
+Action Timer_ShopFlareAerialRefund(Handle timer, DataPack dp) {
+    dp.Reset();
+    int client = GetClientOfUserId(dp.ReadCell());
+    int price = dp.ReadCell();
+    int slot = dp.ReadCell();
+    delete dp;
+    if (client <= 0 || !IsClientInGame(client)) return Plugin_Stop;
+    if (GetFeatureStatus(FeatureType_Native, "AerialFlare_HasFlare") == FeatureStatus_Available
+        && AerialFlare_HasFlare(client))
+    {
+        bool cleared = false;
+        if (GetFeatureStatus(FeatureType_Native, "AerialFlare_Cancel") == FeatureStatus_Available
+            && AerialFlare_Cancel(client) > 0)
+            cleared = true;
+        SH_AddWallet(client, price);
+        g_iShopBought[client][slot]--;
+        PrintToChat(client, "\x04[商店]\x01 空中照明弹 5 秒未发射，已退款 \x03%d\x01 积分%s", price, cleared ? "" : "（待发状态清除失败，请重进刷新）");
+        LogMessage("[shop] aerial flare auto-refund client=%d price=%d cleared=%d", client, price, cleared);
+    }
+    return Plugin_Stop;
+}
+
 
 public void OnPluginStart()
 {
@@ -1757,8 +1809,14 @@ void ShopBuy(int client, int slot)
             g_iShopBought[client][slot]--;
             return;
         }
-        PrintToChat(client, "\x04[商店]\x01 已购买 \x05信号弹\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）——下一发射击自动打出！",
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05信号弹\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）——下一发射击自动打出！5 秒内未发射将自动退款",
             price, SH_GetWallet(client));
+        // v1.16.3: 5s 未发射自动退款(用户拍板——卡住时打不出去钱白花)
+        DataPack dp = new DataPack();
+        dp.WriteCell(GetClientUserId(client));
+        dp.WriteCell(price);
+        dp.WriteCell(slot);
+        CreateTimer(5.0, Timer_ShopFlareSignalRefund, dp, TIMER_FLAG_NO_MAPCHANGE);
         return;
     }
 
@@ -1789,8 +1847,13 @@ void ShopBuy(int client, int slot)
             g_iShopBought[client][slot]--;
             return;
         }
-        PrintToChat(client, "\x04[商店]\x01 已购买 \x05空中照明弹\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）——瞄准目标后开枪确认！",
+        PrintToChat(client, "\x04[商店]\x01 已购买 \x05空中照明弹\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）——瞄准目标后开枪确认！5 秒内未发射将自动退款",
             price, SH_GetWallet(client));
+        DataPack dp = new DataPack();
+        dp.WriteCell(GetClientUserId(client));
+        dp.WriteCell(price);
+        dp.WriteCell(slot);
+        CreateTimer(5.0, Timer_ShopFlareAerialRefund, dp, TIMER_FLAG_NO_MAPCHANGE);
         return;
     }
 

@@ -322,6 +322,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	CreateNative("ShopFlare_Give", Native_ShopFlareGive);
 	CreateNative("ShopFlare_GetCharges", Native_ShopFlareGet);
 	CreateNative("ShopFlare_HasActive", Native_ShopFlareHasActive);
+	CreateNative("ShopFlare_Clear", Native_ShopFlareClear);   // v2.18.1: 商店 5s 未发射退款用
 	RegPluginLibrary("l4d2_flare_gun");
 	return APLRes_Success;
 }
@@ -360,6 +361,14 @@ int Native_ShopFlareGet(Handle plugin, int numParams)
 	int client = GetNativeCell(1);
 	if( client < 1 || client > MaxClients ) return 0;
 	return g_iShopCharges[client];
+}
+
+public int Native_ShopFlareClear(Handle plugin, int numParams) {
+    int client = GetNativeCell(1);
+    if( client < 1 || client > MaxClients || !IsClientInGame(client) ) return 0;
+    int had = g_iShopCharges[client];
+    g_iShopCharges[client] = 0;
+    return had;
 }
 
 public void OnPluginStart()
