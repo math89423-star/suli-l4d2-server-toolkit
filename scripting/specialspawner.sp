@@ -154,6 +154,8 @@ ConVar
 	g_cRestMin,					// v2.0.0 波间三态
 	g_cRestMax,
 	g_cRestForce,
+	g_cRestPerfMin,				// v6.3.0 完美剿灭奖励区间
+	g_cRestPerfMax,
 	// v2.5.0 剿灭得分（三档互斥, 波次清缴完成时全体生还者每人得分）
 	g_cClearScoreBase,
 	g_cClearScorePerfect,
@@ -366,7 +368,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "6.2.0",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
+	version = "6.3.0",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -618,6 +620,9 @@ public void OnPluginStart() {
 	g_cRestMin =					CreateConVar("ss_rest_min",				"20.0",						"冷静期最小时长(秒, 零特感缓冲窗口)", _, true, 1.0, true, 60.0);
 	g_cRestMax =					CreateConVar("ss_rest_max",				"30.0",						"冷静期最大时长(秒)", _, true, 1.0, true, 60.0);
 	g_cRestForce =					CreateConVar("ss_rest_force",			"120.0",					"收尾期强制冷静硬上限(秒, 自波次开始计, 防留特/僵局)", _, true, 10.0, true, 600.0);
+	// v6.3.0 完美剿灭奖励: 波内无人倒地/死亡 → 冷静期改抽 20-30s
+	g_cRestPerfMin =				CreateConVar("ss_rest_perfect_min",		"20.0",						"完美剿灭奖励: 冷静期下限(波内无人倒地/死亡)", _, true, 1.0, true, 60.0);
+	g_cRestPerfMax =				CreateConVar("ss_rest_perfect_max",		"30.0",						"完美剿灭奖励: 冷静期上限", _, true, 1.0, true, 60.0);
 	// v2.5.0 剿灭得分（用户设计 2026-08-17）: 波次清缴完成时全体生还者每人得分, 三档互斥:
 	// 完美（波内无人倒地/死亡）> 补偿（倒地/死亡 ≥ 队伍人数×ss_clear_comp_ratio）> 基础（其余）。
 	// Tank 波（tank_wave_mutator 突变, SS_MarkWaveTank）三档同乘 ss_clear_tank_mult。
@@ -2802,7 +2807,17 @@ void EnterRest() {
 	Call_Finish();
 
 	// 2) 抽取冷静期（读调整后的 cvar：非 Tank 25-35s / Tank 波 ×1.5）
-	float rest = Math_GetRandomFloat(g_cRestMin.FloatValue, g_cRestMax.FloatValue);
+	// v6.3.0 完美剿灭奖励: 波内无人倒地/死亡 → 改抽 ss_rest_perfect_* (20-30s)
+	// 覆盖优先级最高(Tank 缩放也让位于完美奖励); 之后仍走损失率压缩
+	float restMin = g_cRestMin.FloatValue;
+	float restMax = g_cRestMax.FloatValue;
+	bool bPerfectClear = (g_bWaveStarted && g_iWaveDownDeaths == 0);
+	if (bPerfectClear)
+	{
+		restMin = g_cRestPerfMin.FloatValue;
+		restMax = g_cRestPerfMax.FloatValue;
+	}
+	float rest = Math_GetRandomFloat(restMin, restMax);
 	if (rest < 1.0)
 		rest = 1.0;
 	// v6.2.0 损失率补偿：系统处决占比 → 缩短冷静期找回节奏
@@ -2838,9 +2853,9 @@ void EnterRest() {
 	g_hRestTimer = CreateTimer(rest, tmrRestEnd);
 	g_fRestEndTime = GetEngineTime() + rest;   // v2.5.4: 记录到期时刻（暂停冻结用）
 	if (rest != restOrig)
-		LogMessage("[SS] phase: CLEARING -> REST (%.1fs orig %.1fs, loss %.0f%%)", rest, restOrig, g_fWaveLossRate*100.0);
+		LogMessage("[SS] phase: CLEARING -> REST (%.1fs orig %.1fs, loss %.0f%%)%s", rest, restOrig, g_fWaveLossRate*100.0, bPerfectClear ? " [PERFECT]" : "");
 	else
-		LogMessage("[SS] phase: CLEARING -> REST (%.1fs)", rest);
+		LogMessage("[SS] phase: CLEARING -> REST (%.1fs)%s", rest, bPerfectClear ? " [PERFECT]" : "");
 
 	// v2.2.0 触发 REST forward（传入总倒计时秒数，供外部插件预警）
 	float totalCountdown = rest + GetPostRestInterval();
