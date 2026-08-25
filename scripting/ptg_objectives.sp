@@ -88,6 +88,12 @@ bool   g_bNavReady;
 int    g_iLaserSprite;
 bool   g_bGuideOn[MAXPLAYERS + 1];
 Handle g_hDrawTimer[MAXPLAYERS + 1];
+// ── v1.0 高亮模式: 不画线不提示, 只在关键机关上方立青色光柱标记 ──
+ConVar g_hMode;              // 0=关 1=高亮(默认) 2=chain 剧本模式
+ConVar g_hCvarHLExclude;     // 排除的 targetname 子串(逗号分隔)
+ArrayList g_hHLX, g_hHLY, g_hHLZ;
+bool   g_bHLReady;
+
 ConVar g_hCvarAutoOn;
 ConVar g_hCvarColorR, g_hCvarColorG, g_hCvarColorB;
 
@@ -100,6 +106,8 @@ public void OnPluginStart()
 	RegAdminCmd("obj_skip", CmdObjSkip, ADMFLAG_ROOT, "暴力跳过(输入模拟): obj_skip=无限跳到完成; obj_skip <n>=限n步");
 	RegAdminCmd("obj_aim", CmdObjAim, ADMFLAG_ROOT, "查看准星指向的实体信息(配置剧本用)");
 
+	g_hMode        = CreateConVar("ptg_obj_mode", "1", "0=关闭 1=机关高亮(默认,通用免配置) 2=chain剧本模式(需配置)", _, true, 0.0, true, 2.0);
+	g_hCvarHLExclude = CreateConVar("ptg_obj_hl_exclude", "take_,make_,herb,pill,adren,ammo", "高亮排除的 targetname 子串(逗号分隔)");
 	g_hCvarAutoOn  = CreateConVar("ptg_obj_auto_on", "1", "有 chain 配置的图中玩家默认自动开启引导线");
 	g_hCvarColorR  = CreateConVar("ptg_obj_color_r", "0", "引导线 R");
 	g_hCvarColorG  = CreateConVar("ptg_obj_color_g", "210", "引导线 G");
@@ -124,13 +132,20 @@ public void OnMapStart()
 
 Action Timer_PostStart_Init(Handle timer)
 {
-	LoadChainConfig();
-	if (g_bChainLoaded)
+	if (g_hMode.IntValue == 2)
 	{
-		BuildNavTables();
-		ResolveCurrentStep();
-		ApplyAutoOn();
+		LoadChainConfig();
+		if (g_bChainLoaded)
+		{
+			BuildNavTables();
+			ResolveCurrentStep();
+			ApplyAutoOn();
+			return Plugin_Stop;
+		}
 	}
+	// 高亮模式(或无剧本图): 免配置通用路径
+	BuildHighlights();
+	ApplyAutoOn();
 	return Plugin_Stop;
 }
 
@@ -264,6 +279,14 @@ void TypeDefaults(const char[] type, char[] cls, int clsLen, char[] out, int out
 
 Action CmdChainReload(int client, int args)
 {
+	// v1.0: 模式感知——高亮模式重建光柱表, 剧本模式走原链路
+	if (g_hMode.IntValue == 1)
+	{
+		BuildHighlights();
+		ApplyAutoOn();
+		ReplyToCommand(client, "[PTGOBJ] 高亮模式: markers=%d", g_bHLReady ? g_hHLX.Length : 0);
+		return Plugin_Handled;
+	}
 	FreeRoundState();
 	g_bChainLoaded = false;
 	LoadChainConfig();
@@ -613,7 +636,7 @@ Address NearestSurvivorArea(const float pos[3])
 Action CmdToggleGuide(int client, int args)
 {
 	if (client < 1 || !IsClientInGame(client)) return Plugin_Handled;
-	if (!g_bChainLoaded)
+	if (!g_bChainLoaded && g_hMode.IntValue != 1)
 	{
 		PrintToChat(client, "[OBJ] \x01本图无解密剧本, 请用 \x05!ptg\x01 常规导航");
 		return Plugin_Handled;
@@ -628,6 +651,7 @@ Action CmdToggleGuide(int client, int args)
 void ApplyAutoOn()
 {
 	if (!g_hCvarAutoOn.BoolValue) return;
+	if (g_hMode.IntValue == 1 && !g_bHLReady) return;
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (IsClientInGame(i) && !IsFakeClient(i))
@@ -655,12 +679,83 @@ Action Timer_Draw(Handle timer, int userid)
 	}
 	g_hDrawTimer[client] = null;
 
-	DrawForClient(client);
+	if (g_hMode.IntValue == 1)
+	{
+		if (!g_bHLReady) return Plugin_Stop;
+		DrawHighlights(client);
+	}
+	else
+	{
+		DrawForClient(client);
+	}
 
 	// 完成态或掉线自然停止; 否则续排
 	if (g_bGuideOn[client] && IsClientInGame(client))
 		g_hDrawTimer[client] = CreateTimer(REDRAW_INTERVAL, Timer_Draw, userid, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
+}
+
+// ────────────────────────── 高亮模式 ──────────────────────────
+static const char HL_CLASSES[][24] = { "func_button", "momentary_rot_button" };
+
+void BuildHighlights()
+{
+	g_bHLReady = false;
+	delete g_hHLX; delete g_hHLY; delete g_hHLZ;
+	g_hHLX = new ArrayList(); g_hHLY = new ArrayList(); g_hHLZ = new ArrayList();
+
+	char excl[128];
+	g_hCvarHLExclude.GetString(excl, sizeof(excl));
+	char exList[12][24];
+	int exCnt = ExplodeString(excl, ",", exList, 12, 24);
+
+	ArrayList all = new ArrayList();
+	for (int ci = 0; ci < sizeof(HL_CLASSES); ci++)
+	{
+		int ent = -1;
+		while ((ent = FindEntityByClassname(ent, HL_CLASSES[ci])) != -1)
+		{
+			char tn[48];
+			GetEntPropString(ent, Prop_Data, "m_iName", tn, sizeof(tn));
+			bool skip = false;
+			for (int xi = 0; xi < exCnt && !skip; xi++)
+				if (exList[xi][0] != 0 && StrContains(tn, exList[xi], false) != -1) skip = true;
+			if (skip) continue;
+
+			float c[3];
+			EntityCenter(ent, c);
+			// 按钮刷在墙/设备上, 光柱立在头顶上方
+			c[2] += 52.0;
+			all.Push(RoundToNearest(c[0]));
+			all.Push(RoundToNearest(c[1]));
+			all.Push(RoundToNearest(c[2]));
+		}
+	}
+	for (int i = 0; i + 2 < all.Length; i += 3)
+	{
+		g_hHLX.Push(all.Get(i));
+		g_hHLY.Push(all.Get(i+1));
+		g_hHLZ.Push(all.Get(i+2));
+	}
+	delete all;
+	g_bHLReady = (g_hHLX.Length > 0);
+	LogMessage("[PTGOBJ] highlights: %d markers", g_hHLX.Length);
+}
+
+void DrawHighlights(int client)
+{
+	int color[4] = {0, 210, 255, 200};   // 青色光柱
+	float life = REDRAW_INTERVAL + 0.35;
+	int n = g_hHLX.Length;
+	if (n > 96) n = 96;   // 客户端 TE 预算保护
+	float top[3], bot[3];
+	for (int i = 0; i < n; i++)
+	{
+		bot[0] = float(g_hHLX.Get(i)); bot[1] = float(g_hHLY.Get(i)); bot[2] = float(g_hHLZ.Get(i)) - 8.0;
+		top = bot; top[2] += 46.0;
+		TE_SetupBeamPoints(bot, top, g_iLaserSprite, 0, 0, 0, life, 1.5, 5.0, 0, 0.0, color, 0);
+		TE_SendToClient(client);
+	}
 }
 
 void DrawForClient(int client)
@@ -777,7 +872,8 @@ void PrintHintToAll(const char[] fmt, any ...)
 public void OnClientPutInServer(int client)
 {
 	// 中途加入自动开启(与 ApplyAutoOn 同策略)
-	if (g_bChainLoaded && g_hCvarAutoOn.BoolValue && !IsFakeClient(client))
+	bool ready = (g_hMode.IntValue == 1) ? g_bHLReady : g_bChainLoaded;
+	if (ready && g_hCvarAutoOn.BoolValue && !IsFakeClient(client))
 	{
 		g_bGuideOn[client] = true;
 		if (g_hDrawTimer[client] == null)
