@@ -98,6 +98,7 @@ public void OnPluginStart()
 	RegAdminCmd("chain_reload", CmdChainReload, ADMFLAG_ROOT, "重载 objectives 配置");
 	RegAdminCmd("chain_step", CmdChainStep, ADMFLAG_ROOT, "跳步: chain_step <n>");
 	RegAdminCmd("obj_skip", CmdObjSkip, ADMFLAG_ROOT, "暴力跳过(输入模拟): obj_skip=无限跳到完成; obj_skip <n>=限n步");
+	RegAdminCmd("obj_aim", CmdObjAim, ADMFLAG_ROOT, "查看准星指向的实体信息(配置剧本用)");
 
 	g_hCvarAutoOn  = CreateConVar("ptg_obj_auto_on", "1", "有 chain 配置的图中玩家默认自动开启引导线");
 	g_hCvarColorR  = CreateConVar("ptg_obj_color_r", "0", "引导线 R");
@@ -162,6 +163,12 @@ void FreeRoundState()
 
 void LoadChainConfig()
 {
+	// v0.9.1 幂等保护: 回合重启路径(Event_RoundStart→Timer_PostStart_Init)
+	// 不经 FreeRoundState, 二次加载会把步骤追加到旧数据上(实测 20+12=32)
+	g_iStepCount = 0;
+	g_iCurStep = 0;
+	delete g_fTargetX; delete g_fTargetY; delete g_fTargetZ;
+
 	g_bChainLoaded = false;
 	char path[PLATFORM_MAX_PATH];
 	BuildPath(Path_SM, path, sizeof(path), CFG_PATH);
@@ -916,6 +923,46 @@ static const char SCAN_CLASSES[][28] = {
 	"weapon_gascan", "weapon_gascan_scavenge", "weapon_colasingle",
 	"prop_minigun", "prop_physics"
 };
+
+// ────────────────────────── 准星查勘 ──────────────────────────
+// 管理员对准目标实体执行, 输出类名/目标名/坐标/模型——配置剧本的定位神器
+
+Action CmdObjAim(int client, int args)
+{
+	if (client < 1 || !IsClientInGame(client) || !IsPlayerAlive(client))
+		return Plugin_Handled;
+	float eye[3], ang[3], dir[3];
+	GetClientEyePosition(client, eye);
+	GetClientEyeAngles(client, ang);
+	GetAngleVectors(ang, dir, NULL_VECTOR, NULL_VECTOR);
+	float end[3];
+	for (int k = 0; k < 3; k++) end[k] = eye[k] + dir[k] * 3000.0;
+
+	TR_TraceRayFilter(eye, end, MASK_SOLID, RayType_EndPoint, TraceFilterWorldOnly);
+	if (!TR_DidHit())
+	{
+		PrintToChat(client, "[OBJ] 准星未命中实体");
+		return Plugin_Handled;
+	}
+	int ent = TR_GetEntityIndex();
+	if (ent <= 0 || ent > MaxClients + 4096)
+	{
+		PrintToChat(client, "[OBJ] 命中世界几何(非实体)");
+		return Plugin_Handled;
+	}
+	char cn[48], tn[48], mdl[96];
+	GetEntityClassname(ent, cn, sizeof(cn));
+	GetEntPropString(ent, Prop_Data, "m_iName", tn, sizeof(tn));
+	mdl[0] = 0;
+	if (HasEntProp(ent, Prop_Data, "m_ModelName"))
+		GetEntPropString(ent, Prop_Data, "m_ModelName", mdl, sizeof(mdl));
+	float c[3];
+	EntityCenter(ent, c);
+	PrintToChat(client, "[OBJ] ent=%d class=\x05%s\x01 name=\x05%s\x01", ent, cn, tn);
+	PrintToChat(client, "[OBJ] pos=(\x05%.0f %.0f %.0f\x01) model=%.70s", c[0], c[1], c[2], mdl);
+	LogMessage("[PTGOBJ] aim: ent=%d class=%s name=%s pos=(%.0f %.0f %.0f) model=%s", ent, cn, tn, c[0], c[1], c[2], mdl);
+	return Plugin_Handled;
+}
 
 Action CmdChainScan(int client, int args)
 {
