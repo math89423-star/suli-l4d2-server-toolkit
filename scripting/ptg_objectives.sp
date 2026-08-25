@@ -97,6 +97,7 @@ public void OnPluginStart()
 	RegAdminCmd("chain_scan", CmdChainScan, ADMFLAG_ROOT, "扫描全图交互嫌疑物");
 	RegAdminCmd("chain_reload", CmdChainReload, ADMFLAG_ROOT, "重载 objectives 配置");
 	RegAdminCmd("chain_step", CmdChainStep, ADMFLAG_ROOT, "跳步: chain_step <n>");
+	RegAdminCmd("obj_skip", CmdObjSkip, ADMFLAG_ROOT, "暴力跳过当前步骤(输入模拟): obj_skip [次数]");
 
 	g_hCvarAutoOn  = CreateConVar("ptg_obj_auto_on", "1", "有 chain 配置的图中玩家默认自动开启引导线");
 	g_hCvarColorR  = CreateConVar("ptg_obj_color_r", "0", "引导线 R");
@@ -771,6 +772,133 @@ public void OnClientPutInServer(int client)
 		if (g_hDrawTimer[client] == null)
 			g_hDrawTimer[client] = CreateTimer(REDRAW_INTERVAL, Timer_Draw, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 	}
+}
+
+// ────────────────────────── 暴力跳过(输入模拟) ──────────────────────────
+// 原理: 不需要知道谜题答案——直接重放该类实体的"完成语义"输入
+// (Press/Unlock+Open/Break/SetValue), 地图自身逻辑照常发生,
+// 我们的 hook 收到 OnXxx 后走正规推进流程。
+
+Action CmdObjSkip(int client, int args)
+{
+	if (!g_bChainLoaded || g_iCurStep >= g_iStepCount)
+	{
+		ReplyToCommand(client, "[PTGOBJ] 无进行中的步骤可跳过");
+		return Plugin_Handled;
+	}
+	char b[8];
+	int times = 1;
+	if (args >= 1)
+	{
+		GetCmdArg(1, b, sizeof(b));
+		times = StringToInt(b);
+		if (times < 1) times = 1;
+		if (times > MAX_STEPS) times = MAX_STEPS;
+	}
+	int done = 0;
+	for (int t = 0; t < times; t++)
+	{
+		if (g_iCurStep >= g_iStepCount) break;
+		if (!SkipCurrentStep())
+		{
+			// 输入被吞(按钮已消耗等): 明确告知, 避免空转
+			ReplyToCommand(client, "[PTGOBJ] 步骤 %d 无响应(实体可能已消耗)— 可用 chain_step %d 强推",
+				g_iCurStep + 1, g_iCurStep + 2 <= g_iStepCount ? g_iCurStep + 2 : g_iCurStep + 1);
+			break;
+		}
+		done++;
+	}
+	ReplyToCommand(client, "[PTGOBJ] skipped %d step(s), now at %d/%d", done, g_iCurStep + 1 <= g_iStepCount ? g_iCurStep + 1 : g_iStepCount, g_iStepCount);
+	return Plugin_Handled;
+}
+
+// 跳过当前一步; 返回是否真正推进了(g_iCurStep 前移)
+bool SkipCurrentStep()
+{
+	int before = g_iCurStep;
+	Step s;
+	s = g_Steps[g_iCurStep];
+
+	// reach / 无实体步骤: 手动推进度
+	if (s.eClass[0] == 0)
+	{
+		RegisterProgress();
+		return true;
+	}
+
+	char names[8][48];
+	int nameCnt = ExplodeString(s.eName, ",", names, 8, 48);
+	// acted 变量已由 g_iCurStep 前移判据取代
+	bool matchedAny = false;
+	int ent = -1;
+	while ((ent = FindEntityByClassname(ent, s.eClass)) != -1)
+	{
+		if (s.eName[0] != 0)
+		{
+			char tn[48];
+			GetEntPropString(ent, Prop_Data, "m_iName", tn, sizeof(tn));
+			bool hit = false;
+			for (int ni = 0; ni < nameCnt; ni++)
+				if (StrEqual(tn, names[ni])) { hit = true; break; }
+			if (!hit) continue;
+		}
+		matchedAny = true;
+		if (!IsValidEntity(ent)) continue;
+		if (ApplySkipInput(ent))
+		{
+			LogMessage("[PTGOBJ] skip input fired on ent=%d (%s)", ent, s.eClass);
+		}
+	}
+
+	if (!matchedAny)
+	{
+		// 实体不存在(已被消耗/解析失败): 直接推进度兜底
+		RegisterProgress();
+		return true;
+	}
+	// 有 hook 回调时 RegisterProgress 由 EO 触发(同步);
+	// 以 g_iCurStep 是否前移作为"真推进"判据
+	return (g_iCurStep != before);
+}
+
+// 对单个实体施加"完成语义"输入; 返回是否施加
+bool ApplySkipInput(int ent)
+{
+	char cn[48];
+	GetEntityClassname(ent, cn, sizeof(cn));
+
+	if (StrEqual(cn, "func_button") || StrEqual(cn, "func_rot_button") || StrEqual(cn, "momentary_rot_button"))
+	{
+		AcceptEntityInput(ent, "Unlock");
+		AcceptEntityInput(ent, "Press");
+		return true;
+	}
+	if (StrEqual(cn, "prop_door_rotating"))
+	{
+		AcceptEntityInput(ent, "Unlock");
+		AcceptEntityInput(ent, "Open");
+		return true;
+	}
+	if (StrEqual(cn, "func_door") || StrEqual(cn, "func_door_rotating"))
+	{
+		AcceptEntityInput(ent, "Unlock");
+		AcceptEntityInput(ent, "Open");
+		return true;
+	}
+	if (StrEqual(cn, "func_breakable") || StrEqual(cn, "func_breakable_surf"))
+	{
+		AcceptEntityInput(ent, "Break");
+		return true;
+	}
+	if (StrEqual(cn, "math_counter"))
+	{
+		// SetValue 到超大值 → 必然触发 OnHitMax
+		SetVariantString("99999");
+		AcceptEntityInput(ent, "SetValue");
+		return true;
+	}
+	// trigger/pickup 等: 无法输入模拟
+	return false;
 }
 
 // ────────────────────────── 扫描器 ──────────────────────────
