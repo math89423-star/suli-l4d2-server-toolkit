@@ -1,6 +1,5 @@
 // ============================================================
-//  [L4D2] Path To Goal — flow 梯度下降重写版 v5.0.2
-//
+//  [L4D2] Path To Goal — flow 梯度下降重写版 v5.0.2//
 //  弃用 11k 行自建 A* 管线（PTG v4.8.3），核心换成引擎 flow 场：
 //    引擎 flow = 从地图起点沿 nav 的弧长，递增方向 = 出口方向。
 //    从玩家所在 nav area 沿 4 向平面邻接（人类可走连接）做
@@ -10,6 +9,21 @@
 //  v5.0.2 (2026-08-13):
 //    - FIX: 多人同时开启导航线时，后开启者会覆盖前者的线（TE buffer 竞争）
 //      修复：为每个客户端创建独立定时器，错开画线时机，避免 TE_SetupBeamPoints 竞争
+//
+//  v5.0.4 (2026-08-25) — 三处"纯拒绝/同门槛扩召回"修复（不改任何已工作路径的判定）：
+//    - FIX1 实体桥阻挡证明：门/炸墙配对前 trace 两 area 连线（+36u 身高），
+//      必须命中该实体本身才注册。旧逻辑只看"实体两侧 70u 各有同层 area"，
+//      电梯井两侧楼板、跨天井的两侧 area 都会被误配 → 线把玩家往井里/坑里引
+//      （"指向无法通过的道路"主因之一）。
+//    - FIX2 攀爬可行性守卫：梯度步与 BFS 的向上邻居 Δz ∈ (66,120] 时
+//      （66=生还者跳跃高度上限），要求 WalkableBetween 中点地面采样通过
+//      （坡道/楼梯/跳台中点有贴近线性插值的地面；垂直墙/悬崖中点地面在
+//      低处 >40u 被拒）。纯拒绝：只影响本来就爬不上去的边。
+//    - FIX3 虚拟边扫描半径 ±1 桶 → ±3 桶：128u 网格下中心距 400u 的
+//      area 对最坏落在相隔 4 个桶上，±1 桶系统性漏配孤岛连接
+//      （"该绕路不绕路/断链"主因之一）。验证门槛不变（LOS+步行采样）。
+//    - 新增 root 命令 ptg_recalc：重建表 + 打印诊断（边数/实体桥明细/
+//      从每个幸存者起算的路径长度），用于空服对比验证。
 //
 //  已验证（c1m1_hotel，实验插件 l4d2_flow_path_test）：
 //    69.4% area 可达、0 断链、LOS 1.7%、单次路径 0.9ms、无后台管线
@@ -32,7 +46,7 @@
 #include <sourcemod>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION     "5.0.3 2026-08-14"
+#define PLUGIN_VERSION     "5.0.4 2026-08-25"
 #define CONFIG_FILENAME    "l4d_path_to_goal"
 
 #define TEAM_SURVIVOR      2
@@ -100,7 +114,52 @@ public void OnPluginStart()
 	g_hCvarDuration = CreateConVar("l4d_path_to_goal_duration", "0.5", "Beam lifetime in seconds (must be > redraw interval 0.3s to avoid flicker).", FCVAR_NOTIFY);
 	g_hCvarMax      = CreateConVar("l4d_path_to_goal_max", "32", "Max beam segments per frame (client TE buffer cap).", FCVAR_NOTIFY);
 
+	// v5.0.4: root 诊断——重建表 + 打印边数/实体桥明细/幸存者路径摘要
+	RegAdminCmd("ptg_recalc", CmdPtgRecalc, ADMFLAG_ROOT, "Rebuild PTG nav tables and print diagnostics.");
+
 	AutoExecConfig(true, CONFIG_FILENAME);
+}
+
+Action CmdPtgRecalc(int client, int args)
+{
+	EnsureInitForCurrentMap();
+
+	int vedgeCount = 0;
+	if (g_hVirtualEdges != null)
+	{
+		StringMapSnapshot snap = g_hVirtualEdges.Snapshot();
+		vedgeCount = snap.Length;
+		delete snap;
+	}
+	ReplyToCommand(client, "[PTG] map=%s areas=%d vedgeSrc=%d entityBridges=%d flowCoverage=%.0f%% goal=%s farGoal=%s",
+		g_sNavMap, g_hAreaList.Length, vedgeCount, g_iEntityBridges,
+		g_fFlowCoverage * 100.0, g_bHasGoal ? "Y" : "N", g_bFarGoalReady ? "Y" : "N");
+
+	// 幸存者（含 bot）路径摘要：验证全管线可算出路径
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || GetClientTeam(i) != TEAM_SURVIVOR || !IsPlayerAlive(i))
+			continue;
+		float org[3];
+		GetClientAbsOrigin(i, org);
+		float endFlow = -1.0;
+		int endAttrs = 0;
+		Address endArea = Address_Null;
+		ArrayList path = FlowPathFrom(org, endFlow, endAttrs, endArea);
+		char name[MAX_NAME_LENGTH];
+		GetClientName(i, name, sizeof(name));
+		if (path != null)
+		{
+			ReplyToCommand(client, "[PTG] path %s: len=%d endFlow=%.0f endAttrs=%d from=(%.0f %.0f %.0f)",
+				name, path.Length, endFlow, endAttrs, org[0], org[1], org[2]);
+			delete path;
+		}
+		else
+		{
+			ReplyToCommand(client, "[PTG] path %s: NULL from=(%.0f %.0f %.0f)", name, org[0], org[1], org[2]);
+		}
+	}
+	return Plugin_Handled;
 }
 
 public void OnMapStart()
@@ -341,6 +400,11 @@ void ComputeFarGoal()
 // =门也算通) 的 area 对 → 双向注册虚拟边。BFS 时 4 向 + 虚拟边一起搜。
 // OnMapStart 一次性构建缓存；渲染时每段 LOS 验证（直的绿线，转弯标红）。
 
+// v5.0.4 FIX3: 网格桶扫描半径。128u 桶 + 400u 配对距离下，两中心最坏相隔
+// 4 个桶（各压桶边时）；旧 ±1 桶系统性漏配 256-400u 的合法配对 → 孤岛
+// 连不上、该绕行的路画不出线。±3 全覆盖 400u 需求；验证门槛不变。
+#define PTG_VE_SCAN_R   3
+
 void BuildVirtualEdges()
 {
 	if (g_bVirtualBuilt)
@@ -432,9 +496,9 @@ void BuildVirtualEdges()
 		ExplodeString(gkey, "_", parts, 2, 16);
 		int gx = StringToInt(parts[0]);
 		int gy = StringToInt(parts[1]);
-		for (int dx = -1; dx <= 1; dx++)
+		for (int dx = -PTG_VE_SCAN_R; dx <= PTG_VE_SCAN_R; dx++)
 		{
-			for (int dy = -1; dy <= 1; dy++)
+			for (int dy = -PTG_VE_SCAN_R; dy <= PTG_VE_SCAN_R; dy++)
 			{
 				char nkey[32];
 				Format(nkey, sizeof(nkey), "%d_%d", gx + dx, gy + dy);
@@ -607,10 +671,37 @@ bool BridgeEntitySides(int ent, bool useYaw)
 	p1[0] += sx * 70.0; p1[1] += sy * 70.0;
 	p2[0] -= sx * 70.0; p2[1] -= sy * 70.0;
 
+	// v5.0.4 FIX1: 阻挡证明——实体必须真的隔在这两个 area 的连线上。
+	// 旧逻辑只看"两侧 70u 各有一个同层 area"就配对，电梯井/天井两侧的
+	// 楼板 area 与门/炸墙毫无关系也会被配上 → 线往井里画（无法通过）。
+	// +36u ≈ 膝胸高度（低于门楣、高于多数矮装饰），射线命中实体本身才放行。
+	float q1[3], q2[3];
+	q1 = p1; q1[2] += 36.0;
+	q2 = p2; q2[2] += 36.0;
+	TR_TraceRayFilter(q1, q2, MASK_SOLID, RayType_EndPoint, TraceFilterWorldOrData, ent);
+	if (!TR_DidHit() || TR_GetEntityIndex() != ent)
+	{
+		// v5.0.4: 被拒明细（审计用——确认拒掉的是井道/悬空误配而非真门）
+		char clsR[24];
+		GetEntityClassname(ent, clsR, sizeof(clsR));
+		LogMessage("[PTG] bridge REJECT %s ent=%d center=(%.0f %.0f %.0f) hit=%d",
+			clsR, ent, center[0], center[1], center[2], TR_DidHit() ? TR_GetEntityIndex() : -1);
+		return false;
+	}
+
 	Address a1 = GetSameFloorArea(p1);
 	Address a2 = GetSameFloorArea(p2);
 	if (a1 == Address_Null || a2 == Address_Null || a1 == a2)
 		return false;
+
+	// v5.0.4: 配对明细日志（ptg_recalc 审计用）
+	char cls[24];
+	GetEntityClassname(ent, cls, sizeof(cls));
+	float c1[3], c2[3];
+	L4D_GetNavAreaCenter(a1, c1);
+	L4D_GetNavAreaCenter(a2, c2);
+	LogMessage("[PTG] bridge OK %s ent=%d a1=(%.0f %.0f %.0f) a2=(%.0f %.0f %.0f)",
+		cls, ent, c1[0], c1[1], c1[2], c2[0], c2[1], c2[2]);
 
 	RegisterVirtualEdge(view_as<int>(a1), view_as<int>(a2));
 	RegisterVirtualEdge(view_as<int>(a2), view_as<int>(a1));
@@ -1098,6 +1189,11 @@ ArrayList FlowPathFrom(const float pos[3], float &endFlow, int &endAttrs, Addres
 						L4D_GetNavAreaCenter(a, zc);
 						if (FloatAbs(zc[2] - curZ) > 120.0)
 							continue;
+						// v5.0.4 FIX2: 向上 66u（跳跃上限）~120u 的邻居必须
+						// 通过中点地面采样（坡/楼梯/跳台过，垂直墙/悬崖拒）。
+						// 旧逻辑直接放行 → 线引到爬不上去的墙根下。
+						if (zc[2] - curZ > 66.0 && !WalkableBetween(czc, zc))
+							continue;
 						bestFlow = f;
 						best = a;
 					}
@@ -1239,6 +1335,16 @@ Address BfsBridge(Address start, float startFlow, Address goalArea, float startZ
 			//（楼梯相邻差 <80u，150u 上限安全；虚拟边自身已限 45u + 采样）
 			if (FloatAbs(g_hCenterZ.Get(curIdx) - g_hCenterZ.Get(nIdx)) > 150.0)
 				continue;
+			// v5.0.4 FIX2: BFS 同样受攀爬守卫——向上 66~150u 邻居须中点
+			// 地面采样通过，否则桥接路径会把玩家引到爬不上去的墙下
+			if (g_hCenterZ.Get(nIdx) - g_hCenterZ.Get(curIdx) > 66.0)
+			{
+				float pa2[3], pb2[3];
+				pa2[0] = g_hCenterX.Get(curIdx); pa2[1] = g_hCenterY.Get(curIdx); pa2[2] = g_hCenterZ.Get(curIdx);
+				pb2[0] = g_hCenterX.Get(nIdx);   pb2[1] = g_hCenterY.Get(nIdx);   pb2[2] = g_hCenterZ.Get(nIdx);
+				if (!WalkableBetween(pa2, pb2))
+					continue;
+			}
 			visited.Set(nIdx, 1);
 			parent.Set(nIdx, curIdx);
 
@@ -1364,4 +1470,10 @@ bool LosClear(const float p1[3], const float p2[3])
 public bool TraceFilterWorldOnly(int entity, int contentsMask, any data)
 {
 	return false;   // 忽略所有实体
+}
+
+// v5.0.4: 放行世界 + 指定实体（data=实体索引）——阻挡证明用
+public bool TraceFilterWorldOrData(int entity, int contentsMask, any data)
+{
+	return (entity == 0 || entity == data);
 }
