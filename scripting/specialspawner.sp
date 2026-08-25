@@ -267,6 +267,9 @@ int
 	// v1.7.0 三段定向：每只特感的段类型（0=前/1=中/2=后）
 	g_iSegs[MAX_WAVE],
 	// v1.7.0 分批状态（跨 timer 存活）
+	g_iSliceCursor,
+	g_iSliceEnd,
+	g_iSliceCaller,			// v6.4.0: 逐帧切片发起方(0=首发/1=续批)
 	g_iBatchNext,
 	g_iBatchTotal,
 	g_iBatchBatchSize,
@@ -368,7 +371,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "6.3.0",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
+	version = "6.4.0",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -2096,11 +2099,23 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	// 	PrintToChatAll("\x04[SI]\x01 特感来袭！");
 	// }
 
-	// v5.33: 首发一次性刷完（不受 batch_size 拆分）
+	// v5.33: 首发改为逐帧分散生成(v6.4.0), 完成后走 SliceDone 首发分支
+	g_iSliceCaller = 0;
 	SpawnSliced(0, g_iWaveInitial);
 
+	return true;
+}
+
+// v6.4.0: 逐帧切片完成回调——按发起方分流收尾
+void SliceDone() {
+	if (g_iSliceCaller == 0)
+		SliceDone_Initial();
+	else
+		SliceDone_Batch();
+}
+
+void SliceDone_Initial() {
 	// v6.0.0 调研落地: 首发被 Hard Gate 拦下的槽位（欠账）1s 后 catch-up 重采样补上
-	// ——失败不扣波次预算，不拿垃圾坐标硬刷（调研 §14/§28-①）
 	if (g_iBatchDebt > 0)
 		SISpawn_ScheduleCatchup();
 
@@ -2117,7 +2132,6 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 		if (g_iWaveReserve > 0) {
 			g_bInSpawnTime = false;
 			LogMessage("[SS] Initial batch done, reserve=%d remaining — waiting for replacements", g_iWaveReserve);
-			// 兜底：60s 内 reserve 未被消耗完 → 强制收尾（防波次卡死）
 			if (g_hReserveTimer == null)
 				g_hReserveTimer = CreateTimer(60.0, tmrReserveTimeout, _, TIMER_FLAG_NO_MAPCHANGE);
 		} else {
@@ -2126,8 +2140,6 @@ bool ExecuteSpawnQueue(int totalSI, bool retry) {
 	} else {
 		g_hBatchTimer = CreateTimer(g_fBatchInterval, tmrBatchContinue, _, TIMER_FLAG_NO_MAPCHANGE);
 	}
-
-	return true;
 }
 
 // v5.33: reserve 等待超时兜底——60s 内没补完也强制收尾，防波次永久卡在 PRESSURE
@@ -2513,8 +2525,28 @@ Action tmrCatchup(Handle timer) {
 // v1.7.0: 刷取队列 [from, to) 区间。每只特感按段类型决定方向与参照者子集，
 // v6.0.0: 逐只交给 SISpawn_PlaceOne（Hard Gate + Soft Score + 目标注入）。
 // 无任何"任意最近点"无条件 fallback；Hard Gate 不过就记欠账，由 catch-up 补。
+// v6.4.0: 逐帧分散生成——旧版同帧循环整批连续 L4D2_SpawnSpecial(每只带
+// 24 次采样搜索), 单帧引擎开销集中造成明显卡顿(用户实测)。改为每帧
+// 处理一只(RequestFrame 链), 波次节奏不变、单帧成本摊平。
 void SpawnSliced(int from, int to) {
-	for (int i = from; i < to; i++) {
+	g_iSliceCursor = from;
+	g_iSliceEnd = to;
+	if (from >= to) {
+		g_iBatchNext = to;
+		SliceDone();
+		return;
+	}
+	RequestFrame(TMR_SliceFrame, 0);
+}
+
+void TMR_SliceFrame(any data) {
+	if (g_iSliceCursor >= g_iSliceEnd) {
+		g_iBatchNext = g_iSliceEnd;
+		SliceDone();
+		return;
+	}
+	int i = g_iSliceCursor;
+	{
 		int zClass0 = g_hBatchQueue.Get(i);		// 0..5
 
 		// 段类型 → 方向 + 参照者子集 [refMin, refMax]（闭区间）
@@ -2569,7 +2601,13 @@ void SpawnSliced(int from, int to) {
 			LogMessage("[SS] Spawn FAILED class=%s targetRange=[%d,%d] dir=%d debt=%d", g_sZombieClass[zClass0], refMin, refMax, dir, g_iBatchDebt);
 		}
 	}
-	g_iBatchNext = to;
+	g_iSliceCursor++;
+	if (g_iSliceCursor < g_iSliceEnd)
+		RequestFrame(TMR_SliceFrame, 0);
+	else {
+		g_iBatchNext = g_iSliceEnd;
+		SliceDone();
+	}
 }
 
 // ============================================================================
@@ -2656,8 +2694,14 @@ Action tmrBatchContinue(Handle timer) {
 	int end = g_iBatchNext + g_iBatchBatchSize;
 	if (end > g_iBatchTotal)
 		end = g_iBatchTotal;
-	SpawnSliced(g_iBatchNext, end);
 
+	// v6.4.0: 逐帧分散生成, 完成后走 SliceDone 批次分支
+	g_iSliceCaller = 1;
+	SpawnSliced(g_iBatchNext, end);
+	return Plugin_Continue;
+}
+
+void SliceDone_Batch() {
 	if (g_iBatchNext >= g_iBatchTotal) {
 		// v5.33: reserve > 0 时不立即收尾——等补位完成或 CLEARING 硬上限兜底
 		if (g_iWaveReserve > 0) {
@@ -2669,7 +2713,6 @@ Action tmrBatchContinue(Handle timer) {
 	} else {
 		g_hBatchTimer = CreateTimer(g_fBatchInterval, tmrBatchContinue, _, TIMER_FLAG_NO_MAPCHANGE);
 	}
-	return Plugin_Continue;
 }
 
 // v1.7.0: 整波收尾——guard 统计日志（跨批累计）、刷怪窗口关闭、retry 判定、
