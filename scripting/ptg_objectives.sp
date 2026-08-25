@@ -97,7 +97,7 @@ public void OnPluginStart()
 	RegAdminCmd("chain_scan", CmdChainScan, ADMFLAG_ROOT, "扫描全图交互嫌疑物");
 	RegAdminCmd("chain_reload", CmdChainReload, ADMFLAG_ROOT, "重载 objectives 配置");
 	RegAdminCmd("chain_step", CmdChainStep, ADMFLAG_ROOT, "跳步: chain_step <n>");
-	RegAdminCmd("obj_skip", CmdObjSkip, ADMFLAG_ROOT, "暴力跳过当前步骤(输入模拟): obj_skip [次数]");
+	RegAdminCmd("obj_skip", CmdObjSkip, ADMFLAG_ROOT, "暴力跳过(输入模拟): obj_skip=无限跳到完成; obj_skip <n>=限n步");
 
 	g_hCvarAutoOn  = CreateConVar("ptg_obj_auto_on", "1", "有 chain 配置的图中玩家默认自动开启引导线");
 	g_hCvarColorR  = CreateConVar("ptg_obj_color_r", "0", "引导线 R");
@@ -787,7 +787,7 @@ Action CmdObjSkip(int client, int args)
 		return Plugin_Handled;
 	}
 	char b[8];
-	int times = 1;
+	int times = MAX_STEPS + 1;   // 默认无限: 跳到链完成或首个无响应为止
 	if (args >= 1)
 	{
 		GetCmdArg(1, b, sizeof(b));
