@@ -938,16 +938,17 @@ Action CmdObjAim(int client, int args)
 	float end[3];
 	for (int k = 0; k < 3; k++) end[k] = eye[k] + dir[k] * 3000.0;
 
-	TR_TraceRayFilter(eye, end, MASK_SOLID, RayType_EndPoint, TraceFilterWorldOnly);
+	// v0.9.3: 忽略所有玩家(含自己)——否则起射线先打中自己的碰撞体
+	TR_TraceRayFilter(eye, end, MASK_SOLID, RayType_EndPoint, TraceFilterIgnorePlayers);
 	if (!TR_DidHit())
 	{
-		PrintToChat(client, "[OBJ] 准星未命中实体");
+		PrintToChat(client, "[OBJ] 准星未命中任何东西");
 		return Plugin_Handled;
 	}
 	int ent = TR_GetEntityIndex();
-	if (ent <= 0 || ent > MaxClients + 4096)
+	if (ent == 0)
 	{
-		PrintToChat(client, "[OBJ] 命中世界几何(非实体)");
+		PrintToChat(client, "[OBJ] 命中世界几何(墙体/地面)");
 		return Plugin_Handled;
 	}
 	char cn[48], tn[48], mdl[96];
@@ -1004,4 +1005,10 @@ Action CmdChainScan(int client, int args)
 	}
 	ReplyToCommand(client, "[PTGOBJ] done total=%d → %s", total, path);
 	return Plugin_Handled;
+}
+
+// v0.9.3: 准星查勘过滤器——忽略玩家, 命中世界与实体
+public bool TraceFilterIgnorePlayers(int entity, int contentsMask, any data)
+{
+	return (entity > MaxClients);
 }
