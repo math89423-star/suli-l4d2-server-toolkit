@@ -1247,10 +1247,12 @@ public Hunter_OnModuleStart() {
             FCVAR_NONE, true, 0.0, true, 3.0);
     }
     if (FindConVar("ai_hunter_pounce_spread") == null) {
-        CreateConVar("ai_hunter_pounce_spread", "30.0",
-            "Hunter 扑击扇形随机角度（±度，0 = 直线瞄准）",
+        CreateConVar("ai_hunter_pounce_spread", "55.0",
+            "Hunter 扑击扇形随机角度（±度，0 = 直线瞄准）。v5.43: 30→55 加大不可预测性",
             FCVAR_NONE, true, 0.0, true, 60.0);
     }
+    // v5.43: 同名 cvar 会恢复会话旧值 → 显式钉到新默认(30→55)
+    SetConVarFloat(FindConVar("ai_hunter_pounce_spread"), 55.0);
     SetConVarInt(FindConVar("hunter_committed_attack_range"), 10000);
     // v5.24: ready_range 保持 1500（引擎"更早进入扑击准备"= 提前蹲伏走位），
     // 与 BT 攻击门控 1000（引擎有效射程）分工：1500u 内引擎开始准备、

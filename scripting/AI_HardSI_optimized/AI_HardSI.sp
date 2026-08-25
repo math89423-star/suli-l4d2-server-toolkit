@@ -191,7 +191,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "5.42.0",
+    version = "5.43.0",
     url = "github.com/breezyplease"
 };
 
@@ -904,12 +904,12 @@ stock void AssignWaveRole(int client) {
     // v5.26/v5.30: 角色分配（用户拍板）：
     //   原：只有首个 Boomer/Smoker 当发起者 → Hunter/Jockey 100% 骚扰者
     //   v5.26: 每只非 Tank 特感独立 50/50 掷骰
-    //   v5.30: 用户调整为 6:4 —— 进攻者 60% / 骚扰者 40%
+    //   v5.43: 用户调整为 7:3 —— 进攻者 70% / 骚扰者 30%（攻击欲望再提）
     //   INITIATOR（进攻者）：直接全力进攻（不游走）
     //   HARASSER（骚扰者）：游走一会（≤ ai_harass_max_hold 硬超时）再进攻
     // 无发起者时由 CND_HarasserReleased 的 5s 硬超时/到嘴边兜底（v5.19）。
-    if (GetRandomFloat(0.0, 1.0) < 0.6) {
-        BB_SetInt(client, "wave_role", 1);  // ROLE_INITIATOR（60%）
+    if (GetRandomFloat(0.0, 1.0) < 0.7) {
+        BB_SetInt(client, "wave_role", 1);  // ROLE_INITIATOR（70%）
         g_bWaveHasInitiator = true;
         g_fWaveStartTime = GetGameTime();
         LogMessage("[AI_HardSI] SI(%d class=%d) assigned as INITIATOR (60%)", client, class);
