@@ -60,7 +60,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.7.8"
+#define PLUGIN_VERSION "2.7.9"
 
 // 配置常量
 #define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
@@ -449,7 +449,33 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
                                n + 1, (n % 2 == 0) ? "front" : "back",
                                spawnPos[0], spawnPos[1], spawnPos[2], tank);
                 } else {
-                    LogMessage("[Tank Mutator] Tank #%d fallback spawn failed: invalid entity", n + 1);
+                    // v2.7.9: 实体无效也走紧急 PZ 兜底(原来只有无地面才走)
+                    LogMessage("[Tank Mutator] Tank #%d fallback invalid entity -> emergency PZ", n + 1);
+                    bool emergOk2 = false;
+                    float emergPos2[3] = {0.0,0.0,0.0};
+                    float cpos2[3]; GetClientAbsOrigin(client, cpos2);
+                    for (int e2 = 0; e2 < 6 && !emergOk2; e2++) {
+                        float tp[3];
+                        if (!L4D_GetRandomPZSpawnPosition(client, 8, 5, tp)) continue;
+                        if (GetVectorDistance(tp, cpos2) < 400.0) continue;
+                        emergPos2 = tp;
+                        emergOk2 = true;
+                    }
+                    if (emergOk2) {
+                        int t2 = L4D2_SpawnTank(emergPos2, spawnAng);
+                        if (t2 > 0 && IsClientInGame(t2)) {
+                            g_iTanks[spawned] = t2;
+                            GetClientAbsOrigin(t2, g_fTankLastPos[spawned]);
+                            g_iTankStuckChecks[spawned] = 0;
+                            spawned++;
+                            LogMessage("[Tank Mutator] Tank #%d EMERGENCY spawned at (%.1f, %.1f, %.1f), client: %d",
+                                       n + 1, emergPos2[0], emergPos2[1], emergPos2[2], t2);
+                        } else {
+                            LogMessage("[Tank Mutator] Tank #%d emergency also failed", n + 1);
+                        }
+                    } else {
+                        LogMessage("[Tank Mutator] Tank #%d emergency: no usable PZ point", n + 1);
+                    }
                 }
             } else {
                 LogMessage("[Tank Mutator] Tank #%d fallback failed: no ground point front/back", n + 1);
@@ -656,26 +682,19 @@ void RelocateStuckTank(int tank) {
                 LogMessage("[Tank Mutator] Stuck tank %d relocated next to buddy %d at (%.1f, %.1f, %.1f)",
                            tank, buddy, ground[0], ground[1], ground[2]);
             } else {
-                // ground 点验证/nav失败 → 尝试伙伴位置（bPos本身是活Tank脚底，nav必通）
-                if (ValidateTankSpawnPoint(bPos)) {
-                    float ang2[3] = {0.0, 0.0, 0.0};
-                    TeleportEntity(tank, bPos, ang2, NULL_VECTOR);
-                    LogMessage("[Tank Mutator] Stuck tank %d relocated to buddy %d spot (ground failed validation/nav)",
-                               tank, buddy);
-                } else {
-                    LogMessage("[Tank Mutator] Stuck tank %d buddy relocate failed: both ground and buddy pos invalid", tank);
-                }
-            }
-        } else {
-            // 地面 trace 异常 → 尝试伙伴位置（需验证）
-            if (ValidateTankSpawnPoint(bPos)) {
+                // v2.7.9: bPos=活Tank脚底=已被实践证明可站立 → 无条件直传
+                // (旧逻辑再过校验反而把唯一可行点拒掉 → 卡死循环, 玩家实测复现)
                 float ang2[3] = {0.0, 0.0, 0.0};
                 TeleportEntity(tank, bPos, ang2, NULL_VECTOR);
-                LogMessage("[Tank Mutator] Stuck tank %d relocated to buddy %d exact spot (%.1f, %.1f, %.1f)",
+                LogMessage("[Tank Mutator] Stuck tank %d relocated to buddy %d spot UNVALIDATED (%.1f, %.1f, %.1f)",
                            tank, buddy, bPos[0], bPos[1], bPos[2]);
-            } else {
-                LogMessage("[Tank Mutator] Stuck tank %d buddy relocate failed: no ground AND buddy pos invalid", tank);
             }
+        } else {
+            // v2.7.9: 同上无条件直传伙伴脚底
+            float ang2[3] = {0.0, 0.0, 0.0};
+            TeleportEntity(tank, bPos, ang2, NULL_VECTOR);
+            LogMessage("[Tank Mutator] Stuck tank %d relocated to buddy %d exact spot UNVALIDATED (%.1f, %.1f, %.1f)",
+                       tank, buddy, bPos[0], bPos[1], bPos[2]);
         }
         return;
     }
