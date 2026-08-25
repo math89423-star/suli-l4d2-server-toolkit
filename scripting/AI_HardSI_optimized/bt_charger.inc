@@ -857,7 +857,7 @@ stock int BT_CreateChargerTree() {
     int chargeRoot = BT_Create(BTN_SELECTOR);
     BT_AddChild(chargeRoot, hangingCharge);        // v5.18: 撞落挂边者
     BT_AddChild(chargeRoot, guardedChargeCluster); // v5.18: 守卫后的原冲锋簇
-    int cooldownCharge = BT_CreateCooldown(12.0, chargeRoot);  // v4.0.3: 对齐 z_charge_interval=12s
+    int cooldownCharge = BT_CreateCooldown(8.0, chargeRoot);  // v5.42: 对齐 z_charge_interval=8s（与模块设置同步改）
 
     // v5.0 突破手绕行：12s 冲锋冷却期间绕侧后接近密集区（CircleFlank 大弧线，
     // 从生还者视线外绕到侧后方），技能冷却一好立即被 cooldownCharge 的
@@ -931,6 +931,11 @@ stock int BT_CreateChargerTree() {
 }
 
 public Charger_OnModuleStart() {
+    // v5.42 攻击欲望修正(🥈): z_charge_interval 12→8 + BT 冷却同步 8s
+    // (两处必须一起动——cvar 管引擎层, BT_CreateCooldown 管 BT 层)
+    ConVar hCvChargeInt = FindConVar("z_charge_interval");
+    if (hCvChargeInt != null) hCvChargeInt.SetFloat(8.0);
+
     // ai_charge_proximity：BT 发起冲锋的距离门槛（按钮路径，引擎对按钮冲锋
     // 无距离限制；是否打得中取决于冲锋物理覆盖）。
     // v4.0.3 验证结论（空服 rcon 实测，见 ENGINE_CVARS.md）：

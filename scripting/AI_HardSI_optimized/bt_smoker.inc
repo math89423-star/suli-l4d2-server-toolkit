@@ -730,6 +730,9 @@ stock int BT_CreateSmokerTree() {
 
 public Smoker_OnModuleStart() {
     SetConVarFloat(FindConVar("smoker_tongue_delay"), 1.0);
-    // v5.41: 缓存 tongue_miss_delay（默认 15s，发射落空后的引擎再射锁定期）
+    // v5.42 攻击欲望修正(🥇): tongue_miss_delay 15→7 —— 引擎默认失手后
+    // 蒸发 15s 是 Smoker 存在感低的主因。单源原则: 本 cvar 即唯一真值,
+    // v5.41 的失手退避逻辑锁读此值, 自动跟随。
+    SetConVarFloat(FindConVar("tongue_miss_delay"), 7.0);
     g_hCvarTongueMissDelay = FindConVar("tongue_miss_delay");
 }
