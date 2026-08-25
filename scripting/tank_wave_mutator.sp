@@ -60,7 +60,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.7.11"
+#define PLUGIN_VERSION "2.7.12"
 
 // 配置常量
 #define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
@@ -110,6 +110,7 @@ ConVar g_hCvarFrontrunner = null; // v2.7.5: Tank 瞄领跑者开关
 // v2.6.0: 卡住看护状态（与 g_iTanks 同下标）
 float g_fTankLastPos[MAX_TRACKED_TANKS][3];   // 上次监控位置
 int   g_iTankStuckChecks[MAX_TRACKED_TANKS];  // 连续"没动"检查计数
+int   g_iTankRelocates[MAX_TRACKED_TANKS];    // v2.7.12: 累计重定位次数(处决判据)
 
 public Plugin myinfo = {
     name = "Tank Wave Mutator",
@@ -596,6 +597,7 @@ void ClearTankTracking() {
     for (int i = 0; i < MAX_TRACKED_TANKS; i++) {
         g_iTanks[i] = 0;
         g_iTankStuckChecks[i] = 0;
+        g_iTankRelocates[i] = 0;
         g_fTankLastPos[i][0] = g_fTankLastPos[i][1] = g_fTankLastPos[i][2] = 0.0;
     }
     g_iTankCount = 0;
@@ -674,8 +676,20 @@ void CheckAllTanksStatus() {
                 if (moved < TANK_STUCK_MOVE) {
                     g_iTankStuckChecks[i]++;
                     if (g_iTankStuckChecks[i] >= TANK_STUCK_CHECKS) {
-                        LogMessage("[Tank Mutator] Tank %d stuck (moved %.0f in %d checks), relocating",
-                                   g_iTanks[i], moved, g_iTankStuckChecks[i]);
+                        LogMessage("[Tank Mutator] Tank %d stuck (moved %.0f in %d checks), relocating (#%d)",
+                                   g_iTanks[i], moved, g_iTankStuckChecks[i], g_iTankRelocates[i]+1);
+                        // v2.7.12 处决保证: 重定位 3 次仍卡死 → 系统处决。
+                        // Tank 波清缴挂起无视 120s 上限, 一只救不回的 Tank =
+                        // 波次无限停滞; 与普通 SI 的 25s 处决对齐兜底语义。
+                        if (g_iTankRelocates[i] >= 2) {
+                            LogMessage("[Tank Mutator] Tank %d relocated %dx and still stuck -> EXECUTE",
+                                       g_iTanks[i], g_iTankRelocates[i]);
+                            ForcePlayerSuicide(g_iTanks[i]);
+                            g_iTankRelocates[i] = 0;
+                            g_iTankStuckChecks[i] = 0;
+                            continue;
+                        }
+                        g_iTankRelocates[i]++;
                         RelocateStuckTank(g_iTanks[i]);
                         GetClientAbsOrigin(g_iTanks[i], g_fTankLastPos[i]);
                         g_iTankStuckChecks[i] = 0;
@@ -683,6 +697,7 @@ void CheckAllTanksStatus() {
                 } else {
                     g_fTankLastPos[i] = pos;
                     g_iTankStuckChecks[i] = 0;
+                    g_iTankRelocates[i] = 0;   // 恢复机动 → 处决计数归零
                 }
             } else {
                 // Tank 已失效或死亡
