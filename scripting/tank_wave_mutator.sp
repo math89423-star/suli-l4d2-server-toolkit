@@ -60,7 +60,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.7.7"
+#define PLUGIN_VERSION "2.7.8"
 
 // 配置常量
 #define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
@@ -155,8 +155,11 @@ void Event_RoundStart(Event event, const char[] name, bool dontBroadcast) {
     g_iTankCooldown = 0;
     g_bNextWaveIsTank = false;
     g_iNextTankCount = 0;
-    g_fRestBaseMin = 0.0;   // v2.7.7: 换图后重捕获（cfg 可能已改）
-    g_fRestBaseMax = 0.0;
+    // v2.7.8: 基准改为插件加载时捕获一次、跨回合持久——
+    // 实测教训: ss_rest_* 在回合间不清零, 若上一回合尾部停在 Tank 缩放值
+    // (如 [37.5,52.5]), 本回合首次 REST 的"重新捕获"会把污染值当基准,
+    // 之后所有 normal 波全部抽到 49~51s(2026-08-25 玩家实测复现)。
+    // 换图仍会重捕获: 全局量随插件换图自然重置, 且换图必然重跑 cfg。
     ClearTankTracking();
     ReleaseClearingHold();
     LogMessage("[Tank Mutator] Round start, all counters reset");
