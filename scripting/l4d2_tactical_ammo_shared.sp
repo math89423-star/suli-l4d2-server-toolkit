@@ -15,7 +15,7 @@
 ConVar g_cvExplosSelfDmg, g_cvExplosSelfRadius, g_cvExplosSelfStagger;
 float g_fLastSelfDmg[MAXPLAYERS+1];
 int g_iWeaponUnlock[2048]; // bit0=incend bit1=explos per weapon entindex
-Handle g_hHudSync=null;
+int g_iHudEnt[MAXPLAYERS+1]; // 每玩家的game_text实体（左上角弹药HUD）
 
 int GetClipSize(int weapon){
     char cls[64]; GetEdictClassname(weapon,cls,sizeof(cls));
@@ -33,19 +33,31 @@ int GetClipSize(int weapon){
 public Plugin myinfo={name="[L4D2] Permanent Special Ammo",author="suli",description="拾取特殊弹药后武器永久发射特殊子弹",version="2.0.0",url=""};
 
 public void OnPluginStart(){
-    g_cvExplosSelfDmg=CreateConVar("l4d2_tactical_explos_self_damage","25","高爆自伤基础伤害",FCVAR_NOTIFY,true,1.0,true,100.0);
+    g_cvExplosSelfDmg=CreateConVar("l4d2_tactical_explos_self_damage","25","高爆自伤基础伤害 (0=关闭自伤)",FCVAR_NOTIFY,true,0.0,true,100.0);
     g_cvExplosSelfRadius=CreateConVar("l4d2_tactical_explos_self_radius","150","高爆自伤判定半径",FCVAR_NOTIFY,true,10.0,true,500.0);
-    g_cvExplosSelfStagger=CreateConVar("l4d2_tactical_explos_self_stagger","1","高爆自伤是否带击退硬直",FCVAR_NOTIFY,true,0.0,true,1.0);
+    g_cvExplosSelfStagger=CreateConVar("l4d2_tactical_explos_self_stagger","1","高爆自伤是否带击退硬直 (0=关闭)",FCVAR_NOTIFY,true,0.0,true,1.0);
     HookEvent("bullet_impact",Event_BulletImpact,EventHookMode_Post);
     HookEvent("round_start",Event_RoundStart,EventHookMode_PostNoCopy);
     AutoExecConfig(true,"l4d2_tactical_ammo");
-    g_hHudSync=CreateHudSynchronizer();
     CreateTimer(0.2,Timer_HUD,_,TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public void Event_RoundStart(Event e,const char[] n,bool d){
     for(int i=0;i<2048;i++) g_iWeaponUnlock[i]=0;
     for(int i=1;i<=MaxClients;i++) g_fLastSelfDmg[i]=0.0;
+    CleanupAllHudEnts();
+}
+
+public void OnClientDisconnect(int c){
+    if(g_iHudEnt[c]>0&&IsValidEntity(g_iHudEnt[c])) RemoveEntity(g_iHudEnt[c]);
+    g_iHudEnt[c]=0;
+}
+
+void CleanupAllHudEnts(){
+    for(int i=1;i<=MaxClients;i++){
+        if(g_iHudEnt[i]>0&&IsValidEntity(g_iHudEnt[i])) RemoveEntity(g_iHudEnt[i]);
+        g_iHudEnt[i]=0;
+    }
 }
 
 // HUD轮询：检测武器特殊弹 + 持续维持（永久特殊）
@@ -64,13 +76,12 @@ public Action Timer_HUD(Handle t){
             if(w<2048) g_iWeaponUnlock[w]|=(mode==MODE_EXPLOS?2:1);
             bits=(w>=0&&w<2048)?g_iWeaponUnlock[w]:0;
         }
-        PrintToChatAll("[DBG] HUD c=%d bits=%d bitVec=%d up=%d clip=%d",c,bits,bitVec,up,clip);
         // 对已解锁武器持续维持特殊弹（永久，不消耗）
         if(bits!=0){
             int mode;
             if(bits&2) mode=MODE_EXPLOS;
             else if(bits&1) mode=MODE_INCEND;
-            else { ClearSyncHud(c,g_hHudSync); continue; }
+            else continue;
             int needBit=(mode==MODE_INCEND?1:2);
             // 保持特殊位（保留激光位bit4）
             if((bitVec&needBit)==0){
@@ -80,18 +91,56 @@ public Action Timer_HUD(Handle t){
             if(clip>0 && up<clip){
                 SetEntProp(w,Prop_Send,"m_nUpgradedPrimaryAmmoLoaded",clip);
             }
-            // 显示弹夹/容量/备弹（引擎特殊弹模式下隐藏原版HUD，用自定义HUD替代）
-            int maxClip=GetClipSize(w);
-            int reserve=0;
-            int at=GetEntProp(w,Prop_Send,"m_iPrimaryAmmoType");
-            if(at>=0&&at<32) reserve=GetEntProp(c,Prop_Send,"m_iAmmo",_,at);
-            char line[64];
-            Format(line,sizeof(line),"[%s] %d/%d 备弹%d",mode==MODE_INCEND?"燃烧":"高爆",clip,maxClip,reserve);
-            SetHudTextParams(0.02,0.1,0.4,255,0,0,255,0,0.0,0.0,0.0);
-            ShowHudText(c,3,line);
-        } else ClearSyncHud(c,g_hHudSync);
+        }
     }
     return Plugin_Continue;
+}
+
+// 每帧刷新弹药HUD（L4D2上HudMsg/ShowHudText/KeyHintText不可靠，用game_text实体显示左上角）
+public Action OnPlayerRunCmd(int client,int &buttons,int &impulse,float vel[3],float angles[3],int &weapon,int &subtype,int &cmdnum,int &tickcount,int &seed,int mouse[2]){
+    if(!IsClientInGame(client)||IsFakeClient(client)||!IsPlayerAlive(client)) return Plugin_Continue;
+    int w=GetPlayerWeaponSlot(client,0);
+    if(w<=0||!IsValidEdict(w)) return Plugin_Continue;
+    int bits=(w>=0&&w<2048)?g_iWeaponUnlock[w]:0;
+    if(bits==0){
+        if(g_iHudEnt[client]>0&&IsValidEntity(g_iHudEnt[client])) RemoveEntity(g_iHudEnt[client]);
+        g_iHudEnt[client]=0;
+        return Plugin_Continue;
+    }
+    int mode=(bits&2)?MODE_EXPLOS:MODE_INCEND;
+    int clip=GetEntProp(w,Prop_Send,"m_iClip1");
+    int maxClip=GetClipSize(w);
+    int reserve=0;
+    int at=GetEntProp(w,Prop_Send,"m_iPrimaryAmmoType");
+    if(at>=0&&at<32) reserve=GetEntProp(client,Prop_Send,"m_iAmmo",_,at);
+    char line[64];
+    Format(line,sizeof(line),"[%s] %d/%d 备弹%d",mode==MODE_INCEND?"燃烧":"高爆",clip,maxClip,reserve);
+    ShowAmmoHud(client,line);
+    return Plugin_Continue;
+}
+
+// game_text实体在左上角显示（Display的activator=client只给该玩家看）
+void ShowAmmoHud(int client,const char[] text){
+    int ent=g_iHudEnt[client];
+    if(ent<=0||!IsValidEntity(ent)){
+        ent=CreateEntityByName("game_text");
+        if(ent==-1) return;
+        DispatchKeyValue(ent,"message",text);
+        DispatchKeyValue(ent,"x","0.02");
+        DispatchKeyValue(ent,"y","0.08");
+        DispatchKeyValue(ent,"effect","0");
+        DispatchKeyValue(ent,"color","255 200 0");
+        DispatchKeyValue(ent,"color2","255 200 0");
+        DispatchKeyValue(ent,"fadein","0");
+        DispatchKeyValue(ent,"fadeout","0");
+        DispatchKeyValue(ent,"fxtime","0");
+        DispatchKeyValue(ent,"holdtime","0.5");
+        DispatchSpawn(ent);
+        g_iHudEnt[client]=ent;
+    } else {
+        DispatchKeyValue(ent,"message",text);
+    }
+    AcceptEntityInput(ent,"Display",client,client);
 }
 
 // 高爆自伤

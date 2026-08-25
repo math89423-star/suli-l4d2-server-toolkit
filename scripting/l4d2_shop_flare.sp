@@ -67,6 +67,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
     CreateNative("AerialFlare_Buy", Native_AerialFlareBuy);
     CreateNative("AerialFlare_IsAiming", Native_AerialFlareIsAiming);
     CreateNative("AerialFlare_GetCount", Native_AerialFlareGetCount);
+    CreateNative("AerialFlare_HasFlare", Native_AerialFlareHasFlare);
     RegPluginLibrary("l4d2_aerial_flare");
     return APLRes_Success;
 }
@@ -160,6 +161,7 @@ int Native_AerialFlareBuy(Handle plugin, int numParams)
 
 int Native_AerialFlareIsAiming(Handle p, int n) { return 0; }
 int Native_AerialFlareGetCount(Handle p, int n) { return GetActiveFlareCount(); }
+int Native_AerialFlareHasFlare(Handle p, int n) { int c = GetNativeCell(1); if (c < 1 || c > MaxClients) return 0; return g_bHasFlare[c] ? 1 : 0; }
 
 // ============================================================================
 // OnPlayerRunCmd — shoot on IN_ATTACK

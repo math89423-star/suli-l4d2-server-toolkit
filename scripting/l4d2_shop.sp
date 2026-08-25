@@ -291,7 +291,7 @@
  * ③商店菜单新增「火力支援」分类（cat=4，用户拍板）——I-轰炸/II-燃烧/III-胆汁雨
  * 从"其他"移入，菜单分类页 0-4。
  * ④新增商品（用户定稿）：马格南 2000（武器栏，weapon_pistol_magnum）、
- * 燃烧弹包 500 / 高爆弹包 500（其它栏，weapon_upgradepack_incendiary/
+ * 燃烧弹包 1000 / 高爆弹包 1000（其它栏，weapon_upgradepack_incendiary/
  * weapon_upgradepack_explosive，升级包走现有 ShopSpawn 通用路径）。表尾
  * 追加三行不动 WALLHACK_SLOT 12。SHOP_SLOTS 18→21。
  * v1.4.1（2026-08-03）：TEST 期结束（用户拍板）——0-14 槽全部恢复原价
@@ -396,6 +396,7 @@ native int ShopFlare_HasActive(int client);
 native int AerialFlare_Buy(int client);
 native int AerialFlare_IsAiming(int client);
 native int AerialFlare_GetCount();
+native int AerialFlare_HasFlare(int client);
 
 ConVar g_cvSIHudEnable;      // si_hud 总开关（FindConVar 读；null 视为开启）
 
@@ -529,7 +530,7 @@ ConVar g_cvRespawnPrimaryPool;  // v1.11.0: 复活套装主武器随机池（2�
 #define ART3_BREAK_PARTICLE  "boomer_explosion"
 #define ART3_CHASE_DURATION  8.0      // 吸引实体存活秒数（控场时长）
 
-#define SHOP_SLOTS      28      // v1.13.3: 信号弹单发化 + 信号棒下架→ 28→27；+空中照明弹→28。⚠ 必须与 g_ShopTable 初始化行数严格一致
+#define SHOP_SLOTS      27      // v1.13.4: 下架武士刀 28→27。⚠ 必须与 g_ShopTable 初始化行数严格一致
 
 #define WALLHACK_SLOT       8      // g_ShopTable 槽位（= 透视特感）；v1.11.3: 9→8（电锯行删除使透视前移 1）
 #define WALLHACK_DURATION   180.0   // v1.8.2: 3 分钟（2026-08-03 用户改回，原 v1.8.1 定稿 300=5 分钟）
@@ -614,7 +615,6 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // v1.7.0: "复活币 8500" 商品已删除（复活体系改为积分复活，见 si_hud v1.12.0）
     // v1.7.1: 删除后透视特感滑到槽 11，WALLHACK_SLOT 已同步改 11
     { "透视特感",    "wallhack",                         5000,  0,  3 },   // v1.8.6: 涨价 4000→5000
-    { "武士刀",      "melee_box",                        2500,  0,  0 },   // v1.12.0: 近战盲盒→固定武士刀（用户拍板：统一改成武士刀、不再抽奖/不再叫盲盒）；价格沿用 2500
     { "烟花",        "weapon_fireworkcrate",             1200,  0,  1 },   // v1.7.96: 用户定稿 1200（原 2500）
     // v1.4.3: 按价格重排编号（用户拍板）——胆汁雨 3500 最低 = I、轰炸 5500 = II、
     // 燃烧 6500 = III（原 III-胆汁雨/I-轰炸/II-燃烧）；v1.4.5 定名：绿色雨幕/地狱烈火/地毯轰炸
@@ -634,12 +634,12 @@ ShopItem g_ShopTable[SHOP_SLOTS] = {
     // gen_rockblast_posZ/gas_explosion_main 粒子），零客户端分发。
     , { "火力支援IV-AGM导弹", "artillery6",                  18000,  0,  4 }   // v1.8.4: 定稿价 18000
     // v1.4.0: 新增商品（用户定稿；表尾追加不动透视特感槽位 12）——
-    // 马格南 2000（武器栏）、燃烧弹包/高爆弹包 500（升级包走现有
+    // 马格南 2000（武器栏）、燃烧弹包/高爆弹包 1000（升级包走现有
     // ShopSpawn 通用生成路径，与激光瞄准同类）
     // v1.4.3: 燃烧弹包/高爆弹包移入道具类（cat 3→1）
     , { "马格南",      "weapon_pistol_magnum",          2000,  0,  0 }
-    , { "燃烧弹包",    "weapon_upgradepack_incendiary",  15000,  0,  2 }
-    , { "高爆弹包",    "weapon_upgradepack_explosive",   15000,  0,  2 }
+    , { "燃烧弹包",    "weapon_upgradepack_incendiary",  1000,  0,  2 }
+    , { "高爆弹包",    "weapon_upgradepack_explosive",   1000,  0,  2 }
     // v1.4.6: 投掷类新增商品（用户定稿）——胆汁 850 / 土质炸弹(pipe_bomb) 900 /
     // 燃烧瓶(molotov) 2500；cat=5 投掷（菜单第 4 类，火力支援/其他顺移）；
     // 走 ShopSpawn 通用生成路径（投掷物实体直接生成可拾取）
@@ -765,6 +765,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
     MarkNativeAsOptional("AerialFlare_Buy");
     MarkNativeAsOptional("AerialFlare_IsAiming");
     MarkNativeAsOptional("AerialFlare_GetCount");
+    MarkNativeAsOptional("AerialFlare_HasFlare");
     return APLRes_Success;
 }
 
@@ -1144,10 +1145,6 @@ public void OnMapStart()
     PrecacheModel("models/v_models/v_chainsaw.mdl");
     // v1.7.46b: 激光升级包附件模型（三方图可能缺 precache → 升级包隐形/不 spawn）
     PrecacheModel("models/w_models/weapons/w_laser_sights.mdl");
-    // v1.12.0: 武士刀（原近战盲盒）——固定发放 katana，w/v 模型 precache
-    // （与 M60/榴弹同坑：非战役图不 precache → 生成的近战隐形）
-    PrecacheModel("models/weapons/melee/w_katana.mdl");
-    PrecacheModel("models/weapons/melee/v_katana.mdl");
     // v1.12.4: 复活火斧（fireaxe）同坑补 precache（未 precache→weapon_melee 回退爪）
     PrecacheModel("models/weapons/melee/w_fireaxe.mdl");
     PrecacheModel("models/weapons/melee/v_fireaxe.mdl");
@@ -1719,6 +1716,14 @@ void ShopBuy(int client, int slot)
             g_iShopBought[client][slot]--;
             return;
         }
+        if( GetFeatureStatus(FeatureType_Native, "AerialFlare_HasFlare") == FeatureStatus_Available
+            && AerialFlare_HasFlare(client) )
+        {
+            PrintToChat(client, "\x04[商店]\x01 已有待发射照明弹，请先发射后再购买信号弹");
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            return;
+        }
         int res = ShopFlare_Give(client, 1);
         if( res == -1 )
         {
@@ -1738,6 +1743,14 @@ void ShopBuy(int client, int slot)
         if( GetFeatureStatus(FeatureType_Native, "AerialFlare_Buy") != FeatureStatus_Available )
         {
             PrintToChat(client, "\x04[商店]\x01 空中照明弹功能暂不可用（aerial_flare 未加载），积分已退回");
+            SH_AddWallet(client, price);
+            g_iShopBought[client][slot]--;
+            return;
+        }
+        if( GetFeatureStatus(FeatureType_Native, "ShopFlare_GetCharges") == FeatureStatus_Available
+            && ShopFlare_GetCharges(client) >= 1 )
+        {
+            PrintToChat(client, "\x04[商店]\x01 已有待发射信号弹，请先发射后再购买照明弹");
             SH_AddWallet(client, price);
             g_iShopBought[client][slot]--;
             return;
@@ -1762,31 +1775,6 @@ void ShopBuy(int client, int slot)
         PrintToChat(client, "\x04[商店]\x01 信号棒已下架，请购买信号弹");
         SH_AddWallet(client, price);
         g_iShopBought[client][slot]--;
-        return;
-    }
-
-    // v1.7.72: 近战盲盒——随机掉落近战武器
-    if (StrEqual(g_ShopTable[slot].classname, "melee_box"))
-    {
-        // v1.12.0: 用户拍板——统一改成武士刀，不再抽奖、不再叫盲盒。
-        // 固定发放一把 katana；direct-equip 直接入手（v1.11.5 同路径）。
-        char sKatana[16] = "katana";
-        int ent = CreateEntityByName("weapon_melee");
-        if (ent != -1)
-        {
-            DispatchKeyValue(ent, "melee_script_name", sKatana);
-            DispatchSpawn(ent);
-            EquipPlayerWeapon(client, ent);
-        }
-        if (ent <= 0)
-        {
-            SH_AddWallet(client, price);
-            g_iShopBought[client][slot]--;
-            PrintToChat(client, "\x04[商店]\x01 武士刀发放失败，积分已退回");
-            return;
-        }
-        PrintToChat(client, "\x04[商店]\x01 已购买 \x05武士刀\x01（-\x03%d\x01 可用积分，剩余 \x03%d\x01）：获得 \x05武士刀\x01",
-            price, SH_GetWallet(client));
         return;
     }
 
