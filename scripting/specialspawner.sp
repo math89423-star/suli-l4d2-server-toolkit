@@ -371,7 +371,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "6.4.0",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
+	version = "6.4.1",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -2285,6 +2285,52 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 	if (hasInvisFallback) {
 		outPos = bestInvisPos;
 		return true;
+	}
+
+	// v6.4.1 引擎饥饿兜底(小优化): failEngine 全灭 = 地图地形性采样饥饿
+	// (如 bdp 地堡狭窄通道, 9 人挤一处时引擎 PZ 采样器暂时饿死)。
+	// 绕过引擎采样器, 直接以目标为圆心环形采地面点:
+	//   距离 300-800u + 地面存在 + 与目标同层(±150u) + 离队 ≥guard_min
+	// 通过后交回主流程走原有守卫(trap/nav/分散), 找不到才真正失败。
+	if (failEngine >= attempts && failTrap == 0 && failNav == 0) {
+		int ref = -1;
+		float rPos[3];
+		for (int i = 1; i <= MaxClients; i++) {
+			if (IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i)) {
+				ref = i;
+				break;
+			}
+		}
+		if (ref > 0) {
+			GetClientAbsOrigin(ref, rPos);
+			for (int t = 0; t < 10; t++) {
+				float ang = GetURandomFloat() * 6.2831853;
+				float d = GetRandomFloat(300.0, 800.0);
+				float p[3];
+				p[0] = rPos[0] + Cosine(ang) * d;
+				p[1] = rPos[1] + Sine(ang) * d;
+				p[2] = rPos[2] + 80.0;
+				float gnd[3];
+				gnd = p; gnd[2] -= 600.0;
+				TR_TraceRayFilter(p, gnd, MASK_SOLID, RayType_EndPoint, TRFilter_SkipPlayers);
+				if (!TR_DidHit()) continue;
+				TR_GetEndPosition(gnd);
+				if (FloatAbs(gnd[2] - rPos[2]) > 150.0) continue;
+				gnd[2] += 5.0;
+				float dist = DistanceToNearestSurvivor(gnd);
+				float minDist = isReplacement ? 250.0 : g_cSpawnRangeGuardMin.FloatValue;
+				if (dist < minDist) continue;
+				bool tooClose = false;
+				for (int k = 0; k < g_iBatchSpawnPosCount; k++) {
+					if (GetVectorDistance(gnd, g_fBatchSpawnPos[k]) < 250.0) { tooClose = true; break; }
+				}
+				if (tooClose) continue;
+				outPos = gnd;
+				LogMessage("[SS] FindPosition engine-starve fallback OK class=%d dist=%.0f", zombieClass, dist);
+				return true;
+			}
+			LogMessage("[SS] FindPosition engine-starve fallback exhausted (10 samples)");
+		}
 	}
 
 	LogMessage("[SS] FindPosition FAILED class=%d target=%N attempts=%d failEngine=%d failTrap=%d failNav=%d failDist=%d failClose=%d hasInvis=%d", zombieClass, intendedTarget, attempts, failEngine, failTrap, failNav, failDist, failClose, hasInvisFallback);
