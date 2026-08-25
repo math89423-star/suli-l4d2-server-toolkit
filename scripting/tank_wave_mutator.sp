@@ -60,7 +60,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.7.10"
+#define PLUGIN_VERSION "2.7.11"
 
 // 配置常量
 #define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
@@ -314,6 +314,7 @@ public void SS_OnWaveStart(bool started) {
         DataPack pack;
         CreateDataTimer(1.5, Timer_SpawnTank, pack, TIMER_FLAG_NO_MAPCHANGE);
         pack.WriteCell(g_iNextTankCount);
+        pack.WriteCell(0);   // v2.7.11 重试深度
         g_bNextWaveIsTank = false;  // 消费标志位
         g_iNextTankCount = 0;
     }
@@ -322,7 +323,23 @@ public void SS_OnWaveStart(bool started) {
 Action Timer_SpawnTank(Handle timer, DataPack pack) {
     pack.Reset();
     int tankCount = pack.ReadCell();
+    int retryDepth = pack.ReadCell();
     if (tankCount < 1) tankCount = 1;
+
+    // v2.7.11: 配额扣减——场上已有存活 Tank(地图脚本/上一波残留)先计入配额。
+    // 例: 双Tank波但场上已有 1 只 → 只补刷 1 只, 不与既有 Tank 抢位
+    // (引擎对同帧多次 tank 生成有拒绝率, 用户报"另一只刷不出来")
+    int preExisting = CountAliveTanksAll();
+    if (preExisting > 0) {
+        LogMessage("[Tank Mutator] %d tank(s) already alive (map/residual), quota %d -> %d",
+                   preExisting, tankCount, tankCount - preExisting);
+        tankCount -= preExisting;
+        if (tankCount <= 0) {
+            LogMessage("[Tank Mutator] quota fulfilled by existing tanks, skip spawn");
+            ClearTankTracking();
+            return Plugin_Handled;
+        }
+    }
 
     // 清空旧跟踪
     ClearTankTracking();
@@ -548,6 +565,16 @@ Action Timer_SpawnTank(Handle timer, DataPack pack) {
         }
     }
 
+    // v2.7.11: 缺口重试——第二只/后续只生成失败时, 4s 后按剩余配额补一次
+    // (Timer_SpawnTank 入口的配额扣减会把已刷出的算进去, 不会超发)
+    if (retryDepth == 0 && spawned > 0 && spawned < tankCount) {
+        LogMessage("[Tank Mutator] shortfall %d/%d -> retry remaining in 4s", spawned, tankCount);
+        DataPack rp;
+        CreateDataTimer(4.0, Timer_SpawnTank, rp, TIMER_FLAG_NO_MAPCHANGE);
+        rp.WriteCell(tankCount - spawned);
+        rp.WriteCell(1);
+    }
+
     if (spawned == 0) {
         // 没生成任何 Tank，立即释放挂起
         LogMessage("[Tank Mutator] No tanks spawned, releasing clearing hold immediately");
@@ -600,8 +627,39 @@ Action Timer_MonitorTanks(Handle timer) {
     return Plugin_Continue;
 }
 
+// v2.7.11: 收编非本插件生成的 Tank(地图脚本/导演自然波)——
+// 否则它们游离在跟踪体系外: 清缴挂起不等它们死、下一波生成会与
+// 它们重叠(引擎同屏多 Tank 时脚本生成互相顶掉=用户报的"无法刷出")。
+void AdoptUntrackedTanks() {
+    for (int client = 1; client <= MaxClients; client++) {
+        if (!IsTank(client)) continue;
+        bool tracked = false;
+        for (int i = 0; i < MAX_TRACKED_TANKS; i++)
+            if (g_iTanks[i] == client) { tracked = true; break; }
+        if (tracked) continue;
+        for (int i = 0; i < MAX_TRACKED_TANKS; i++) {
+            if (g_iTanks[i] == 0) {
+                g_iTanks[i] = client;
+                GetClientAbsOrigin(client, g_fTankLastPos[i]);
+                g_iTankStuckChecks[i] = 0;
+                g_iTankCount++;
+                LogMessage("[Tank Mutator] Adopted untracked/map tank client=%d into slot %d", client, i);
+                break;
+            }
+        }
+    }
+}
+
+int CountAliveTanksAll() {
+    int n = 0;
+    for (int c = 1; c <= MaxClients; c++)
+        if (IsTank(c) && IsPlayerAlive(c)) n++;
+    return n;
+}
+
 void CheckAllTanksStatus() {
     int alive = 0;
+    AdoptUntrackedTanks();
     for (int i = 0; i < MAX_TRACKED_TANKS; i++) {
         if (g_iTanks[i] > 0) {
             // 检查该 Tank 是否仍然有效且存活
