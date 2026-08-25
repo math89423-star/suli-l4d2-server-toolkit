@@ -96,8 +96,9 @@ bool   g_bHLReady;
 
 // ── v1.1 道具本体发光(glow shell): configs/ptg_objectives_hl.cfg 按图列 类名+目标名 ──
 #define HL_CFG_PATH   "configs/ptg_objectives_hl.cfg"
-ArrayList g_iGlowEnts;    // 已施加发光的实体引用
+ArrayList g_iGlowEnts;    // 已施加发光的实体引用(撤销用)
 int      g_iGlowCount;
+bool     g_bHLGlobalOn = true;   // v1.2 !obj 总开关
 
 ConVar g_hCvarAutoOn;
 ConVar g_hCvarColorR, g_hCvarColorG, g_hCvarColorB;
@@ -177,6 +178,20 @@ public void Event_RoundStart(Event e, const char[] n, bool d)
 void ClearGlows()
 {
 	if (g_iGlowEnts == null) return;
+	g_iGlowCount = 0;
+}
+
+// 熄灭所有道具发光(置 m_iGlowType=0)
+void UndoGlows()
+{
+	if (g_iGlowEnts == null) return;
+	for (int i = 0; i < g_iGlowEnts.Length; i++)
+	{
+		int ent = EntRefToEntIndex(g_iGlowEnts.Get(i));
+		if (ent > 0 && IsValidEntity(ent))
+			SetEntProp(ent, Prop_Send, "m_iGlowType", 0);
+	}
+	g_iGlowEnts.Clear();
 	g_iGlowCount = 0;
 }
 
@@ -658,6 +673,29 @@ Action CmdToggleGuide(int client, int args)
 		PrintToChat(client, "[OBJ] \x01本图无解密剧本, 请用 \x05!ptg\x01 常规导航");
 		return Plugin_Handled;
 	}
+	// v1.2: 高亮模式 = 全局总开关(发光+光柱一起熄灭/点亮)
+	if (g_hMode.IntValue == 1)
+	{
+		g_bHLGlobalOn = !g_bHLGlobalOn;
+		if (!g_bHLGlobalOn)
+		{
+			UndoGlows();
+			for (int i = 1; i <= MaxClients; i++)
+			{
+				g_bGuideOn[i] = false;
+				g_hDrawTimer[i] = null;
+			}
+			PrintToChatAll("[OBJ] \x04关键道具高亮 OFF");
+		}
+		else
+		{
+			ClearGlows();
+			LoadHLConfig();
+			ApplyAutoOn();
+			PrintToChatAll("[OBJ] \x05关键道具高亮 ON");
+		}
+		return Plugin_Handled;
+	}
 	g_bGuideOn[client] = !g_bGuideOn[client];
 	PrintToChat(client, g_bGuideOn[client] ? "[OBJ] \x05引导线 ON" : "[OBJ] \x04引导线 OFF");
 	if (g_bGuideOn[client] && g_hDrawTimer[client] == null)
@@ -760,8 +798,9 @@ void ApplyGlow(int ent)
 {
 	if (ent <= 0 || !IsValidEntity(ent)) return;
 	SetEntProp(ent, Prop_Send, "m_iGlowType", 3);
-	SetEntProp(ent, Prop_Send, "m_glowColorOverride", 0x00FFD800);   // 青色 BGR? 用 0x00FFFF00 试黄青
+	SetEntProp(ent, Prop_Send, "m_glowColorOverride", 0x00FFD800);
 	SetEntProp(ent, Prop_Send, "m_nGlowRange", 5000);
+	g_iGlowEnts.Push(EntIndexToEntRef(ent));
 	g_iGlowCount++;
 }
 
