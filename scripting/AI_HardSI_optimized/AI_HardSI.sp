@@ -516,6 +516,19 @@ public Action:OnPlayerRunCmd(int client, int &buttons, int &impulse,
         if (GetInfectedClass(client) == L4D2Infected_Tank) {
             return Plugin_Changed;
         }
+        // v5.37: Spitter 吐锁期视角保真（酸液吐向无人处的根因之一）——
+        // ability_spit 可能落在引擎帧发射，此时弹道沿引擎当前视角（被
+        // 决策帧 snap 反复打断的混合朝向）→ 落点随机偏移。等待发射期间
+        // 把决策帧算好的弹道角逐帧重放，保证发射瞬间视角 = 插件计算值。
+        // 只覆盖视角不动按键：v5.23.1 ATTACK 永不清理语义不变，引擎技能
+        // 触发链路完整保留；_spitter_waiting_spit 只在吐分支按压→发射/
+        // 超时窗口内为 true，其余类/其余行为零影响（v5.23.2 全交还语义
+        // 对它们保持不变）。
+        if (g_bBT_AnglesSet[client]
+            && BB_GetBool(client, "_spitter_waiting_spit", false)) {
+            BT_ApplyAngles(client, angles);
+            return Plugin_Changed;
+        }
         return Plugin_Continue;
     }
     g_iTickCounter[client] = 0;

@@ -1,6 +1,12 @@
 // ============================================================================
 // bt_spitter.inc — Spitter Behavior Tree (v3.2)
 // ============================================================================
+// v5.37: 酸液吐向无人处修复之二 —— 弹道下坠精确补偿
+//   直线瞄准角(GetVectorAngles)不含重力，酸液弹体飞行期下坠：900u 时
+//   t≈0.82s、落差可达 ~170-260u → 系统性短落（酸掉半路空地）。v5.36 的
+//   +40u 胸口抬升只是近似。本版三个吐酸动作统一叠加 pitch 抬升：
+//   drop = 0.5·g_eff·t²，lift = atan(drop/dist)（见
+//   Spitter_ApplyDropCompensation）。
 // v5.36: 命中率修复 —— 三个吐酸动作瞄准点从脚底抬到胸口高度
 //   （SpitterAct_Spit / PredictiveSpit +40u，SpitterAct_SpitTankCover +30u）。
 //   原 GetClientAbsOrigin = 脚底 → 酸液抛物线低抛短落、落点偏近（命中率差），
@@ -25,6 +31,36 @@
 // v5.7: 真实发射标记 —— ability_spit 事件置位（AI_HardSI.sp Event_AbilityUse），
 // 吐锁（_spitter_spit_time）在真实发射时刻而非按压时刻设置
 bool g_bSpitterSpitFired[MAXPLAYERS + 1];
+
+// ============================================================================
+// v5.37: 弹道下坠补偿（酸液落点偏近/落空地修复，配合 AI_HardSI.sp 的
+// 吐锁期视角保真）
+// ============================================================================
+// 直线瞄准角(GetVectorAngles)不含重力 —— 酸液弹体飞行期受重力下坠，
+// 600-900u 系统性短落。本版按飞行时间显式补偿：
+//   t    = dist / SPIT_FLIGHT_SPEED（与既有 dist/1100 飞行时间口径一致）
+//   drop = 0.5 · g_eff · t²
+//   lift = atan(drop / dist)，pitch 抬升（Source pitch 正=低头 → 减 pitch = 抬头）
+// g_eff = sv_gravity × SPIT_DROP_GRAVITY_SCALE：真实酸液弹体重力系数未知，
+// 0.65 为保守估计（v5.36 实测方向 = 偏短落而非过冲，宁少勿多）；
+// 实机若出现过冲（酸落点越过目标）下调本系数。
+#define SPIT_DROP_GRAVITY_SCALE    0.65
+#define SPIT_DROP_MAX_LIFT_DEG     25.0    // 补偿上限，防远距离离谱吊射
+#define SPIT_FLIGHT_SPEED          1100.0
+
+ConVar g_hSpitterCvarGravity = null;
+
+// 在直线瞄准角 ang 基础上叠加重力下坠抬升（就地修改 ang[0]）
+stock void Spitter_ApplyDropCompensation(const float sPos[3], const float aimPos[3], float ang[3]) {
+    float dist = GetVectorDistance(sPos, aimPos);
+    if (dist < 100.0) return;   // 近距落差 <2° 可忽略，避免除小数抖动
+    float grav = (g_hSpitterCvarGravity != null) ? GetConVarFloat(g_hSpitterCvarGravity) : 800.0;
+    float t = dist / SPIT_FLIGHT_SPEED;
+    float drop = 0.5 * grav * SPIT_DROP_GRAVITY_SCALE * t * t;
+    float lift = RadToDeg(ArcTangent(drop / dist));
+    if (lift > SPIT_DROP_MAX_LIFT_DEG) lift = SPIT_DROP_MAX_LIFT_DEG;
+    ang[0] -= lift;
+}
 
 
 // ---------------------------------------------------------------------------
@@ -196,6 +232,7 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
     float dir[3], ang[3];
     MakeVectorFromPoints(sPos, aimPos, dir);
     GetVectorAngles(dir, ang);
+    Spitter_ApplyDropCompensation(sPos, aimPos, ang);   // v5.37: 重力下坠补偿
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     BT_AddButton(client, IN_ATTACK);   // v5.7: 按住至真实发射
 
@@ -255,6 +292,7 @@ BT_Status SpitterAct_SpitTankCover(int client) {
     GetClientAbsOrigin(client, sPos);
     MakeVectorFromPoints(sPos, aimPos, dir);
     GetVectorAngles(dir, ang);
+    Spitter_ApplyDropCompensation(sPos, aimPos, ang);   // v5.37: 重力下坠补偿
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     BT_AddButton(client, IN_ATTACK);   // v5.7: 按住至真实发射
 
@@ -307,6 +345,7 @@ BT_Status SpitterAct_Spit(int client) {
     }
 
     float sPos[3], tPos[3], dir[3], ang[3];
+    float finalAim[3];   // v5.37: 三分支统一捕获最终瞄准点（预判点/原点），出口做下坠补偿
     GetClientAbsOrigin(client, sPos);
     GetClientAbsOrigin(lockedTarget, tPos);
     tPos[2] += 40.0;   // v5.36 FIX: 胸口高度 —— 原脚底 = 酸液低抛短落（同 PredictiveSpit 先例）
@@ -334,19 +373,20 @@ BT_Status SpitterAct_Spit(int client) {
         float predictOffset = GetVectorDistance(tPos, predictedPos);
         if (predictOffset < 300.0) {
             // 使用预判点
-            MakeVectorFromPoints(sPos, predictedPos, dir);
-            GetVectorAngles(dir, ang);
+            finalAim = predictedPos;
         } else {
             // 预判偏移过大，使用原点
-            MakeVectorFromPoints(sPos, tPos, dir);
-            GetVectorAngles(dir, ang);
+            finalAim = tPos;
         }
     } else {
         // 目标静止或慢速移动，直接瞄准
-        MakeVectorFromPoints(sPos, tPos, dir);
-        GetVectorAngles(dir, ang);
+        finalAim = tPos;
     }
 
+    // v5.37: 直线角 + 重力下坠补偿（三分支统一出口）
+    MakeVectorFromPoints(sPos, finalAim, dir);
+    GetVectorAngles(dir, ang);
+    Spitter_ApplyDropCompensation(sPos, finalAim, ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     BT_AddButton(client, IN_ATTACK);   // v5.7: 按住至真实发射
 
@@ -602,4 +642,6 @@ public Spitter_OnModuleStart() {
     // boomer_vomit_delay）：20s → 8s，与 SpitterCnd_HasSpit 的 8s 自锁对齐，
     // 每 8s 一次有效喷吐，零无效按键。见 ENGINE_CVARS.md。
     SetConVarFloat(FindConVar("z_spit_interval"), 8.0);
+    // v5.37: 缓存 sv_gravity —— 下坠补偿用（避免每 tick FindConVar 查找）
+    g_hSpitterCvarGravity = FindConVar("sv_gravity");
 }
