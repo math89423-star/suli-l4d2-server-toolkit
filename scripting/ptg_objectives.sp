@@ -111,6 +111,7 @@ public void OnPluginStart()
 	RegAdminCmd("chain_step", CmdChainStep, ADMFLAG_ROOT, "跳步: chain_step <n>");
 	RegAdminCmd("obj_skip", CmdObjSkip, ADMFLAG_ROOT, "暴力跳过(输入模拟): obj_skip=无限跳到完成; obj_skip <n>=限n步");
 	RegAdminCmd("obj_aim", CmdObjAim, ADMFLAG_ROOT, "查看准星指向的实体信息(配置剧本用)");
+	RegConsoleCmd("obj_state", CmdObjState, "查看高亮系统当前状态");
 
 	g_hMode        = CreateConVar("ptg_obj_mode", "1", "0=关闭 1=机关高亮(默认,通用免配置) 2=chain剧本模式(需配置)", _, true, 0.0, true, 2.0);
 	g_hCvarHLExclude = CreateConVar("ptg_obj_hl_exclude", "take_,make_,herb,pill,adren,ammo", "高亮排除的 targetname 子串(逗号分隔)");
@@ -1176,6 +1177,20 @@ Action CmdObjAim(int client, int args)
 	PrintToChat(client, "[OBJ] ent=%d class=%s name=%s", ent, cn, tn);
 	PrintToChat(client, "[OBJ] pos=%.0f %.0f %.0f model=%s", c[0], c[1], c[2], mdl);
 	LogMessage("[PTGOBJ] aim: ent=%d class=%s name=%s pos=(%.0f %.0f %.0f) model=%s", ent, cn, tn, c[0], c[1], c[2], mdl);
+	return Plugin_Handled;
+}
+
+Action CmdObjState(int client, int args)
+{
+	int glows = (g_iGlowEnts != null) ? g_iGlowEnts.Length : 0;
+	PrintToChat(client, "[OBJ] mode=%d hlReady=%d markers=%d shells=%d",
+		g_hMode.IntValue, g_bHLReady ? 1 : 0,
+		(g_bHLReady && g_hHLX != null) ? g_hHLX.Length : -1, glows);
+	PrintToChat(client, "[OBJ] your flag=%s auto_on=%d map=%s",
+		g_bGuideOn[client] ? "ON" : "OFF", g_hCvarAutoOn.BoolValue, g_sMap);
+	LogMessage("[PTGOBJ] state: client=%d flag=%d mode=%d hl=%d markers=%d shells=%d",
+		client, g_bGuideOn[client], g_hMode.IntValue, g_bHLReady,
+		(g_bHLReady && g_hHLX != null) ? g_hHLX.Length : -1, glows);
 	return Plugin_Handled;
 }
 
