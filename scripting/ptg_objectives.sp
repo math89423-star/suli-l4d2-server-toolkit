@@ -135,7 +135,11 @@ Action Timer_PostStart_Init(Handle timer)
 
 public void Event_RoundStart(Event e, const char[] n, bool d)
 {
-	// 回合重开: 步骤进度归零, 实体引用失效待重解析
+	// 回合重开: 步骤进度归零, 实体引用失效待重解析。
+	// v0.9.1: 同时立即挂起绘制(g_bChainLoaded=false)——数组已清空而
+	// 重初始化在 3s 定时器后, 窗口期 DrawForClient 访问空 ArrayList
+	// 会抛 Invalid index 异常导致玩家完全看不到线。
+	g_bChainLoaded = false;
 	for (int i = 0; i < g_iStepCount; i++)
 	{
 		g_Steps[i].doneCount = 0;
@@ -564,7 +568,7 @@ ArrayList BfsPath(int startIdx, int goalIdx)
 		}
 		if (queue.Length > BFS_MAX_EXPAND) break;
 	}
-	ArrayList path;
+	ArrayList path = null;
 	if (found != -1)
 	{
 		path = new ArrayList();
@@ -673,7 +677,7 @@ void DrawForClient(int client)
 		PrintHintText(client, "第%d步: %s", g_iCurStep + 1, s.eHint);
 	}
 
-	if (s.targetPosIdx < 0) return;
+	if (s.targetPosIdx < 0 || s.targetPosIdx >= g_fTargetX.Length) return;
 
 	float org[3], tgt[3];
 	GetClientAbsOrigin(client, org);
