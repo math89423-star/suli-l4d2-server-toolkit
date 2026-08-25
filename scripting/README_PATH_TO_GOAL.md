@@ -1,215 +1,121 @@
-# l4d_path_to_goal — A* 逃生路径导航插件
+# l4d_path_to_goal — flow 梯度下降导航插件
 
-> 版本: 1.55 | 作者: gvazdas, zyiks | A* 引擎: 2026-07-25
+> 版本: 5.0.4 (2026-08-25) | 作者: server
+> 前身: PTG v4.8.3 / A* 引擎 v1.55（11k 行自建管线，已弃用）
 
 ## 概述
 
-为 Survivor 队伍实时绘制通往终局逃生点的激光引导线。基于 Source 引擎 Nav Mesh 的 **A\* 图搜索**，自动检测跳跃点、翻越点、蹲行通道、间隙跳跃等玩家可行但 Nav Mesh 未标记的连接。
+为 Survivor 实时绘制通往章节出口的引导线。核心思路：**引擎 flow 场本身就是导航答案**——
+flow = 从地图出生点沿 nav 的弧长，递增方向即出口方向。从玩家所在 nav area 沿
+4 向邻接做 flow 严格递增的梯度上升即可到达终点，无需自建搜索。
 
-`!ptg` / `!guide` / `!wheretogo` — 双击切换引导线开关。
-
----
-
-## 架构
-
-### 管线（6 阶段）
-
-```
-STAGE_PREP     构建节点索引 → 识别起点/终点 → 初始化空间哈希
-     ↓
-STAGE_ASTAR    A* 搜索（分布到多帧，每帧 ≤48 节点）
-     ↓
-STAGE_SMOOTH   重建路径 → Theta* 视距平滑 → 漏斗去冗余
-     ↓
-STAGE_JOIN     连接救援载具路径（终局）
-     ↓
-STAGE_VALIDATE 8 策略 Hull Trace 验证（剔除穿墙线）
-     ↓
-STAGE_END      引导就绪 → 渲染激光束
-```
-
-### 帧预算
-
-所有阶段共享 `l4d_path_to_goal_budget`（默认 0.5ms/帧）。每帧处理完预算后通过 `RequestFrame` 延续，绝不阻塞主线程。
-
-### A* 搜索
-
-```
-节点 = Nav Area（可通行区域）
-边   = Adjacent（方向连接）
-      + Ladder（梯子）
-      + Elevator（电梯）
-      + 非网格连接（自动检测，见下）
-
-代价 g(n) = 欧几里得距离 × 类型系数
-启发式 h(n) = 到目标 Nav Area 的 3D 欧几里得距离（可接纳、一致）
-
-类型系数：
-  ADJACENT   1.0    平地行走
-  LADDER     1.5    爬梯
-  ELEVATOR   2.0    乘电梯
-  JUMP_UP    1.8    跳上高台
-  JUMP_DOWN  1.2    安全跳下
-  VAULT      2.5    翻越齐腰障碍
-  GAP_JUMP   3.0    跑跳跨间隙
-  CROUCH     1.5    蹲行通道
-  STEP_DOWN  1.1    逐级跳下
-  BREAKABLE  5.0    可破坏障碍
-  CONDITIONAL 10.0  机关/触发门
-```
-
-### Theta* 平滑
-
-在 A* 展开邻居时，检查当前节点的父节点能否**直接看到**邻居（有 LOS）。如果能，跳过当前节点——路径更直、航点更少。
-
-### 非网格连接自动检测
-
-地图加载时一次性完成（分布到多帧）。对每对空间上接近但 Nav Mesh 无连接的 Nav Area：
-
-| 类型 | 检测条件 | 验证方法 |
-|------|---------|---------|
-| JUMP_UP | dz: 32-72, xy<100 | 抛物线跳跃 Hull Trace (apex 64hu) |
-| JUMP_DOWN | dz: 64-250, xy<150 | 垂直下降 Trace + 落地地面检测 |
-| VAULT | \|dz\|: 40-100, xy<72 | 高平面水平 Trace + 两侧垂直 Trace |
-| GAP_JUMP | \|dz\|<40, xy: 80-280 | 中点无地面 + 跳跃弧 Hull Trace |
-| CROUCH | dz<40, xy<256 | 低 Hull (36h) 通过而标准 Hull (72h) 不通过 |
-| STEP_DOWN | dz: -72~-32, xy<80 | 逐级垂直下降 Trace |
-| BREAKABLE | NAV_BASE_BREAKABLEWALL 属性 | 接受 blocked area 为高代价连接 |
+`!ptg` / `!guide` / `!wheretogo` 等命令单击开、再击关。
 
 ---
 
-## 关键数据结构
+## 算法
 
-### Cell（导引点）
-```cpp
-enum struct Cell {
-    float flow;         // 流距离（已废弃，保留兼容）
-    Address navArea;    // 所属 Nav Area 地址
-    float center[3];    // 世界坐标（高于地面 16hu）
-}
 ```
+起点 = 玩家所在 nav area（同层逐级放大 500→2000u 搜索；
+        孤岛 area 跳过；跨层兜底 anyZ）
+目标 = 出口实体 area（script_changelevel > trigger_changelevel > trigger_finale）
+       找不到实体 → 出生点基准欧氏最远的同层 area
 
-### 二叉堆（A* 优先队列）
-```cpp
-enum struct HeapEntry {
-    int nodeIndex;    // g_hAStarNodes 中的索引
-    float fScore;      // g + h
-    float gScore;      // 实际路径代价（用于惰性删除检测）
-}
+主循环（≤2000 步）:
+  ① 到达判定: RESCUE_VEHICLE 属性 / goalArea / flow ≥ 地图上限×95%
+  ② 梯度步: 4 向邻接中选 flow 严格递增者（见下方安全守卫）
+  ③ 梯度卡住 → 一次 BFS 全图桥接后结束:
+     BFS 覆盖 4 向 + 虚拟边，目标优先级:
+       goal 直达 > 同层 flow 最大可达（跨层需 +500u 显著更优）
+       > fallback 模式下可达集欧氏最远点
+     正常无解再降级一次 fallback（部分导航: 画到可达集最深处 + 红 beacon）
 ```
 
-### 节点索引（并行数组，O(1) 查找）
-```
-g_hAStarNodes[N]      // int: Nav Area 地址
-g_hAStarCenters[N][3]  // float: 中心坐标（高于地面 16hu）
-g_hAStarAreaToIndex    // StringMap: "地址" → 索引
-```
+### 安全守卫（v5.0.4）
 
-### 空间哈希
-```
-g_hSpatialHash         // StringMap: "cx_cy_cz" → ArrayList{area, center}
-单元大小: 256 units
-查询: 检查 3×3×3 邻居单元（±1 per axis）
-```
+| 守卫 | 规则 | 防的事故 |
+|------|------|---------|
+| Z 过滤 | 梯度 Δz>120u / BFS Δz>150u 的邻居跳过 | 悬崖边误连导致"跳楼线" |
+| 攀爬守卫 | 向上 Δz∈(66,120] 须过 WalkableBetween 中点地面采样 | 66u=生还者跳跃上限；垂直墙/悬崖中点地面在低处被拒，坡道/楼梯/跳台放行 |
+| 实体桥阻挡证明 | 门/炸墙配对前 trace 两 area 连线(+36u)，须命中该实体本身 | 电梯井两侧楼板、壁橱门被误配成通道 |
+| 虚拟边门槛 | LOS(+30u) + WalkableBetween 三点采样 ±40u + dz≤60 + dist<400 | 细射线飞过墙顶、跳楼边中间悬空的假连接 |
+
+### 虚拟边（补 nav 缺失连接）
+
+三方图大量存在"玩家能走但 nav 没连"的孤岛。跨 4 向连通组件的近邻 area 对，
+通过上述门槛后双向注册虚拟边，BFS 与 4 向一并搜索。
+网格桶预筛（128u），**扫描半径 ±3 桶**——中心距 400u 的配对最坏相隔 4 桶，
+±1 会系统性漏配（v5.0.4 FIX3，c2m1 实测合法连接 28→100 条）。
+
+### 实体桥（门/可炸墙）
+
+nav 作者故意不连的交互通道（prop_door_rotating / func_door* / func_breakable）：
+实体中心沿门面法向 ±70u 各取最近同层 area 配对注册。v5.0.4 起必须通过阻挡证明
+（c2m1 实测 30 个候选中 22 个是井道/空穿假配对，8 个真门全部保留）。
 
 ---
 
-## 配置 Cvar
+## 渲染
 
-| Cvar | 默认值 | 说明 |
-|------|--------|------|
+- **琥珀色线** = 正常路径；**红色线** = 该段 LOS 异常或断链终点
+- 画法: nav center 连线（+10u）；穿墙时用共享边中点 A→M→B 中转；仍失败标红
+- 近段 6 段全量、远段抽样（客户端 TE 缓冲上限 `l4d_path_to_goal_max`=32）
+- 终点竖线 beacon: 绿=到达出口，红=死路/机关断链
+- 衔接段无条件从玩家脚底画起（防止"线停留在原地"）
+
+## 性能设计
+
+- **预构建表**（首次 !ptg 懒初始化）: area→index、邻居 index、flow、center，
+  BFS 运行时零 StringMap/native（死亡厕所迷宫全图 BFS 卡顿的根治）
+- **路径缓存**: 移动 <128u 或 <0.5s 内复用（重算节流），快跑不逐帧算
+- **每客户端独立重画定时器**（0.3s）：修复多玩家 TE buffer 竞争（v5.0.2）
+- 虚拟边/实体桥每图构建一次（c2m1 6520 areas ≈ 200ms，一次性）
+
+## 特殊地图策略
+
+flow 覆盖率 <20% 判定为谜题/陷阱图：
+- 有实体桥 → 桥接模式放行（线引导至机关/炸墙点，按逻辑推进）
+- 无实体桥 → 数据层无解，提示后禁用
+
+---
+
+## ConVar
+
+| Cvar | 默认 | 说明 |
+|------|------|------|
 | `l4d_path_to_goal_enable` | 1 | 总开关 |
-| `l4d_path_to_goal_max` | 32 | 最大激光束数 |
-| `l4d_path_to_goal_survivor` | 1 | 允许生还者使用 |
-| `l4d_path_to_goal_infected` | 1 | 允许特感使用 |
-| `l4d_path_to_goal_spec` | 1 | 允许观战使用 |
-| `l4d_path_to_goal_alive` | 0 | 0=全部, 1=仅存活, 2=仅死亡 |
-| `l4d_path_to_goal_budget` | 0.5 | 每帧 CPU 预算 (ms)，0=无限 |
-| `l4d_path_to_goal_detour_budget` | 10.0 | detour_join 预算 (ms) |
-| `l4d_path_to_goal_finale` | 1 | 终局连接: 0=总是, 1=终局开始后, 2=载具到达后, 3=永不 |
-| `l4d_path_to_goal_finale_auto` | 0 | 终局载具到达后自动显示路线 |
-| `l4d_path_to_goal_auto` | 0 | 自动脉冲引导模式 |
-| `l4d_path_to_goal_auto_duration` | 1.0 | 引导线持续时间 (s) |
-| `l4d_path_to_goal_auto_interval` | 25.0 | 自动脉冲间隔 (s) |
-| `l4d_path_to_goal_gap_dz_max` | 200.0 | 最大垂直间隙（超过则抑制） |
-| `l4d_path_to_goal_gap_xy_ratio` | 2.0 | XY/Z 抑制比例 |
-| `l4d_path_to_goal_gap_vertical` | 1 | 绘制垂直桥接线 |
-| `l4d_path_to_goal_beam_min_dist` | 32.0 | 最小光束间距 |
-| `l4d_path_to_goal_stitch_steps` | 75 | 路径缝合最大步数（旧管线） |
-| `l4d_path_to_goal_trace_hull` | 1 | 启用 Hull Trace 验证（剔除穿墙线） |
+| `l4d_path_to_goal_duration` | 0.5 | 光束寿命秒数（须 > 重画间隔 0.3s，防闪烁；过长会残留旧位置）|
+| `l4d_path_to_goal_max` | 32 | 单次最大光束段数（客户端缓冲上限）|
 
----
-
-## 管理命令
+## 命令
 
 | 命令 | 权限 | 说明 |
 |------|------|------|
-| `l4d_path_to_goal_recalculate` | ROOT | 强制重新计算引导路径 |
-| `l4d_path_to_goal_print` | ROOT | 打印当前 g_GuideCells 列表 |
-| `l4d_path_to_goal_recomputeflow` | ROOT | 强制触发 TerrorNavMesh::RecomputeFlowDistances |
-| `l4d_path_to_goal_rescue` | ROOT | 强制呼叫救援载具（L4D2） |
-| `l4d_path_to_goal_ground` | ROOT | 检测当前位置是否在地面附近 |
-
----
-
-## 修改指南
-
-### 调整 A* 代价系数
-
-修改 `GetConnectionCost()` 函数（`l4d_path_to_goal.inc` 中）：
-```cpp
-case CONNECTED_LADDER: return 1.5;  // 改为 1.2 会让 A* 更愿意走梯子
-```
-
-### 调整非网格连接检测参数
-
-修改 `DetectNonMeshConnections_Frame()` 中的检测条件：
-```cpp
-// JUMP_UP 原条件: dz ∈ [32, 72], xy < 100
-// 修改 dz 范围或 xy 阈值来控制检测灵敏度
-if (!noJumpArea && !otherNoJump && dz >= 32.0 && dz <= 72.0 && xyDist < 100.0)
-```
-
-### 添加新的连接类型
-
-1. 在 `ConnectionType` 枚举中添加新值
-2. 在 `GetConnectionCost()` 中添加代价
-3. 在 `DetectNonMeshConnections_Frame()` 中添加检测规则
-4. 在 `GetNonMeshConnections()` 中处理方向性
-
-### 修改帧处理速率
-
-调整 `ASTAR_NODES_PER_FRAME` 常量（默认 48）。值越大路径计算越快，但单帧 CPU 消耗越高。
-
-### 添加手动配置的路径点
-
-可以扩展 `configs/ptg_goals.cfg`（尚未实现）来允许管理员手动指定目标 Nav Area ID，覆盖自动检测。
-
-### 调试
-
-启用 DEBUG 模式（`l4d_path_to_goal.inc` 顶部 `#define DEBUG 1`）：
-- 级别 1: 基础日志（帧耗时、cell 数量）
-- 级别 2: 详细日志（每个阶段的详细信息）
-- 级别 3: 极端日志（每个连接、每次 trace）
-
-编译后查看服务器日志：`grep "\[PTG\]" logs/L4D2_*.log`
-
----
+| `ptg` / `guide` / `wheretogo` / `imlost` / `pathtogoal` / `path_to_goal` | 玩家 | 单击开/关导航线 |
+| `ptg_recalc` | ROOT | 重建导航表并打印诊断: 边数/实体桥明细（OK/REJECT 逐条坐标）/ 各幸存者路径摘要 |
 
 ## 文件清单
 
-| 文件 | 说明 |
+| 文件 | 状态 |
 |------|------|
-| `scripting/l4d_path_to_goal.sp` | 插件入口：命令注册、自动引导、备用管线 |
-| `scripting/include/l4d_path_to_goal.inc` | **核心引擎**：管线、A*、空间哈希、非网格检测、渲染 |
-| `scripting/include/gvazdas_navmesh_utils.inc` | Nav Mesh 工具函数（投影、裁剪、随机落点） |
-| `gamedata/l4d_path_to_goal.txt` | SDK 签名：TerrorNavMesh::RecomputeFlowDistances |
-| `translations/l4d_path_to_goal.phrases.txt` | 多语言翻译 |
+| `scripting/l4d_path_to_goal.sp` | **全部逻辑在此单文件** |
+| `scripting/include/l4d_path_to_goal.inc` | 遗留（A* 版核心，未被引用）|
+| `scripting/include/gvazdas_navmesh_utils.inc` | 遗留（同上）|
+| `gamedata/l4d_path_to_goal.txt` | 遗留（A* 版 dhooks 签名，未使用）|
+| `translations/l4d_path_to_goal.phrases.txt` | 未使用 |
+
+依赖仅 `sourcemod` + `left4dhooks`（nav 邻接/flow/navarea 系列 native）。
 
 ---
 
-## 依赖
+## 版本历史要点（教训库）
 
-- **left4dhooks** (≥ 最新版): `L4D_GetAllNavAreas`, `L4D_NavArea_GetAdjacentAreas`, `L4D_NavArea_IsConnected`, `L4D_NavArea_GetLadder`, `L4D_NavArea_GetElevator`, `L4D_GetNavArea_AttributeFlags`, `L4D_GetNavArea_SpawnAttributes`, `L4D2Direct_GetTerrorNavAreaFlow`, `L4D2Direct_GetMapMaxFlowDistance`
-- **dhooks**: `TerrorNavMesh::RecomputeFlowDistances` 动态钩子
-- **sdktools**: `TR_TraceRayFilter`, `TR_TraceHullFilter`, `TE_SetupBeamPoints`
+- **v5.0.1**: 换图清 toggle 标志与路径缓存（残留导致首按无效/脏数据画线）；
+  定时器句柄管理改为"回调自然结束"（悬垂句柄空转翻倍画线速率）
+- **v5.0.2**: 多玩家 TE buffer 竞争 → 每客户端独立定时器
+- **v5.0.3**: timer 不强制 delete（正在执行的 Handle 强删崩溃），只清标志
+- **v5.0.4**: 三处纯拒绝/同门槛扩召回——实体桥阻挡证明、攀爬守卫、
+  虚拟边扫描 ±3 桶；新增 `ptg_recalc` 诊断。验证: c2m1 两点位路径与
+  v5.0.3 逐位一致（主线零回归），详见 git 提交 95083ed
+- 更早教训已内化为代码注释（起点跨层捞取、flow 孤岛 fallback、
+  缓存句柄悬垂连环崩等，见源码各节注释）
