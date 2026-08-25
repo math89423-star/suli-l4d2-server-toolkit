@@ -678,7 +678,6 @@ Action CmdToggleGuide(int client, int args)
 	if (g_hMode.IntValue == 1)
 	{
 		g_bGuideOn[client] = !g_bGuideOn[client];
-		PrintToChat(client, g_bGuideOn[client] ? "[OBJ] \x05关键道具高亮 ON(仅自己)" : "[OBJ] \x04关键道具高亮 OFF");
 		if (g_bGuideOn[client] && g_hDrawTimer[client] == null)
 			g_hDrawTimer[client] = CreateTimer(REDRAW_INTERVAL, Timer_Draw, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 		return Plugin_Handled;
@@ -894,14 +893,6 @@ void DrawForClient(int client)
 
 	Step s;
 	s = g_Steps[g_iCurStep];
-
-	// 周期性提示(每 20s)
-	static int lastHintTick[MAXPLAYERS + 1];
-	if (GetGameTickCount() - lastHintTick[client] > 400)
-	{
-		lastHintTick[client] = GetGameTickCount();
-		PrintHintText(client, "第%d步: %s", g_iCurStep + 1, s.eHint);
-	}
 
 	if (s.targetPosIdx < 0 || s.targetPosIdx >= g_fTargetX.Length) return;
 
