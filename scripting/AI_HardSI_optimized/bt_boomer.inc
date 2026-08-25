@@ -36,6 +36,8 @@
 #endif
 #define _bt_boomer_included
 
+ConVar g_hCvarVomitInterval = null;   // v5.41: z_vomit_interval 缓存句柄（锁时长读它）
+
 #define BOOMER_VOMIT_TRY_TIMEOUT 1.2   // v5.23: FIRE 确认超时（按压窗口）
 #define BOOMER_VOMIT_BACKOFF     0.5   // v5.23: 引擎拒绝后的短退避
 
@@ -48,9 +50,15 @@ BT_Status BoomerCnd_HasVomited(int client) {
     // v3.2 FIX: use timestamp so Boomer can re-vomit after cooldown (10s).
     // Previously _boomer_vomited was a permanent flag that never reset,
     // turning the Boomer into a melee-only bot after its first vomit.
+    // v5.41 FIX: 锁时长读引擎 z_vomit_interval（本模块启动时设为 10.0，
+    // 见 OnModuleStart）—— 原写死 10.0 且注释声称"与引擎冷却同量级"，
+    // 实际引擎默认 30s：若调优丢失，+10s 后树重新尝试吐 → 引擎拒绝，
+    // 按键全变挠击/空按最长 20s（Spitter v4.0.3 同款问题的 Boomer 版）。
     float vomitTime = BB_GetFloat(client, "_boomer_vomit_time", 0.0);
     if (vomitTime <= 0.0) return BT_FAILURE;
-    if (GetGameTime() - vomitTime > 10.0) {
+    float lock = 10.0;
+    if (g_hCvarVomitInterval != null) lock = g_hCvarVomitInterval.FloatValue;
+    if (GetGameTime() - vomitTime > lock) {
         BB_SetFloat(client, "_boomer_vomit_time", 0.0);
         BB_SetBool(client, "_boomer_approach", false);
         BB_SetBool(client, "just_vomited", false);   // v5.22: 与吐中标记同生命周期清零
@@ -379,7 +387,19 @@ stock int BT_CreateBoomerTree() {
 public Boomer_OnModuleStart() {
     SetConVarFloat(FindConVar("boomer_exposed_time_tolerance"), 10000.0);
     SetConVarFloat(FindConVar("boomer_vomit_delay"), 0.1);
-    HookEvent("player_now_it", OnPlayerBoomed, EventHookMode_Post);
+    // v5.41: 引擎呕吐冷却对齐插件自锁 —— Spitter v4.0.3 模式的 Boomer 版
+    // （当年只移植了 boomer_vomit_delay，z_vomit_interval=30s 漏改 → 插件
+    // +10s 解锁后到 +30s 引擎真实解锁前是空按/挠击窗口）。10s = 原插件
+    // 自锁值，保持既有进攻节奏。
+    g_hCvarVomitInterval = FindConVar("z_vomit_interval");
+    if (g_hCvarVomitInterval != null) g_hCvarVomitInterval.SetFloat(10.0);
+    // v5.41: HookEvent 幂等守卫 —— OnMapStart 会重跑本函数（AI_RetuneEngineCvars
+    // /模块重入），重复 HookEvent = 事件回调双触发
+    static bool g_bBoomerHooked = false;
+    if (!g_bBoomerHooked) {
+        HookEvent("player_now_it", OnPlayerBoomed, EventHookMode_Post);
+        g_bBoomerHooked = true;
+    }
 }
 
 // ============================================================================
@@ -400,7 +420,7 @@ public L4D_ActivateAbility_Boomer_Post(int client, int ability) {
     SI_AbilityMarkConfirmed(client, "_boomer", now);
     SI_AbilitySetState(client, "_boomer", ABILITY_CONFIRMED);
     // 正式冷却：既有 10s 自锁（BoomerCnd_HasVomited 消费，到期自动清零，
-    // Boomer 10s 后可再吐；引擎 z_vomit_interval 冷却与之同量级）
+    // Boomer 吐后自锁 = z_vomit_interval（v5.41: 模块启动设 10.0，锁读同源）
     BB_SetFloat(client, "_boomer_vomit_time", now);
     // 呕吐后行为 80% 逼近 / 20% 撤退 —— 与是否命中无关（吐空也该走位，
     // 原版只在本命时掷骰，吐空时既无锁也无后置行为）

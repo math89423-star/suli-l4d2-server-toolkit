@@ -412,6 +412,23 @@ Action Timer_CheckPropVelocity(Handle timer, int entity) {
 // These register custom cvars and modify vanilla game cvars.
 // The BT framework replaces only the decision logic, not the game tuning.
 
+// v5.41: 每次换图重放引擎 cvar 调优 —— 七个 *_OnModuleStart 里的
+// SetConVar*（smoker_tongue_delay / z_spit_interval / boomer_vomit_delay /
+// z_vomit_interval / hunter_* ×4 / z_jockey_leap_range）只在 OnPluginStart
+// 跑一次；实测发现会话转换（sv_cheats 复位/休眠唤醒等）可能把 cheat cvar
+// 冲回默认值且无人自愈（2026-08-25 实测会话中 ready_range/jockey_leap_range
+// 全部回退过）。全部模块现已幂等（Boomer HookEvent 加了 static 守卫），
+// 这里安全重入。CreateConVar 类调用自带存在性守卫不受影响。
+public OnMapStart() {
+    Smoker_OnModuleStart();
+    Hunter_OnModuleStart();
+    Spitter_OnModuleStart();
+    Boomer_OnModuleStart();
+    Charger_OnModuleStart();
+    Jockey_OnModuleStart();
+    Tank_OnModuleStart();
+}
+
 public OnPluginEnd() {
     // Cleanup (if needed)
 }
@@ -462,7 +479,11 @@ public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast)
         }
         case L4D2Infected_Hunter: {
             g_bHunterJustLunged[client] = false;
-            g_fHunterMissEscapeCooldown[client] = 0.0;
+            // v5.40: 二段扑状态机补全清理（usedWallPounce 原无任何可达复位点
+            // 且全局数组跨命存活 → 首次触发后特性永久死亡）；
+            // g_fHunterMissEscapeCooldown 退役删除（逃跳特性 v5.24 已移除）
+            g_bHunterUsedWallPounce[client] = false;
+            g_fHunterLungeAt[client] = 0.0;
         }
         case L4D2Infected_Spitter: {
             // v5.7: 清除发射标记残留（跨命黑板共享，防旧标记被新命消费）
@@ -473,6 +494,9 @@ public Action:Event_PlayerSpawn(Handle:event, String:name[], bool:dontBroadcast)
             // v5.39: 清视角保真窗口标记（跨命黑板共享，防残留导致非决策帧
             // 持续重放旧弹道角）
             BB_SetBool(client, "_smoker_tongue_trying", false);
+            // v5.41: 清发射时刻残留（防新命首次超时误判为"已发射未拉中"
+            // 而吃 15s 长退避）
+            g_fSmokerTongueShotAt[client] = 0.0;
         }
         case L4D2Infected_Tank: {
             g_fTankLastBhop[client] = 0.0;
@@ -585,8 +609,11 @@ public Action:Event_AbilityUse(Handle:event, String:name[], bool:dontBroadcast) 
 
     if (StrEqual(abilityName, "ability_lunge")) {
         // Hunter pounce: mark for missed-pounce detection, signal coordination
+        // v5.40: g_fHunterMissEscapeCooldown 写入已删（逃跳特性随 v5.24 移除，
+        // 该数组无读者，v5.40 连同 JustMissed/EscapeJump 一并退役）
         g_bHunterJustLunged[client] = true;
-        g_fHunterMissEscapeCooldown[client] = GetGameTime() + 0.3;
+        g_fHunterLungeAt[client] = GetGameTime();
+        g_bHunterUsedWallPounce[client] = false;
         SI_SignalAttack(client);
         return Plugin_Handled;
 
@@ -596,6 +623,14 @@ public Action:Event_AbilityUse(Handle:event, String:name[], bool:dontBroadcast) 
         // bt_charger.inc 读它才锁 12s 正式冷却（云端审查任务书 §8）。
         g_fChargerChargeConfirmed[client] = GetGameTime();
         SI_SignalAttack(client);
+        return Plugin_Handled;
+
+    } else if (StrEqual(abilityName, "ability_tongue")) {
+        // v5.41: 舌头【真实发射】确认 —— 引擎 tongue_miss_delay=15s，发射落空
+        // 后锁 15s 拒绝再射。bt_smoker TryTongue 超时分支读 g_fSmokerTongueShotAt
+        // 区分"已发射未拉中"（长退避 ≈ miss 锁剩余）vs "没发射出来"（短退避）。
+        // 此前该事件完全未处理（只有 lunge/spit/charge），发射与否对 BT 不可见。
+        g_fSmokerTongueShotAt[client] = GetGameTime();
         return Plugin_Handled;
 
     } else if (StrEqual(abilityName, "ability_spit")) {

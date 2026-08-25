@@ -46,7 +46,11 @@ bool g_bSpitterSpitFired[MAXPLAYERS + 1];
 // 实机若出现过冲（酸落点越过目标）下调本系数。
 #define SPIT_DROP_GRAVITY_SCALE    0.65
 #define SPIT_DROP_MAX_LIFT_DEG     25.0    // 补偿上限，防远距离离谱吊射
-#define SPIT_FLIGHT_SPEED          1100.0
+// v5.41 FIX: 1100 → 900 —— 空服 rcon 实测 z_spit_velocity=900（引擎权威值）。
+// 原值高估飞行速度 → t=dist/v 低估 22%，drop(∝t²) 低估 ~49% → v5.37 补偿在
+// 远距离仍系统性短落。900 对齐后补偿量 +49%（远距离段），若出现过冲再调
+// SPIT_DROP_GRAVITY_SCALE 下调。
+#define SPIT_FLIGHT_SPEED          900.0
 
 ConVar g_hSpitterCvarGravity = null;
 
@@ -67,13 +71,19 @@ stock void Spitter_ApplyDropCompensation(const float sPos[3], const float aimPos
 // Post-spit state conditions
 // ---------------------------------------------------------------------------
 
+ConVar g_hCvarSpitInterval = null;   // v5.41: z_spit_interval 缓存句柄（锁时长读它）
+
 BT_Status SpitterCnd_HasSpit(int client) {
-    // v3.2 FIX: use timestamp so Spitter can re-spit after cooldown (8s).
+    // v3.2 FIX: use timestamp so Spitter can re-spit after cooldown.
     // Previously _spitter_spit was a permanent flag that never reset,
     // turning the Spitter into a melee-only bot after its first spit.
+    // v5.41: 锁时长读引擎 z_spit_interval（模块启动设 8.0，见 OnModuleStart）
+    // —— 原写死 8.0 与引擎值双源，改 cvar 不同步就重现"空按窗口"。
     float spitTime = BB_GetFloat(client, "_spitter_spit_time", 0.0);
     if (spitTime <= 0.0) return BT_FAILURE;
-    if (GetGameTime() - spitTime > 8.0) {
+    float lock = 8.0;
+    if (g_hCvarSpitInterval != null) lock = g_hCvarSpitInterval.FloatValue;
+    if (GetGameTime() - spitTime > lock) {
         BB_SetFloat(client, "_spitter_spit_time", 0.0);
         BB_SetInt(client, "_spitter_post_mode", 1);
         return BT_FAILURE;
@@ -87,7 +97,10 @@ BT_Status SpitterCnd_HasSpit(int client) {
 // 本条件插到所有吐分支，冷却中 → FAIL → 落移动分支（走位/接近/守位）。
 BT_Status SpitterCnd_SpitReady(int client) {
     float t = BB_GetFloat(client, "_spitter_spit_time", 0.0);
-    if (t > 0.0 && GetGameTime() - t < 8.0) return BT_FAILURE;
+    // v5.41: 锁时长与 HasSpit 同源（z_spit_interval，模块设 8.0）
+    float lock = 8.0;
+    if (g_hCvarSpitInterval != null) lock = g_hCvarSpitInterval.FloatValue;
+    if (t > 0.0 && GetGameTime() - t < lock) return BT_FAILURE;
     // v5.23: 退避闸 —— 尝试失败（1.5s 超时未确认 = 引擎拒绝）后的短退避期内
     // 不重试：所有吐分支都在本冷却门外层，SpitReady FAIL 即自然获得重试间隔，
     // 防失败后下一 tick 立刻原地重复按吐键（SEQUENCE 失败交走位分支）。
@@ -641,7 +654,9 @@ public Spitter_OnModuleStart() {
     // （贴脸时变成挠击）。按既有模式干预引擎数值（同 smoker_tongue_delay、
     // boomer_vomit_delay）：20s → 8s，与 SpitterCnd_HasSpit 的 8s 自锁对齐，
     // 每 8s 一次有效喷吐，零无效按键。见 ENGINE_CVARS.md。
-    SetConVarFloat(FindConVar("z_spit_interval"), 8.0);
+    g_hCvarSpitInterval = FindConVar("z_spit_interval");
+    if (g_hCvarSpitInterval != null) g_hCvarSpitInterval.SetFloat(8.0);
+    // v5.41: 句柄缓存供 HasSpit/SpitReady 读锁时长（单源自引擎 cvar）
     // v5.37: 缓存 sv_gravity —— 下坠补偿用（避免每 tick FindConVar 查找）
     g_hSpitterCvarGravity = FindConVar("sv_gravity");
 }

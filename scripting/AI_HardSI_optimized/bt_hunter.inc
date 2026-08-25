@@ -53,6 +53,16 @@
 //     coordPounceSeq / openStrat0 / openStrat1 的 Inverter(CND_IsTargetPinned)
 //     替换为 CND_TargetIsPinnable（原守卫只防"已被控"）；disruptionSeq 补
 //     CND_TargetIsPinnable（原序列无任何可扑守卫）
+// v5.40 (2026-08-25, 审查修复):
+//   - FIX H1(P1): 二段扑状态机孤儿化 —— v5.24 删 missEsc 分支后 justLunged/
+//     usedWallPounce 的清理点全部不可达：justLunged 首扑后整条命恒 true →
+//     任意腾空贴墙误触发空中二段扑；usedWallPounce 一生一次即永久失效且跨命
+//     残留（全局数组，出生重置未清）。现 CanWallPounce 内落地/超时(3s 窗口)
+//     双路径清理 + lunge 事件重置预算 + 出生重置补清（AI_HardSI.sp），
+//     新增 g_fHunterLungeAt 时间戳基准。
+//   - FIX H2: _wall_pounce_yaw 死写入删除（无读者，且循环累进改 ang 导致
+//     记录值错误）；墙面检测重写为 yaw 环形水平射线；WallPounce 冗余双重
+//     校验删除。
 // ============================================================================
 
 #if defined _bt_hunter_included
@@ -65,7 +75,6 @@
 // ---------------------------------------------------------------------------
 
 bool g_bHunterJustLunged[MAXPLAYERS + 1];
-float g_fHunterMissEscapeCooldown[MAXPLAYERS + 1];
 
 // v4.0.1: 扑击范围缓存（BT_CreateHunterTree 里从 ai_fast_pounce_proximity 读取），
 // crouchApproach 需要用它判断"是否已进入扑击范围"来决定蹲伏 vs 站立快跑。
@@ -77,63 +86,21 @@ float g_fHunterEvasiveCooldown[MAXPLAYERS + 1];
 // v5.16: 墙面二段跳状态跟踪
 bool g_bHunterUsedWallPounce[MAXPLAYERS + 1];  // 本次起跳是否已使用二段跳
 
+// v5.40: 最近一次扑击（ability_lunge 事件）时刻 —— CanWallPounce 的 3s 有效
+// 窗口基准；0=无效。修复 justLunged 卡 true 导致的任意腾空误触发（H1）。
+float g_fHunterLungeAt[MAXPLAYERS + 1];
+
 // Forward declarations for tree builder
 
 // ---------------------------------------------------------------------------
 // Hunter-specific callbacks
 // ---------------------------------------------------------------------------
 
-// Condition: Hunter just missed a pounce and is on the ground
-BT_Status HunterCond_JustMissed(int client) {
-    if (!g_bHunterJustLunged[client]) return BT_FAILURE;
-    if (!(GetEntityFlags(client) & FL_ONGROUND)) return BT_FAILURE;
-
-    // Check if there's a pounce victim (successful pounce)
-    int victim = GetEntPropEnt(client, Prop_Send, "m_pounceVictim");
-    if (victim > 0) {
-        g_bHunterJustLunged[client] = false;  // clear flag on success
-        g_bHunterUsedWallPounce[client] = false;  // v5.16: 重置二段跳标记
-        return BT_FAILURE;
-    }
-
-    // Check cooldown on escape (don't spam escape jumps)
-    float now = GetGameTime();
-    if (g_fHunterMissEscapeCooldown[client] > now) return BT_FAILURE;
-
-    // v5.19 FIX: 加距离门控 —— 逃跑跳的本意是"扑空落在幸存者脸前，会被
-    // 秒杀，先跳开"。原版无距离条件：远距离扑击落地不足（1000u 扑击物理
-    // 上够不到，落在半路）也判定 JustMissed → 朝反方向随机跳开 → 3s 冷却
-    // 后重新接近 → 再扑空 = v5.3 归因于"射程"的"跳一下扑一下"循环真凶。
-    // 只有确实贴近幸存者（≤400u）才逃；落在远处一律不逃，交给
-    // sprint/crouch 接近分支继续压上去重扑。
-    float own[3];
-    GetClientAbsOrigin(client, own);
-    int prox = GetSurvivorProximity(own);
-    if (prox <= 0 || float(prox) > 400.0) {
-        g_bHunterJustLunged[client] = false;        // 清标记，不留残留状态
-        g_bHunterUsedWallPounce[client] = false;
-        return BT_FAILURE;
-    }
-
-    return BT_SUCCESS;
-}
-
-// Action: Jump away in random direction after missed pounce
-// v5.17: 逃跑跳同时按扑击键，避免浪费跳跃高度
-// v5.20: 归零 pitch — 扑击是水平技能，引擎自动计算弧线
-BT_Status HunterAct_EscapeJump(int client) {
-    float ang[3];
-    GetClientEyeAngles(client, ang);
-    ang[0] = 0.0;  // v5.20: zero pitch for pounce
-    ang[1] += GetRandomFloat(60.0, 120.0) * (GetRandomInt(0, 1) ? 1.0 : -1.0);
-    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
-    BT_AddButton(client, IN_JUMP);
-    BT_AddButton(client, IN_ATTACK);  // v5.17: 同时按扑击，逃跑跳转扑击跳
-    g_bHunterJustLunged[client] = false;
-    g_bHunterUsedWallPounce[client] = false;  // v5.16: 重置二段跳标记
-    g_fHunterMissEscapeCooldown[client] = GetGameTime() + 3.0;
-    return BT_SUCCESS;
-}
+// v5.40: missEscSeq（扑空逃跳）已随 v5.24 从 root 移除 —— 其构建体与
+// HunterCond_JustMissed / HunterAct_EscapeJump 两个孤儿函数、以及只被它们
+// 消费的 g_fHunterMissEscapeCooldown 一并删除（编译警告 203/204 实锤死代码）。
+// justLunged 的清理职责由 HunterCond_CanWallPounce 接管（落地/超时双路径，
+// 见 H1 注释）。
 
 // ============================================================================
 // v5.16: 墙面二段跳（Wall Pounce）
@@ -141,12 +108,32 @@ BT_Status HunterAct_EscapeJump(int client) {
 // ============================================================================
 
 // Condition: Hunter 在空中贴墙且可以进行二段跳
+// v5.40 FIX (H1): justLunged 生命周期 —— 原 flag 在 ability_lunge 事件置 true
+// 后，清理点全挂在 v5.24 已从 root 删除的 missEsc 分支（JustMissed/EscapeJump）
+// → 首次扑击后整条命恒 true：任何"腾空+贴墙+竖直速度"时刻（掉落/被推下高台/
+// Tank 击飞）都会误触发空中自动二段扑；且 usedWallPounce 的复位同样全部不可达，
+// 二段扑一生只触发一次然后永久失效（全局数组跨命存活，出生重置也没清它）。
+// 现语义收紧为"本次扑击后 3s 内的空中贴墙窗口"：落地或超时即清全部标记；
+// usedWallPounce 预算改由 lunge 事件重置（每次新扑击都有一次机会）。
 BT_Status HunterCond_CanWallPounce(int client) {
-    // 必须在空中
-    if (GetEntityFlags(client) & FL_ONGROUND) return BT_FAILURE;
-
     // 必须刚扑击过（扑空状态）
     if (!g_bHunterJustLunged[client]) return BT_FAILURE;
+
+    float now = GetGameTime();
+
+    // 落地 = 扑空流程结束：清标记（原逻辑在不可达的 JustMissed 分支里）
+    if (GetEntityFlags(client) & FL_ONGROUND) {
+        g_bHunterJustLunged[client] = false;
+        g_bHunterUsedWallPounce[client] = false;
+        return BT_FAILURE;
+    }
+
+    // lunge 后 3s 有效窗口：超时的腾空与该次扑击无关，清标记防残留误触发
+    if (g_fHunterLungeAt[client] <= 0.0 || now - g_fHunterLungeAt[client] > 3.0) {
+        g_bHunterJustLunged[client] = false;
+        g_bHunterUsedWallPounce[client] = false;
+        return BT_FAILURE;
+    }
 
     // 本次起跳已使用过二段跳
     if (g_bHunterUsedWallPounce[client]) return BT_FAILURE;
@@ -156,34 +143,41 @@ BT_Status HunterCond_CanWallPounce(int client) {
     GetEntPropVector(client, Prop_Data, "m_vecVelocity", vel);
     if (FloatAbs(vel[2]) < 50.0) return BT_FAILURE;
 
-    // 检测四个方向是否有墙面（距离 < 80u）
-    float pos[3], ang[3];
+    // 检测四个方向是否有墙面（水平距离 < 80u）
+    // v5.40 (H2): 原循环累进修改 ang[1]、把 pitch 混入射线方向、命中时写
+    // _wall_pounce_yaw（无任何读者且记录值错误）—— 死代码删除，重写为
+    // yaw 环形水平检测（前/左/右/后），射线平 pitch。
+    float pos[3];
     GetClientAbsOrigin(client, pos);
-    GetClientEyeAngles(client, ang);
+    float baseYaw;
+    if (g_bBT_AnglesSet[client]) {
+        baseYaw = g_fBT_Angles[client][1];   // v5.21 同款：优先读瞄准累加器
+    } else {
+        float eyeAng[3];
+        GetClientEyeAngles(client, eyeAng);
+        baseYaw = eyeAng[1];
+    }
 
-    float checkDirs[4][3];
-    // 前
-    GetAngleVectors(ang, checkDirs[0], NULL_VECTOR, NULL_VECTOR);
-    // 左
-    ang[1] -= 90.0;
-    GetAngleVectors(ang, checkDirs[1], NULL_VECTOR, NULL_VECTOR);
-    // 右
-    ang[1] += 180.0;
-    GetAngleVectors(ang, checkDirs[2], NULL_VECTOR, NULL_VECTOR);
-    // 后
-    ang[1] += 90.0;
-    GetAngleVectors(ang, checkDirs[3], NULL_VECTOR, NULL_VECTOR);
+    float yawOffsets[4];
+    yawOffsets[0] = 0.0;     // 前
+    yawOffsets[1] = -90.0;   // 左
+    yawOffsets[2] = 90.0;    // 右
+    yawOffsets[3] = 180.0;   // 后
 
+    float fwd[3], rayAng[3];
+    rayAng[0] = 0.0;         // 平 pitch：纯水平环形检测
+    rayAng[2] = 0.0;
     for (int i = 0; i < 4; i++) {
+        rayAng[1] = baseYaw + yawOffsets[i];
+        GetAngleVectors(rayAng, fwd, NULL_VECTOR, NULL_VECTOR);
+
         float endPos[3];
-        endPos[0] = pos[0] + checkDirs[i][0] * 80.0;
-        endPos[1] = pos[1] + checkDirs[i][1] * 80.0;
-        endPos[2] = pos[2] + checkDirs[i][2] * 80.0;
+        endPos[0] = pos[0] + fwd[0] * 80.0;
+        endPos[1] = pos[1] + fwd[1] * 80.0;
+        endPos[2] = pos[2];
 
         TR_TraceRayFilter(pos, endPos, MASK_PLAYERSOLID, RayType_EndPoint, TracerayFilter, client);
         if (TR_DidHit() && TR_GetFraction() < 0.9) {
-            // 检测到墙面，记录墙面方向
-            BB_SetFloat(client, "_wall_pounce_yaw", ang[1] - 90.0 * float(i));
             return BT_SUCCESS;
         }
     }
@@ -201,8 +195,8 @@ BT_Status HunterAct_WallPounce(int client) {
     int target = BB_GetInt(client, "target", -1);
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return BT_FAILURE;
 
-    if (target > 0 && IsSurvivor(target) && IsPlayerAlive(target)) {
-        // 瞄准目标
+    // 瞄准目标（v5.40: 删除重复的内层有效性 if —— 上方守卫已保证）
+    {
         float myPos[3], tPos[3], dir[3], ang[3];
         GetClientAbsOrigin(client, myPos);
         GetClientAbsOrigin(target, tPos);
@@ -660,28 +654,6 @@ BT_Status HunterCond_HighPounceChance(int client) {
 }
 
 // ============================================================================
-// v3.5: Wide Gaussian angle offset — larger spread for open-terrain pounces.
-// Uses sum-of-3-uniforms to approximate Gaussian with ~25° std dev (vs 15° standard).
-// v5.11: 加大到 ~35° 标准差，使开阔地形扑击更难预测。
-// ============================================================================
-
-BT_Status HunterAct_WideGaussOffset(int client) {
-    // v5.21 FIX: 同 ACT_GaussianAimOffset —— 从累加器读，不读 EyeAngles
-    float ang[3];
-    if (g_bBT_AnglesSet[client]) {
-        ang[0] = g_fBT_Angles[client][0];
-        ang[1] = g_fBT_Angles[client][1];
-        ang[2] = g_fBT_Angles[client][2];
-    } else {
-        GetClientEyeAngles(client, ang);
-    }
-    float offset = (GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0) + GetRandomFloat(-1.0, 1.0)) * 35.0;
-    ang[1] += offset;
-    BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
-    return BT_SUCCESS;
-}
-
-// ============================================================================
 // v5.5: 过顶扑 —— 30% 概率把瞄准点移到"目标正后方 + 头顶之上"：
 // 弹道抛物线越过幸存者头顶，落点在其身后（"越到后方突袭"）。
 // 掷不中则原样保留现有瞄准（BT_SUCCESS 不改 aim）。扑空后由 missEsc 逃跳
@@ -797,10 +769,9 @@ stock int BT_CreateHunterTree() {
     g_fHunterPounceRange = fPounceRange;  // v4.0.1: 供 crouchApproach 判断蹲伏 vs 快跑
 
     // --- Leaf nodes ---
-    int missEscSeq = BT_CreateSequence(2,
-        BT_CreateCondition(HunterCond_JustMissed),
-        BT_CreateAction(HunterAct_EscapeJump)
-    );
+    // v5.40: missEscSeq 构建体已删（v5.24 移出 root 后成为死代码，见文件头
+    // 回调区注释）。root 里的历史注释行 "// BT_AddChild(root, missEscSeq)"
+    // 保留作版本记录。
 
     // v5.12: 欺骗性跳跃 —— 检测到被瞄准时触发闪避
     int evasiveJumpSeq = BT_CreateSequence(2,
@@ -1151,11 +1122,11 @@ stock int BT_CreateHunterTree() {
     //   5. Narrow corridor → straight pounce
     //   5.5. mode 4/6 分散扑（防 dogpile）[v4.0]
     //   5.6. 枪线扰乱 → 扑火力输出者 [v5.0]
-    //   6a. Open area → roll strategy token
-    //   6b. Open + strat0 → wide flank pounce (±35° Gauss)
-    //   6c. Open + strat1 → erratic pounce (standard ±15° Gauss)
-    //   6d. Open + strat2 → falls through to standard fast pounce
-    //   7. Semi open → hug wall approach
+//   6a. Open area → roll strategy token
+//   6b. Open + strat0 → wide flank pounce (±35° Gauss)
+//   6c. Open + strat1 → erratic pounce (standard ±15° Gauss)
+//   6d. Open + strat2 → falls through to standard fast pounce
+//   7. Semi open → hug wall approach
     //   8. Close range (≤200) → direct pounce (no Gauss, faster) [v3.3]
     //   9. Standard fast pounce (LOS + inRange → pounce with Gauss)
     //   10. Flow 前方 → 蹲守埋伏（路线感知战术分支）[v5.18]

@@ -43,7 +43,13 @@
 
 #define SMOKER_ISOLATION_THRESHOLD 350.0
 #define SMOKER_TONGUE_TRY_TIMEOUT  1.2   // v5.23: 尝试超时（按压窗口，覆盖舌头发射+飞行+挂钩）
-#define SMOKER_TONGUE_BACKOFF      0.5   // v5.23: 超时未拉中后的短退避
+#define SMOKER_TONGUE_BACKOFF      0.5   // v5.23: 未发射出舌头的短退避（几何拒绝/吞键）
+
+// v5.41: 最近一次舌头【真实发射】时刻（ability_tongue 事件写入，AI_HardSI.sp）。
+// 引擎 tongue_miss_delay=15s：发射后落空 → 引擎锁 15s 拒绝再次发射，期间按键
+// 全变近战挠击。超时分支用它区分"已发射未拉中"（长退避）vs"没发射出来"（短退避）。
+float g_fSmokerTongueShotAt[MAXPLAYERS + 1];
+ConVar g_hCvarTongueMissDelay = null;
 
 BT_Status SmokerAct_AcquireTarget(int client) {
     // v5.6: 选人时效 —— 4s 内刚选过就不重选（原版每次调用重掷 40% 最近/
@@ -171,11 +177,11 @@ BT_Status SmokerAct_ApproachOutside(int client) {
         MakeVectorFromPoints(myPos, tPos, dir);
     }
     GetVectorAngles(dir, ang);
-    // v5.34 FIX: 远距离不强制视角 —— 距离 >850u（舌头射程）时交还 Valve
+    // v5.34 FIX: 远距离不强制视角 —— 距离 >750u（v5.41 对齐 tongue_range）时交还 Valve
     // NextBot 导航自由调整方向沿 navmesh 绕障碍；只有进入射程附近才
     // 强制朝向 standPos（瞄准/战术位置需要精确朝向）。
     // 原版无论距离一律 BT_SetAimAngles → 远距离剥夺引擎导航 → 撞墙循环。
-    if (distToTarget <= 850.0) {
+    if (distToTarget <= 750.0) {   // v5.41: 850→750
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     }
     BT_AddButton(client, IN_FORWARD);
@@ -209,14 +215,15 @@ BT_Status SmokerAct_SteerPinToAcid(int client) {
 
     // v5.3: 无酸时后退拖拽 —— 原版引擎拉中后钉住不动（观感"放完技能原地
     // 傻站"）。真人 Smoker 拉中会后退拉扯：背对目标走 = 舌头把目标拖向自己
-    // （目标被拖离队伍/拖进特感堆）。后退受限：目标距 Smoker ≥850u 停止
-    // （防拉断舌头），退到 850u 后引擎托管拉，断舌/松开后回正常分支。
+    // （目标被拖离队伍/拖进特感堆）。后退受限：目标距 Smoker ≥750u 停止
+    // （v5.41: 防拉断舌头，阈值对齐真实 tongue_range=750），到限后引擎托管
+    // 拉，断舌/松开后回正常分支。
     int victim = GetEntPropEnt(client, Prop_Send, "m_tongueVictim");
     if (victim > 0 && IsSurvivor(victim) && IsPlayerAlive(victim)) {
         float vPos[3];
         GetClientAbsOrigin(victim, vPos);
         float dist = GetVectorDistance(myPos, vPos);
-        if (dist < 850.0) {
+        if (dist < 750.0) {   // v5.41: 850→750
             float dir[3], ang[3];
             MakeVectorFromPoints(vPos, myPos, dir);   // 目标→我 = 背对目标方向
             dir[2] = 0.0;
@@ -227,7 +234,7 @@ BT_Status SmokerAct_SteerPinToAcid(int client) {
                 return BT_RUNNING;
             }
         }
-        // v5.37: >=850u 时后退拖拽 + 横移保持活性
+        // v5.37/v5.41: >=750u 时后退拖拽 + 横移保持活性
         // 原 v5.27 只横移不后退 → 观感傻站；真人 Smoker 拉中会后退拉扯：
         // 后退 = 舌头把目标拖向自己（拖离队伍/拖进特感堆）。
         // 后退距离限制：目标距 <700u 时停止后退（防拉断舌头）。
@@ -330,8 +337,10 @@ BT_Status SmokerAct_TryTongue(int client) {
         GetClientAbsOrigin(target, tPos);
         GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
         float dist = GetVectorDistance(sPos, tPos);
-        float leadT = dist / 1600.0;   // 舌头飞行时间估算（~850u 射程 ≈ 0.5s）
-        if (leadT > 0.6) leadT = 0.6;
+        // v5.41: 1600 → 1000 对齐引擎 tongue_fly_speed=1000（原值高估速度
+        // → 提前量小 60% → 移动目标预瞄落后）；clamp 上限随射程 750/1000=0.75s
+        float leadT = dist / 1000.0;
+        if (leadT > 0.75) leadT = 0.75;
         if (leadT < 0.1) leadT = 0.1;
         float aimPos[3];
         aimPos[0] = tPos[0] + tVel[0] * leadT;
@@ -343,10 +352,27 @@ BT_Status SmokerAct_TryTongue(int client) {
     }
     BT_AddButton(client, IN_ATTACK);
 
-    // --- 尝试超时未拉中：短退避 + FAILURE（不锁冷却，立即重评分支）---
+    // --- 尝试超时未拉中：按失败类型退避 + FAILURE ---
+    // v5.41 FIX: 原版一律短退避(0.5s) → 若本次已真实发射且落空，引擎
+    // tongue_miss_delay=15s 内拒绝再射，BT 每 ~1.7s 重按 ATTACK = 挠击站桩
+    // 循环整个锁期（"拉不中挠击"第二根因，v5.39 只修了超时死循环）。
+    // 现区分：已发射（g_fSmokerTongueShotAt >= tryAt）→ 长退避 ≈ miss 锁剩余；
+    // 未发射（引擎几何拒绝/吞键）→ 保持 0.5s 短退避立即重试。
     if ((now - tryAt) > SMOKER_TONGUE_TRY_TIMEOUT) {
         SI_AttackClearTarget(client, "_smoker");   // v5.33: 超时释放锁定
-        SI_AbilityBackoff(client, "_smoker", now, SMOKER_TONGUE_BACKOFF);
+        bool launched = (g_fSmokerTongueShotAt[client] >= tryAt);
+        float backoff = SMOKER_TONGUE_BACKOFF;
+        if (launched) {
+            backoff = 15.0;
+            if (g_hCvarTongueMissDelay != null) {
+                backoff = g_hCvarTongueMissDelay.FloatValue;
+            }
+            // 从发射时刻起算剩余锁期（try 窗口最长 1.2s，扣掉已流逝部分）
+            float elapsed = now - g_fSmokerTongueShotAt[client];
+            backoff -= elapsed;
+            if (backoff < 1.0) backoff = 1.0;
+        }
+        SI_AbilityBackoff(client, "_smoker", now, backoff);
         BB_SetBool(client, "_smoker_tongue_trying", false);   // v5.39: 退出视角保真窗口
         return BT_FAILURE;
     }
@@ -474,7 +500,7 @@ stock int BT_CreateSmokerTree() {
     int openS0_Pull = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
+        BT_CreateIsTargetInRange(750.0),  // v5.41: 850→750 对齐引擎 tongue_range
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(SmokerAct_TryTongue)
     );
@@ -491,7 +517,7 @@ stock int BT_CreateSmokerTree() {
     int openS1_Pull = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(1),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
+        BT_CreateIsTargetInRange(750.0),  // v5.41: 850→750 对齐引擎 tongue_range
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(SmokerAct_TryTongue)
     );
@@ -502,13 +528,13 @@ stock int BT_CreateSmokerTree() {
     int ledgeTargetAcquire = BT_CreateAction(SmokerAct_AcquireLedgeTarget);
     // v3.2 FIX: ledgePullSeq now uses SmokerAct_AcquireLedgeTarget (90% farthest)
     // before snapping aim, instead of relying on the engine's default target.
-    // v5.6: 补 IsTargetInRange(850)（原版缺距离门：ledge 地形命中时 2000u 外
+    // v5.6: 补 IsTargetInRange（原版缺距离门：ledge 地形命中时 2000u 外
     // 也按 ATTACK）+ HasTargetLOS + SnapAimToBlackboardTarget
     int ledgePullSeq = BT_CreateSequence(6,
         BT_CreateCondition(CND_IsLedgeBetweenTarget),
         BT_CreateAction(SmokerAct_AcquireLedgeTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
+        BT_CreateIsTargetInRange(750.0),  // v5.41: 850→750 对齐引擎 tongue_range
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(SmokerAct_TryTongue)
     );
@@ -519,19 +545,19 @@ stock int BT_CreateSmokerTree() {
         BT_CreateCondition(CND_IsNarrowSpace),
         BT_CreateAction(SmokerAct_AcquireNarrowTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
+        BT_CreateIsTargetInRange(750.0),  // v5.41: 850→750 对齐引擎 tongue_range
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(SmokerAct_TryTongue)
     );
 
     // Standard: pull (mixed targeting), check LOS, aim, attack
-    // v4.0.3: 加 IsInRange(850) —— 原版无距离限制，2000u 外有 LOS 也每 tick 按
+    // v4.0.3: 加 IsInRange（原版无距离限制，2000u 外有 LOS 也每 tick 按
     // ATTACK（舌头够不着，纯浪费按键；与 openS0/S1 pull 的距离口径对齐）。
     // v5.6: HasLOS → HasTargetLOS（Smoker 拉人全灭根因）+ target 口径 + 黑板瞄准
     int acquireTarget = BT_CreateAction(SmokerAct_AcquireTarget);
     int pullSeq = BT_CreateSequence(4,
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
+        BT_CreateIsTargetInRange(750.0),  // v5.41: 850→750 对齐引擎 tongue_range
         BT_CreateAction(ACT_SnapAimToBlackboardTarget),
         BT_CreateAction(SmokerAct_TryTongue)
     );
@@ -552,12 +578,12 @@ stock int BT_CreateSmokerTree() {
     );
 
     // Approach: 外侧走位 —— 绕到目标远离队伍的一侧再拉（把人拉离队伍）
-    // v5.6: 加距离门控（IsNotInRange(850)）—— 原版注释声称 "only when far"
-    // 但无任何距离条件：850u 内（舌头射程内）拉人分支全 FAIL 时也落此分支
+    // v5.6: 加距离门控（IsNotInRange）—— 原版注释声称 "only when far"
+    // 但无任何距离条件：750u 内（舌头射程内）拉人分支全 FAIL 时也落此分支
     // 盲走（386-800u 反复"拱人+侧滑"现场）。射程内走位 = closeRangeStrafe
     // 的职责，approachAct 只负责射程外绕位。
     int approachAct = BT_CreateSequence(2,
-        BT_CreateIsNotInRange(850.0),
+        BT_CreateIsNotInRange(750.0),   // v5.41: 850→750
         BT_CreateAction(SmokerAct_ApproachOutside)
     );
 
@@ -569,7 +595,7 @@ stock int BT_CreateSmokerTree() {
         BT_CreateIsMode(3),
         BT_CreateAction(SmokerAct_AcquireBoomedTarget),
         BT_CreateCondition(CND_HasTargetLOS),
-        BT_CreateIsTargetInRange(850.0),  // 距离门控（固定距离）
+        BT_CreateIsTargetInRange(750.0),  // v5.41: 850→750 对齐引擎 tongue_range
         BT_CreateAction(SmokerAct_TryTongue)
     );
     int mode3Approach = BT_CreateSequence(4,
@@ -598,7 +624,7 @@ stock int BT_CreateSmokerTree() {
     // 顶身循环）→ 无 LOS 时整段舌头射程内只能盲走。850u 全射程内无 LOS 都
     // 横移找角度，拉人分支才有机会触发。
     int closeRangeStrafe = BT_CreateSequence(4,
-        BT_CreateIsInRange(850.0),
+        BT_CreateIsInRange(750.0),  // v5.41: 850→750 tongue_range
         BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
         BT_CreateAction(ACT_AcquirePinnableTarget),  // v5.19: 优先站立目标(倒地不可拉)
         BT_CreateAction(ACT_StrafeApproach)
@@ -608,7 +634,7 @@ stock int BT_CreateSmokerTree() {
     // approachAct(需!InRange)与closeRangeStrafe(需!LOS)均FAIL -> 零移动。
     // 此分支InRange+有LOS+Backoff时横移找角度，避免落到零移动retarget。
     int backoffStrafe = BT_CreateSequence(5,
-        BT_CreateIsInRange(850.0),
+        BT_CreateIsInRange(750.0),  // v5.41: 850→750 tongue_range
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateCondition(SmokerCond_BackoffActive),
         BT_CreateAction(ACT_AcquirePinnableTarget),
@@ -662,7 +688,7 @@ stock int BT_CreateSmokerTree() {
     int routeAmbushSeq = BT_CreateSequence(4,
         BT_CreateIsAheadOnRoute(600.0),                        // 领先队伍 600 flow
         BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),// 有视线就该拉了
-        BT_CreateIsNotInRange(850.0),                          // 射程内交给 closeRangeStrafe
+        BT_CreateIsNotInRange(750.0),   // v5.41: 850→750；射程内交给 closeRangeStrafe
         BT_CreateAction(ACT_HoldRouteAmbush)
     );
 
@@ -688,7 +714,7 @@ stock int BT_CreateSmokerTree() {
     // 解决"拉完人傻站"：pullCluster 全 FAIL + closeRangeStrafe FAIL(有LOS) +
     // backoffStrafe FAIL(非Backoff) → 原来直接落到 retarget/Wander。
     int cooldownStrafe = BT_CreateSequence(4,
-        BT_CreateIsInRange(850.0),
+        BT_CreateIsInRange(750.0),  // v5.41: 850→750 tongue_range
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateAction(ACT_AcquirePinnableTarget),
         BT_CreateAction(ACT_StrafeApproach)
@@ -704,4 +730,6 @@ stock int BT_CreateSmokerTree() {
 
 public Smoker_OnModuleStart() {
     SetConVarFloat(FindConVar("smoker_tongue_delay"), 1.0);
+    // v5.41: 缓存 tongue_miss_delay（默认 15s，发射落空后的引擎再射锁定期）
+    g_hCvarTongueMissDelay = FindConVar("tongue_miss_delay");
 }
