@@ -41,6 +41,13 @@
 // v2.7.1: 出生点nav校验 + 放宽主路径（用户拍板 1+2 合并）——
 //   · 主路径 TANK_SPAWN_MIN_DIST 800→700 + SAMPLES 20→40（室内段800+LOS 0%成功→100% fallback）
 //   · 全链路 IsNavReachable：主路径/fallback/重定位LOS后加 nav可达性，过滤Z=-2879虚空非nav点被导演秒删
+// v2.7.7: 冷静期基准单一来源化（2026-08-25）——
+//   · SS_OnWaveRest 不再硬编码 baseMin/baseMax=20/30 踩 ss_rest_min/max
+//     （cfg 改 25/35 后每波被踩回, 用户冷静期设定从未生效——实测波1 39.2s
+//     来自 [30,45] Tank 缩放、波2 26.0s 来自 [20,30] 硬编码, 均与 cfg 无关）
+//   · 改为回合开始后首次 REST 从 cvar 捕获基准存全局（防连续 Tank 波叠加）,
+//     每波先复位基准再按 tank_wave_rest_scale 缩放
+
 // v2.7.6: 修复 Tank 偶尔刷新到地面之下的 bug ——
 //   · 新增 FindGroundAbove：从候选点上方150u向下trace1500u找实际地面（+5u防z-fighting），
 //     解决 L4D_GetRandomPZSpawnPosition 返回的Z坐标偶尔低于可行走平面的问题
@@ -53,7 +60,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.7.6"
+#define PLUGIN_VERSION "2.7.7"
 
 // 配置常量
 #define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
@@ -89,6 +96,10 @@ int g_iNoTankWaves = 0;             // 连续无Tank波次（冷静期不累加�
 int g_iTankCooldown = 0;            // Tank波后冷静期剩余
 bool g_bNextWaveIsTank = false;     // 下一波是否为Tank波（预警标志）
 int g_iNextTankCount = 0;           // 下一波Tank数量（1=突变, 2=强制）
+float g_fRestBaseMin = 0.0;         // v2.7.7 冷静期基准下限（回合开始时从 ss_rest_min 捕获, 0=未捕获）
+float g_fRestBaseMax = 0.0;         // v2.7.7 冷静期基准上限（同上）。不再硬编码 20/30——
+                                    // 2026-08-25 实测: cfg 改 25/35 后被旧硬编码每波踩回,
+                                    // 用户设的冷静期从未生效。单一来源 = specialspawner.cfg
 
 // Tank 波跟踪
 int g_iTanks[MAX_TRACKED_TANKS];    // 当前 Tank 波生成的 Tank client 索引
@@ -144,6 +155,8 @@ void Event_RoundStart(Event event, const char[] name, bool dontBroadcast) {
     g_iTankCooldown = 0;
     g_bNextWaveIsTank = false;
     g_iNextTankCount = 0;
+    g_fRestBaseMin = 0.0;   // v2.7.7: 换图后重捕获（cfg 可能已改）
+    g_fRestBaseMax = 0.0;
     ClearTankTracking();
     ReleaseClearingHold();
     LogMessage("[Tank Mutator] Round start, all counters reset");
@@ -179,15 +192,19 @@ public void SS_OnWaveRest(float totalCountdown) {
     // 返回后抽取冷静期（rest = Random(ss_rest_min/max)）——本函数对
     // ss_rest_min/max 的修改即作用于本波冷静期。
     // v2.5.0: 冷静期倍率（用户设计：下一波是 Tank → 冷静期 ×1.5）。
-    // 基准与 specialspawner cfg 同步（ss_rest_min/max = 20/30, v2.7.0 由 25/35
-    // 同步下调——specialspawner v2.6.0 冷静期已改 20-30, 此处硬编码必须一致,
-    // 否则每波 REST 会把 cfg 值覆盖回旧值）。
-    float baseMin = 20.0, baseMax = 30.0;
-    float scale = (g_hCvarRestScale != null) ? g_hCvarRestScale.FloatValue : 1.5;
+    // v2.7.7: 基准不再硬编码 20/30——改为回合开始后首次 REST 时从 ss_rest_min/max
+    // 捕获（此时 cfg 已执行、本插件尚未改写 → 即 cfg 值）。捕获一次存全局,
+    // 之后每波先复位基准再缩放, 防连续 Tank 波 ×1.5 叠加膨胀。
+    // （2026-08-25: cfg 改 25/35 后被旧硬编码踩回 20/30, 用户设定从未生效。）
     ConVar hRestMin = FindConVar("ss_rest_min");
     ConVar hRestMax = FindConVar("ss_rest_max");
-    if (hRestMin != null) hRestMin.SetFloat(baseMin);
-    if (hRestMax != null) hRestMax.SetFloat(baseMax);
+    if (g_fRestBaseMin <= 0.0 || g_fRestBaseMax <= 0.0) {
+        g_fRestBaseMin = (hRestMin != null) ? hRestMin.FloatValue : 25.0;
+        g_fRestBaseMax = (hRestMax != null) ? hRestMax.FloatValue : 35.0;
+        LogMessage("[Tank Mutator] Rest base captured from cvars: %.1f-%.1f", g_fRestBaseMin, g_fRestBaseMax);
+    }
+    if (hRestMin != null) hRestMin.SetFloat(g_fRestBaseMin);
+    if (hRestMax != null) hRestMax.SetFloat(g_fRestBaseMax);
     // 此时判定下一波是否为 Tank 波，如果是则提前预警
 
     // 首波保护：第一波必定不是 Tank
@@ -239,9 +256,10 @@ public void SS_OnWaveRest(float totalCountdown) {
         g_bNextWaveIsTank = true;
 
         // v2.5.0: 下一波是 Tank → 冷静期 ×scale（specialspawner 在 forward
-        // 返回后抽取 rest，此修改即生效于本波冷静期）
-        if (hRestMin != null) hRestMin.SetFloat(baseMin * scale);
-        if (hRestMax != null) hRestMax.SetFloat(baseMax * scale);
+        // 返回后抽取 rest，此修改即生效于本波冷静期；基准用捕获值, 不叠加）
+        float scale = (g_hCvarRestScale != null) ? g_hCvarRestScale.FloatValue : 1.5;
+        if (hRestMin != null) hRestMin.SetFloat(g_fRestBaseMin * scale);
+        if (hRestMax != null) hRestMax.SetFloat(g_fRestBaseMax * scale);
 
         // 预警秒数由 specialspawner 播报（"X 秒后下一波"，已含倍率），
         // 此处不再报具体秒数（v2.5.0: totalCountdown 在 forward 时尚未确定）
