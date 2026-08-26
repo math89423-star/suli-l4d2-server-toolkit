@@ -43,3 +43,23 @@ native int SH_AddWallet(int client, int amount);
  * 闲置/接管不触发（引擎自管）。
  */
 forward void SH_OnClientRespawned(int client);
+
+/**
+ * ── v1.13.7 只读榜单数据 API（l4d2_scoreboard_ui 常驻 EMS 排行榜消费）──
+ * 数据口径与 !rank/EMS 得分榜同源；三级排序 积分>特感>击杀 由消费方实现。
+ */
+
+/** 本关累计积分（排行榜口径，OnMapEnd 清零；≠钱包可用积分）。 */
+native int SH_GetRoundScore(int client);
+
+/** 特感击杀数。 */
+native int SH_GetSIKills(int client);
+
+/** 小僵尸击杀数（总击杀 = SIKills + CommonKills）。 */
+native int SH_GetCommonKills(int client);
+
+/** 友伤伤害累计。 */
+native int SH_GetFFDamage(int client);
+
+/** 被黑（黑枪/被 SI 控制次数）计数。 */
+native int SH_GetBlacked(int client);

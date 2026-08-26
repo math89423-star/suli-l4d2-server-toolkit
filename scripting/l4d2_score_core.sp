@@ -824,7 +824,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.13.6"
+#define PLUGIN_VERSION "1.13.7"	// v1.13.7: 新增 SH_GetRoundScore/SH_GetSIKills/SH_GetCommonKills/SH_GetFFDamage/SH_GetBlacked 只读 native（常驻 EMS 排行榜 l4d2_scoreboard_ui 消费）
 
 // ============================================================================
 // ConVar handles
@@ -1008,6 +1008,51 @@ public int Native_SH_GetWallet(Handle plugin, int numParams)
     if (client < 1 || client > MaxClients)
         return 0;
     return g_iWallet[client];
+}
+
+// ============================================================================
+// v1.13.7: SH_ 只读榜单数据 API（l4d2_scoreboard_ui 消费）——常驻 EMS 排行榜
+// 数据口径与 !rank/EMS 得分榜同源（g_iTotalScore/g_iSIKills/g_iCommonKills/
+// g_iFFDamage/g_iBlacked），三级排序 积分>特感>击杀 由消费方自行实现。
+// ============================================================================
+public int Native_SH_GetRoundScore(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients)
+        return 0;
+    return g_iTotalScore[client];
+}
+
+public int Native_SH_GetSIKills(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients)
+        return 0;
+    return g_iSIKills[client];
+}
+
+public int Native_SH_GetCommonKills(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients)
+        return 0;
+    return g_iCommonKills[client];
+}
+
+public int Native_SH_GetFFDamage(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients)
+        return 0;
+    return g_iFFDamage[client];
+}
+
+public int Native_SH_GetBlacked(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients)
+        return 0;
+    return g_iBlacked[client];
 }
 
 // v1.13.0 (user): 可用积分统一入账入口——所有加分点 + SH_ 外部消费都走这里，
@@ -1376,6 +1421,12 @@ public void OnPluginStart()
     CreateNative("SH_GetWallet",      Native_SH_GetWallet);
     CreateNative("SH_AddWallet",      Native_SH_AddWallet);
     CreateNative("SH_ShowMissileBanner", Native_SH_ShowMissileBanner);  // v1.13.3: 导弹聚合击杀横幅(纯显示)
+    // v1.13.7: 只读榜单数据 API（l4d2_scoreboard_ui 常驻 EMS 排行榜消费）
+    CreateNative("SH_GetRoundScore",  Native_SH_GetRoundScore);
+    CreateNative("SH_GetSIKills",     Native_SH_GetSIKills);
+    CreateNative("SH_GetCommonKills", Native_SH_GetCommonKills);
+    CreateNative("SH_GetFFDamage",    Native_SH_GetFFDamage);
+    CreateNative("SH_GetBlacked",     Native_SH_GetBlacked);
     // v1.12.0: 复活币 natives（Get/AddReviveCoins/GetCoinMax/ReviveClient）已移除
     // v1.9.2: 复活完成全局 forward（l4d2_shop v1.5.1 监听发复活套装+满血）
     g_hFwdRespawned = CreateGlobalForward("SH_OnClientRespawned", ET_Ignore, Param_Cell);
