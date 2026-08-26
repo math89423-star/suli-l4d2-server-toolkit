@@ -63,10 +63,12 @@ scripted_hud 两处补丁（源码内 [suli] 注释标记）：
 ⑥ 本镜像构建怪癖：hud3_visible 默认 0、hud3_team 默认 2，与官方帖文档不符；
    布局值必须落 cfg 固化
 ⑦ **跨插件 native 必须逐个 MarkNativeAsOptional**（消费方 AskPluginLoad2），
-   否则换图加载顺序一变就硬失败。本次连续踩两次：
-   - shop 缺 SH_GetWallet/SH_AddWallet 标记（score_core 改名改变 readdir 顺序暴露）
-   - v1.16.3 新增 ShopFlare_Clear/AerialFlare_Cancel 漏标（"Depends on plugin:
-     l4d2_shop_flare.smx" 加载失败）
+   否则换图加载顺序一变就硬失败。本次连续踩三次（手动 reload 永远测不出来，
+   只有换图才暴露——score_core 先载时 native 齐全，顺序翻转即炸）：
+   - 第一轮: shop 缺 SH_GetWallet/SH_AddWallet 标记（改名改变 readdir 顺序暴露）
+   - 第二轮: v1.16.3 新增 ShopFlare_Clear/AerialFlare_Cancel 漏标
+   - 第三轮: SH_ShowMissileBanner 漏标 → **教训: 不要打地鼠, 直接清点消费方
+     全部 `^native` 声明逐个标记**（shop 398-421 行 13 个现已全覆盖, v1.16.6）
    运行时守卫模式：GetFeatureStatus(FeatureType_Native,"X")==Available 再调用
 
 ## 暂停时的遗留问题（复活时优先查）

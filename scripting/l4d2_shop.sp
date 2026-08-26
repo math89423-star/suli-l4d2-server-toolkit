@@ -372,7 +372,7 @@
 #include <float>         // 火炮弹道数学 Sqrt/Cos/Sin
 #include <left4dhooks>   // v1.1.0: L4D2_Infected_HitByVomitJar forward（胆汁验证日志；全部 native 已 MarkNativeAsOptional，缺失不挡加载）
 
-#define PLUGIN_VERSION "1.16.5"   // v1.14.0: 火力支援全线+2000 (用户拍板 2026-08-25)——汽油弹12000/胆汁雨8500/榴弹雨16500/AGM20000
+#define PLUGIN_VERSION "1.16.6"   // v1.14.0: 火力支援全线+2000 (用户拍板 2026-08-25)——汽油弹12000/胆汁雨8500/榴弹雨16500/AGM20000
 // v1.9.0（2026-08-16）：火力支援目标解析系统重构（任务书实施，只采纳真问题）——
 // ① Art_FindCeiling 净空基准修正（起点 +200 偏移在返回时加回，真实净空 750 不再
 //   被判 550 → 误拒）；② Art_AimPoint 拆为 Art_GetAimIntent（原始命中）+ 
@@ -789,6 +789,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
     // 运行时守卫已存在：FindPluginByFile("l4d2_score_core.smx") 见 Cmd_Shop 等。
     MarkNativeAsOptional("SH_GetWallet");
     MarkNativeAsOptional("SH_AddWallet");
+    MarkNativeAsOptional("SH_ShowMissileBanner");   // v1.16.5b: 21:11 换图三度翻车——全量清点 398-421 行 native 声明逐个标记, 不再打地鼠
     // v1.16.5: v1.16.3 新增的两个 flare native 同样漏标(2026-08-26 换图实测加载失败 "Depends on plugin: l4d2_shop_flare")
     MarkNativeAsOptional("ShopFlare_Clear");
     MarkNativeAsOptional("AerialFlare_Cancel");
