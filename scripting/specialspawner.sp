@@ -124,6 +124,8 @@ ConVar
 	g_cSpawnRangeGuard,
 	g_cSpawnRangeGuardMin,
 	g_cSpawnDistMax,
+	g_cSpreadFloor,				// v6.5.0 分散降级保底间隔
+	g_cInvisMaxDist,			// v6.5.0 不可见兜底距离上限
 	// v2.6.0 幽灵修复: 不可见兜底分档 —— v6.0.0 起语义废弃（不再决定 fallback 等级），
 	// 仅保留注册防旧 cfg 报错（报告 §16 建议逐步废掉），不再持有 handle。
 	// v6.0.0 调研落地: Hard Gate + Soft Score 参数
@@ -372,7 +374,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "6.4.2",		// v6.2.0 损失率补偿：系统处决占比 → 冷静期压缩(保底10s) + 剿灭得分补偿，双向找回节奏
+	version = "6.5.0",		// v6.5.0 点位人性化三件套: 分散降级(治failClose饿死803次/日) + 不可见兜底距离上限(治幽灵处决) + 可见性评估提前
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -578,6 +580,16 @@ public void OnPluginStart() {
 	// v1.3.9 保底阈值注释已废弃；保留注册防旧 cfg 报错。
 	g_cSpawnRangeGuardMin =			CreateConVar("ss_spawnrange_guard_min",	"250.0",					"[v6.1.0仅观测] 落点最近距离观测阈值下限", _, true, 0.0, true, 1500.0);
 	g_cSpawnDistMax =				CreateConVar("ss_spawn_dist_max",		"1200.0",					"v6.4.2: 生成距离上限——开阔地防刷出过远被闲置处决", _, true, 400.0, true, 3000.0);
+	// v6.5.0 点位人性化三件套（2026-08-26 实测日志驱动）:
+	//   实测 failClose=24 全灭: 08-23 达 803 次/日 —— 玩家抱团时引擎采样器只能在
+	//   同一口袋出点, 波内两两间隔 250u 几何不可能 → 候选全灭 → 欠账饿死(播报有怪没威胁)。
+	//   A) 分散降级(ss_spawn_spread_floor): 被分散规则拒掉的候选进降级池(离已刷点最远者胜),
+	//      主池全灭且 spread 主导时按保底间隔放行;
+	//   B) 不可见兜底距离上限(ss_spawn_invis_max_dist): 更远的不可见点出生即注定
+	//      25s 自杀处决(实测处决样本中位 dist=828 全部 visible=0), 宁可欠账重试;
+	//   C) 可见性评估提前到分散检查之前: 被拒的可见点也能进降级池。
+	g_cSpreadFloor =				CreateConVar("ss_spawn_spread_floor",	"120.0",					"v6.5.0 分散降级保底间隔: 抱团场景候选被分散规则全拒时, 降级采用'离已刷点最远'候选的最低间隔 [u]", _, true, 0.0, true, 250.0);
+	g_cInvisMaxDist =				CreateConVar("ss_spawn_invis_max_dist",	"900.0",					"v6.5.0 不可见兜底距离上限: 超过该距离的不可见候选不采用(出生即注定闲置处决), 宁可欠账重试 [u]", _, true, 400.0, true, 3000.0);
 	// v2.6.0 幽灵修复双阈值（防贴脸偏好层）——v6.0.0 起语义废弃（报告 §16）：
 	// 不再决定 fallback 等级，仅保留注册防旧 cfg 报错；丢弃 handle 不持有。
 	CreateConVar("ss_spawnrange_guard_invis_min",	"350.0",	"[已废弃] 原不可见兜底A档下限，v6.0.0 起不再使用，仅保留注册", _, true, 0.0, true, 1500.0);
@@ -2196,12 +2208,17 @@ bool SISpawn_InHurtTrigger(const float pos[3]) {
 }
 
 
-// 候选点主入口（v6.1.2）: 信任引擎取点 + LOS/距离轻过滤。
+// 候选点主入口（v6.5.0）: 信任引擎取点 + LOS/距离轻过滤。
 // 参照锚 = 本只 SI 分配到的 intendedTarget（压力均衡由 SISpawn_PickTarget 保底）。
 // 调 L4D_GetRandomPZSpawnPosition(target, class, attempts) 拿引擎给的点，
 // 保留快速重试保护（trigger_hurt 陷阱 / NavPath 不通），新增距离硬门 +
 // 可见性优先（可见立即采用，不可见追踪最近兜底，防饿死）。
 // v6.1.3: 补位(30% reserve)用 250 硬门保证必补，首发用 400 保证反应时间
+// v6.5.0: 三件套（实测日志驱动）——
+//   A 分散降级: spread 拒掉的候选进降级池(离已刷点最远者胜), 主池全灭且
+//     spread 主导时按 ss_spawn_spread_floor 放行（治抱团口袋 failClose 全灭饿死）
+//   B 不可见兜底距离上限 ss_spawn_invis_max_dist（治出生即注定闲置处决的垃圾点）
+//   C 可见性评估提前于分散检查（被拒可见点也能进降级池）
 // 返回 false = 无合法点（欠账 catch-up，失败不耗波次预算）。
 bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float outPos[3], bool isReplacement=false) {
 
@@ -2225,7 +2242,14 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 	bool hasVisFallback = false;
 	float bestVisDist = -1.0;
 	float bestVisPos[3];
-	int failEngine=0, failTrap=0, failNav=0, failDist=0, failClose=0;
+	int failEngine=0, failTrap=0, failNav=0, failDist=0, failClose=0, failFar=0;
+
+	// v6.5.0(A) 分散降级池: 被分散规则拒掉的候选中"离已刷点最远"者
+	// （可见优先于不可见；主池全灭且 spread 拒绝主导时按 ss_spawn_spread_floor 放行）
+	float relaxVisSep = -1.0;
+	float relaxVisPos[3];
+	float relaxInvisSep = -1.0;
+	float relaxInvisPos[3];
 
 	for (int t = 0; t < attempts; t++) {
 		g_iDirection = dir;		// 引擎 GetRandomPZSpawnPosition 读 PreferredSpecialDirection
@@ -2269,24 +2293,41 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 			continue;
 		}
 
+		// v6.5.0(C) 可见性评估提前: 先判可见再决定去向——被分散规则拒掉的
+		// 可见点不再直接丢弃, 转入降级池参与兜底（原顺序里它们连参赛资格都没有）
+		bool vis = IsPosVisibleToAnySurvivor(p);
+
 		// v6.1.4 分散刷：与本波已刷点位保持 250u 以上（防挤一处，透视聚堆）
-		bool tooClose = false;
-		for (int k = 0; k < g_iBatchSpawnPosCount; k++) {
-			if (GetVectorDistance(p, g_fBatchSpawnPos[k]) < 250.0) { tooClose = true; break; }
-		}
-		if (tooClose) {
+		// v6.5.0(A) 拒掉的同时进降级池: 追踪"离已刷点最远"的落选候选。
+		// 玩家抱团口袋里引擎只能反复给同一片点 → 主池全灭时按保底间隔放行,
+		// 根治 failClose=24 全灭饿死（实测 08-23 单日 803 次）
+		float sep = SISpawn_MinSepToPlaced(p);
+		if (sep < 250.0) {
 			failClose++;
+			if (vis) {
+				if (sep > relaxVisSep) { relaxVisSep = sep; relaxVisPos = p; }
+			} else if (sep > relaxInvisSep) {
+				relaxInvisSep = sep;
+				relaxInvisPos = p;
+			}
 			continue;
 		}
 
 		// v6.4.2 可见候选择优: 追踪"最近可见点"(旧逻辑第一个可见即返回,
 		// 开阔地会选中过远点), 全扫完取最近
-		if (IsPosVisibleToAnySurvivor(p)) {
+		if (vis) {
 			if (bestVisDist < 0.0 || dist < bestVisDist) {
 				bestVisDist = dist;
 				bestVisPos = p;
 				hasVisFallback = true;
 			}
+			continue;
+		}
+
+		// v6.5.0(B) 不可见兜底距离上限: 太远的不可见点出生即注定闲置处决
+		// （实测处决样本全部 visible=0、距离中位 828u），宁可欠账重试也不产垃圾
+		if (dist > g_cInvisMaxDist.FloatValue) {
+			failFar++;
 			continue;
 		}
 
@@ -2307,6 +2348,20 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 	// 全部尝试后无可见点 → 用最近的不可见点兜底（防饿死，目標注入 + 看门狗兜）
 	if (hasInvisFallback) {
 		outPos = bestInvisPos;
+		return true;
+	}
+
+	// v6.5.0(A) 分散降级: 主池全灭且 spread 拒绝主导 → 采用降级池最优者。
+	// 可见 > 不可见；间隔 ≥ ss_spawn_spread_floor 防真·叠罗汉。
+	// 只动放行决策、不改变引擎候选分布（吸取 v6.0.0 打分排序翻车教训）。
+	if (failClose > 0 && relaxVisSep >= g_cSpreadFloor.FloatValue) {
+		outPos = relaxVisPos;
+		LogMessage("[SS] FindPosition spread-relaxed class=%d target=%N sep=%.0f vis=1 failClose=%d", zombieClass, intendedTarget, relaxVisSep, failClose);
+		return true;
+	}
+	if (failClose > 0 && relaxInvisSep >= g_cSpreadFloor.FloatValue) {
+		outPos = relaxInvisPos;
+		LogMessage("[SS] FindPosition spread-relaxed class=%d target=%N sep=%.0f vis=0 failClose=%d", zombieClass, intendedTarget, relaxInvisSep, failClose);
 		return true;
 	}
 
@@ -2343,11 +2398,7 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 				float dist = DistanceToNearestSurvivor(gnd);
 				float minDist = isReplacement ? 250.0 : g_cSpawnRangeGuardMin.FloatValue;
 				if (dist < minDist) continue;
-				bool tooClose = false;
-				for (int k = 0; k < g_iBatchSpawnPosCount; k++) {
-					if (GetVectorDistance(gnd, g_fBatchSpawnPos[k]) < 250.0) { tooClose = true; break; }
-				}
-				if (tooClose) continue;
+				if (SISpawn_MinSepToPlaced(gnd) < 250.0) continue;
 				outPos = gnd;
 				LogMessage("[SS] FindPosition engine-starve fallback OK class=%d dist=%.0f", zombieClass, dist);
 				return true;
@@ -2356,7 +2407,7 @@ bool SISpawn_FindPosition(int zombieClass, int dir, int intendedTarget, float ou
 		}
 	}
 
-	LogMessage("[SS] FindPosition FAILED class=%d target=%N attempts=%d failEngine=%d failTrap=%d failNav=%d failDist=%d failClose=%d hasInvis=%d", zombieClass, intendedTarget, attempts, failEngine, failTrap, failNav, failDist, failClose, hasInvisFallback);
+	LogMessage("[SS] FindPosition FAILED class=%d target=%N attempts=%d failEngine=%d failTrap=%d failNav=%d failDist=%d failClose=%d failFar=%d hasInvis=%d", zombieClass, intendedTarget, attempts, failEngine, failTrap, failNav, failDist, failClose, failFar, hasInvisFallback);
 	return false;
 }
 
@@ -3129,6 +3180,17 @@ void ResetLifecycle() {
 
 // v1.3.9: 落点离最近存活生还者的距离（含倒地，IsPlayerAlive 对倒地返回 true）。
 // 3D 距离——垂直贴脸（头顶实体/高台正上方）同样拦截。
+// v6.5.0: 候选点与本波已刷点位的最近间隔（分散刷/降级池共用）
+float SISpawn_MinSepToPlaced(const float pos[3]) {
+	float best = 999999.0;
+	for (int k = 0; k < g_iBatchSpawnPosCount; k++) {
+		float d = GetVectorDistance(pos, g_fBatchSpawnPos[k]);
+		if (d < best)
+			best = d;
+	}
+	return best;
+}
+
 float DistanceToNearestSurvivor(const float pos[3]) {
 	float best = 999999.0;
 	for (int s = 1; s <= MaxClients; s++) {
