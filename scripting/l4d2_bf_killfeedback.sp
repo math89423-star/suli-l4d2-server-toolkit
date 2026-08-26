@@ -163,7 +163,7 @@ public Plugin myinfo =
 {
     name        = "[L4D2] Battlefield Kill Feedback (sound only)",
     author      = "Claude (for suli's server)",
-    description = "BF kill sounds — HUD/chat handled by l4d2_si_hud",
+    description = "BF kill sounds — HUD/chat handled by l4d2_score_core",
     version     = PLUGIN_VERSION,
     url         = ""
 };

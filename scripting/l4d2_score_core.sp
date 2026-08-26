@@ -1,5 +1,13 @@
 /**
- * [L4D2] SI HUD — Unified Special Infected HP + Kill Display  v1.13.5
+ * [L4D2] Score Core — Scoring/Wallet/Revive Core + Kill Display  v1.13.6
+ *
+ * ⚠ 改名记录 (2026-08-26): l4d2_si_hud → l4d2_score_core。原"SI HP HUD"插件
+ *   实际早已是计分经济中枢（积分/钱包/复活/击杀显示/聊天排行榜），为给新的
+ *   UI 常驻排行榜插件让出命名空间而改名。运行时资产保持兼容：
+ *   - 存档文件 data/si_hud_scores.txt 不变（admin-panel 依赖）
+ *   - SH_* native 名不变（shop/rescue_heal/specialspawner 消费方零改动）
+ *   - !rank/!score/!top 命令不变
+ *   仅更名: smx 文件名 / RegPluginLibrary("score_core_api") / si_hud_*→score_core_* cvar。
  *
  * Replaces:
  *   - l4d2_bf_killfeedback    (was kill sounds + center text + chat; now bf does sound only)
@@ -37,8 +45,8 @@
  *   - 复活体系重构（user 拍板，规避"复活币被换图意外清空"的风险敞口）:
  *     移除复活币机制（变量/cvar/持久化 coins 字段/SH_ 币 natives/商店
  *     复活币商品全部废除）。免费复活每图 base 次（=2 条命，每图/团灭重开
- *     刷新，规则不变）；免费耗尽后，积分 >= si_hud_revive_cost（默认
- *     6000）→ si_hud_respawn_delay（20→30s）后自动复活，复活成功才扣
+ *     刷新，规则不变）；免费耗尽后，积分 >= score_core_revive_cost（默认
+ *     6000）→ score_core_respawn_delay（20→30s）后自动复活，复活成功才扣
  *     积分（30s 内队友电击/救起不扣）。配套 l4d2_shop 躺尸/倒地禁购 →
  *     死亡→复活窗口积分只增不减，复活瞬间必够 6000。积分不足 → 躺尸等
  *     电击器/过关。团灭回滚自然退回已扣积分（回滚到本图开局钱包）。
@@ -55,7 +63,7 @@
  * Changelog v1.11.0:
  *   - 三方图也分大图和小图（user 拍板）: 新增战役键 GetCampaignKey() 统一清零
  *     判定与存档校验——官图命名 → "c1" 前缀；三方图大地图（新配置
- *     configs/si_hud_big_maps.txt 清单，默认 dc2/dw/de/hls = 轮换链战役）→
+ *     configs/score_core_big_maps.txt 清单，默认 dc2/dw/de/hls = 轮换链战役）→
  *     清单键；三方图有地图号标记（m<数字>/尾 _<数字>）→ 前缀即战役键；
  *     三方图无标记（单图/小图）→ 整图名即战役键，换图必清。
  *     清零条件 = 战役键变化 或 图名含 m1（战役起点；同键循环重开
@@ -91,13 +99,13 @@
  * Changelog v1.9.6:
  *   - REMOVE Y 键聊天框特感击杀播报（user 实测多人信息极其混乱）: 删掉三处
  *     PrintToChatAll（SI 击杀 KILL/HEADSHOT、Witch 击杀、特感自杀/死于意外），
- *     中心击杀横幅/击杀卡/音效/计分全部保留；si_hud_chat_enable cvar 一并移除。
+ *     中心击杀横幅/击杀卡/音效/计分全部保留；score_core_chat_enable cvar 一并移除。
  *     过关奖励播报（[过关] 每人获得 N 积分）不受影响。
  *
  * Changelog v1.9.4:
- *   - 免费复活额度改为每图 1 次（user 拍板）: si_hud_respawn_base 默认 2→1
+ *   - 免费复活额度改为每图 1 次（user 拍板）: score_core_respawn_base 默认 2→1
  *     （每图 1 次免费复活 = 2 条命）；复活币跨图继承不变，次数用完才扣币。
- *   - 复活延迟 15s→20s（user 拍板）: si_hud_respawn_delay 默认 20.0，留电击器
+ *   - 复活延迟 15s→20s（user 拍板）: score_core_respawn_delay 默认 20.0，留电击器
  *     救援窗口（队友可先电击救起）。
  *   - 三处播报复活币 + 剩余免费复活次数（user）: 进服（OnClientPostAdminCheck）、
  *     每图开始（OnMapStart）、死亡复活时（ScheduleRespawn 统一文案，含消耗
@@ -105,16 +113,16 @@
  *
  * Changelog v1.9.0:
  *   - 商店解耦（user 拍板）: !shop/!buy 商店整体移出为独立插件 l4d2_shop.sp
- *     （商品表/菜单/购买/透视特感/火炮支援 I/II + si_hud_shop_enable/
- *     si_hud_art_* cvar）。本插件保留计分入账、钱包/复活币所有权与持久化、
+ *     （商品表/菜单/购买/透视特感/火炮支援 I/II + score_core_shop_enable/
+ *     score_core_art_* cvar）。本插件保留计分入账、钱包/复活币所有权与持久化、
  *     复活系统、排行榜、HUD。新增 SH_ 公共 API（RegPluginLibrary
- *     "l4d2_si_hud_api"：SH_GetWallet/SH_AddWallet/SH_GetReviveCoins/
+ *     "score_core_api"：SH_GetWallet/SH_AddWallet/SH_GetReviveCoins/
  *     SH_AddReviveCoins/SH_GetCoinMax/SH_ReviveClient；契约见
- *     include/l4d2_si_hud.inc；
+ *     include/l4d2_score_core.inc；
  *     SM 1.12 懒绑定：l4d2_shop 直接 native 声明 + FindPluginByFile 守卫）。
  *     respawn_coin_* 保留本插件。
  *   - 删除死代码: gamedata SetHasLaserSight SDKCall（L4D2 无此符号，从未调用）
- *     + sm_laser_test 调试命令 + gamedata/l4d2_si_hud.txt 文件。
+ *     + sm_laser_test 调试命令 + gamedata/l4d2_score_core.txt 文件。
  *
  * Changelog v1.8.2:
  *   - FIX 换图可用积分被清 0 (user 实测): GetMapPrefix 从第一个 '_' 截断 →
@@ -142,21 +150,21 @@
  *   - 奖励倍率改每档手配，加速曲线 (user 拍板): 旧 mult_step 每档 +1.5
  *     线性步进导致各段奖励增量近似持平（+299/+254/+283/+312/+341），
  *     杀 20 头和杀 100 头每档多拿的钱差不多，高段无激励。现在每档独立
- *     配置倍率 10/14/19/25/32/40（si_hud_streak_bonus_mult_l1..l6，
- *     删除 si_hud_streak_bonus_mult_step）：满档奖励 260/624/995/1483/
+ *     配置倍率 10/14/19/25/32/40（score_core_streak_bonus_mult_l1..l6，
+ *     删除 score_core_streak_bonus_mult_step）：满档奖励 260/624/995/1483/
  *     2107/2887，增量逐段放大 +260/+364/+371/+488/+624/+780。
  *     段边界与音效档位不变（hw 20/40/55/70/85/100，音效自动跟随）。
  *
  * Changelog v1.7.62:
  *   - 音效档位重构为 L1..L6，对齐人头阶梯 (user 拍板): 旧音效档
- *     si_hud_streak_score_l2..l15（200/400/700/1100/1500/2000 分）是
+ *     score_core_streak_score_l2..l15（200/400/700/1100/1500/2000 分）是
  *     历史遗留——编号源自更早的连杀数量档（2/4/6/9/12/15 杀），v1.7.4
  *     改成按分数判定时没改名，导致"26 小僵尸 hw=26 落 20-40 段却播 400
  *     档音效"的错位。现在音效档位与奖励共用同一把尺子（hw 段）：
  *     L1=20-39 spotting、L2=40-54 purchase、L3=55-69 war_bonds、
  *     L4=70-84 dogtag、L5=85-99 medal、L6=100+ rankup。删除全部
- *     si_hud_streak_score_l2..l15 cvar；旧 si_hud_streak_sound_l2/l4/l6/
- *     l9/l12/l15 更名 si_hud_streak_sound_l1..l6。v1.7.60 门控保证
+ *     score_core_streak_score_l2..l15 cvar；旧 score_core_streak_sound_l2/l4/l6/
+ *     l9/l12/l15 更名 score_core_streak_sound_l1..l6。v1.7.60 门控保证
  *     hw>=20，结算必有音效（最低 L1），无静默档。
  *
  * Changelog v1.7.61:
@@ -196,7 +204,7 @@
  *
  * Changelog v1.7.57:
  *   - 积分/连杀与 HUD 显示解耦 (user 拍板): StackStreakKill 原藏在
- *     BuildBFBanner 里，被 si_hud_kill_hint_enable 门控——关 HUD 时特感/
+ *     BuildBFBanner 里，被 score_core_kill_hint_enable 门控——关 HUD 时特感/
  *     Tank/Witch 击杀会连击杀分和连杀一起丢，而小僵尸入账在门控外，
  *     行为不对称。现在 SurvivorKilledSI / SurvivorKilledWitch 在 points
  *     计算后立即入账（同小僵尸路径），BuildBFBanner 退化为纯显示函数
@@ -228,7 +236,7 @@
  *     按实际值分段累计——无"差 1 人头跳档"悬崖。例: hw=30 → 410，
  *     hw=60 → 897，hw=100 → 1749。音效档位保持击杀分数制
  *     （200/400/700/1100/1500/2000）。救援不占人头。废弃
- *     si_hud_streak_bonus_l2/l4/l6。
+ *     score_core_streak_bonus_l2/l4/l6。
  *
  * Changelog v1.7.52:
  *   - 击杀分公式重做 (user 设计): 基础分 = 特感实际最大血量 × 25%（向上取整，
@@ -237,24 +245,24 @@
  *     统一 ceil——Witch 满血爆头 938 = 500×1.5×1.25）；近战加成取消。
  *     验证例: Tank 爆头 1500×1.5 = 2250。
  *   - 武器倍率 (user): 铁喷 (chrome) 并入木喷 1.5（原走 other 1.0）；
- *     普通手枪/双枪 1.75（新 cvar si_hud_bf_damage_mult_pistol）；马格南不变。
- *   - 废弃 cvar: si_hud_bf_points_smoker/boomer/hunter/jockey/spitter/charger、
- *     si_hud_bf_points_headshot/_melee/_fullhp（源码 + cfg 已清理）。
+ *     普通手枪/双枪 1.75（新 cvar score_core_bf_damage_mult_pistol）；马格南不变。
+ *   - 废弃 cvar: score_core_bf_points_smoker/boomer/hunter/jockey/spitter/charger、
+ *     score_core_bf_points_headshot/_melee/_fullhp（源码 + cfg 已清理）。
  *
  * Changelog v1.7.51:
  *   - 救援队友算分 (user 设计): revive_success 监听（拉人/电击统一走此事件），
- *     救援者 +si_hud_points_rescue（默认 75）入账钱包+总分，并计入连杀——
+ *     救援者 +score_core_points_rescue（默认 75）入账钱包+总分，并计入连杀——
  *     刷新 6 秒窗口 + 累计滚动分（推动音效档位）+ 结算卡显示 "+ 救援 ×N"。
  *   - 档位判定口径定论 (user): 纯击杀分混合总分（小僵尸+特感击杀分同池），
  *     伤害分（打血分）不参与连杀任何环节——已单独入账，连杀是连杀。
  *     打 Tank 血没杀死不推动 award（边界场景作废，用户最终拍板）。
  *
  * Changelog v1.7.50:
- *   - 连杀奖励实际入账 (user 确认): 结算卡 "+累计分+奖励" 的奖励（si_hud_streak_bonus_l2/4/6，
+ *   - 连杀奖励实际入账 (user 确认): 结算卡 "+累计分+奖励" 的奖励（score_core_streak_bonus_l2/4/6，
  *     +30/+50/+100）之前只显示不入账（击杀分本就是击杀时即时入账），玩家误以为
  *     有额外奖励 → 现在 streak>=2 结算时真实加进历史积分（排行榜）和钱包（商店），
  *     结算数字 = 本连杀总收益。
- *   - 音效与结算解耦: 低分连杀（score < si_hud_streak_score_l2）之前整个 return
+ *   - 音效与结算解耦: 低分连杀（score < score_core_streak_score_l2）之前整个 return
  *     （无音效无结算卡），现在只跳过音效，奖励照发 + 结算卡照显。
  *   - FIX L6 档音效从未播放 (nginx 404 实锤): 默认值/cfg 写成 bf_award_warbonds.mp3，
  *     实际文件名是 bf_award_war_bonds.mp3（带下划线）→ 客户端下载 404 静音，
@@ -269,7 +277,7 @@
  *   - 连杀结算音效调大 (user): 音量上限 1.0 → 2.0，默认 1.0 → 1.5。
  *     原代码把 EmitSoundToClient 音量钳制在 1.0（vol >= 1.0 ? 1.0 : vol），
  *     而 award mp3s 已 loudnorm 到 ~-15 dB —— 放开增益后 1.5x 无削波风险。
- *     改 cfg 中 si_hud_streak_sound_volume 为 1.5 后 reload 生效。
+ *     改 cfg 中 score_core_streak_sound_volume 为 1.5 后 reload 生效。
  *   - 残留 cvar 坑 (实测): 该 cvar 已被引擎自动创建（cfg exec），
  *     CreateConVar 拿到已有 cvar 不更新 def/max → 值被钳在 1.0。
  *     修复: SetBounds(ConVarBound_Upper, 2.0) + SetDefault("1.5") 强制重设。
@@ -278,7 +286,7 @@
  *   - 激光根本原因确认 (errors 日志实锤): L4D2 武器无 m_bHasLaserSight prop
  *     （CS 系列的）——SetEntProp 抛 "Invalid property" 运行时错误中断。
  *     改用 SDKCall CBaseCombatWeapon::SetHasLaserSight（Linux 符号，
- *     gamedata/l4d2_si_hud.txt）；初始化失败回退脚下 spawn 升级包。
+ *     gamedata/l4d2_score_core.txt）；初始化失败回退脚下 spawn 升级包。
  *   - 激光临时调价 1 分测试已完成，已恢复 3500。
  *
  * Changelog v1.7.45:
@@ -364,7 +372,7 @@
  *     （换图不再留下悬挂句柄/泄漏 dp）。
  *
  * Changelog v1.7.31:
- *   - 新加入玩家 = 全默认状态 (user)：0 可用积分 + si_hud_respawn_coin_start
+ *   - 新加入玩家 = 全默认状态 (user)：0 可用积分 + score_core_respawn_coin_start
  *     (2) 枚复活币 + base 复活次数；显式初始化全部槽位。
  *
  * Changelog v1.7.30:
@@ -374,12 +382,12 @@
  *     + 杀旧计时器。钱包/复活币为战役级资源不受影响。
  *
  * Changelog v1.7.29:
- *   - 复活币持有上限 5 枚 (user, si_hud_respawn_coin_max)：购买前检查
+ *   - 复活币持有上限 5 枚 (user, score_core_respawn_coin_max)：购买前检查
  *     （达上限拒绝购买），进入游戏/新图时 clamp；消耗复活币时播报剩余数量。
  *
  * Changelog v1.7.28:
- *   - RESPAWN LIMIT (user): 每图初始 si_hud_respawn_base (2) 次自动复活
- *     (=3 条命), 复活延迟 si_hud_respawn_delay 15s (was 35 via l4d2_auto_
+ *   - RESPAWN LIMIT (user): 每图初始 score_core_respawn_base (2) 次自动复活
+ *     (=3 条命), 复活延迟 score_core_respawn_delay 15s (was 35 via l4d2_auto_
  *     respawn — 该插件已卸载，功能并入本插件: 倒计时提示 + 复活传送队友)。
  *     次数用完 → 消耗复活币 (死亡时自动)；都没有 → 躺尸等电击器/过关，
  *     电击器回归价值。
@@ -473,12 +481,12 @@
  *     "[得分榜]" style — half-width brackets).
  *
  * Changelog v1.7.17:
- *   - Streak window si_hud_bf_window 10s → 6s (user: 10s too long).
+ *   - Streak window score_core_bf_window 10s → 6s (user: 10s too long).
  *
  * Changelog v1.7.16:
  *   - BF-style damage points (user): everyone who damages an SI (incl.
  *     Tank) earns score — tank/charger fights are fair, not just the final
- *     killer. points = dmg_health × weapon mult × si_hud_bf_damage_coeff
+ *     killer. points = dmg_health × weapon mult × score_core_bf_damage_coeff
  *     (default 1.0: 1 damage = 1 point, weapon mults deviate). Goes to
  *     the scoreboard total only — NOT the streak
  *     (award = kill streaks), NOT the chat (spam). Witch + commons excluded
@@ -490,7 +498,7 @@
  *     Chat lines persist, so the tally stays visible while the sound plays.
  *   - Common infected HP damage ALSO earns damage points (user) via the
  *     infected_hurt event (commons fire no player_hurt). Independent coeff
- *     cvar si_hud_bf_damage_coeff_common (default 1.0); watch the board —
+ *     cvar score_core_bf_damage_coeff_common (default 1.0); watch the board —
  *     at 1.0, horde-mowing out-scores SI kills.
  *   - Witch damage points via SDKHooks_OnTakeDamage (witch_spawn hook) —
  *     she is an NPC: no player_hurt, no infected_hurt.
@@ -551,9 +559,9 @@
  *
  * Changelog v1.7.6:
  *   - Chat scoreboard (user): type !rank / !score / !top in the Y-key chat —
- *     top si_hud_scoreboard_top (6) scorers, a divider line, then your own
+ *     top score_core_scoreboard_top (6) scorers, a divider line, then your own
  *     score + rank ("[得分榜] #1 粟藜 1234分 / ---- / 你的得分：456分（第 12 名）").
- *     ALSO auto-broadcast per-player every si_hud_scoreboard_interval (45s,
+ *     ALSO auto-broadcast per-player every score_core_scoreboard_interval (45s,
  *     0=off; interval change needs reload). Backed by session total
  *     g_iTotalScore (all kill points incl. commons), reset per round/map end/disconnect.
  *
@@ -564,26 +572,26 @@
  * Changelog v1.7.4:
  *   - Icon row rework (user): SI skulls (☠) and common daggers (†) counted
  *     SEPARATELY (3 commons + 1 SI → "☠ †††", not 4 skulls); one row of up
- *     to si_hud_icons_max (15) icons, over that shows "+N" (not "N+x").
+ *     to score_core_icons_max (15) icons, over that shows "+N" (not "N+x").
  *     Commons now also grow the icon row (two-line display like the SI card).
  *   - Award tiers now trigger on the SETTLED SCORE, not the kill count
- *     (si_hud_streak_score_l2..l15, defaults 200/400/700/1100/1500/2000):
+ *     (score_core_streak_score_l2..l15, defaults 200/400/700/1100/1500/2000):
  *     common spam (5-10 pts) cannot climb tiers; a single Tank/Witch kill
  *     (500+) lands in tier 4. Streak count is still shown on the settle
  *     card. Keep: common scoring 5/10, commons refresh the window (user).
  *
  * Changelog v1.7.3:
  *   - Common infected fully taken over: kills now score (5 base + 5 headshot,
- *     cvar si_hud_bf_points_common/_common_hs), stack the streak (→ the
+ *     cvar score_core_bf_points_common/_common_hs), stack the streak (→ the
  *     streak window and the award settle), and show a short center line
- *     (si_hud_common_time 1.0s): "† 小僵尸 +5" (U+2020 dagger marks commons;
+ *     (score_core_common_time 1.0s): "† 小僵尸 +5" (U+2020 dagger marks commons;
  *     headshot shows ★ U+2605 — same "gold" marker as the SI card, center
  *     text has no color codes). No chat feed (spam). Headshot kill sound
  *     unchanged. Streak stack logic extracted to StackStreakKill().
  *
  * Changelog v1.7.2:
- *   - User tuning: streak window si_hud_bf_window 4.0 → 10.0 (the streak-
- *     interrupt timeout); kill card stays at si_hud_killcard_time 2.0.
+ *   - User tuning: streak window score_core_bf_window 4.0 → 10.0 (the streak-
+ *     interrupt timeout); kill card stays at score_core_killcard_time 2.0.
  *   - Scoring overhaul (BF1/BF5 reference): per-class base points by
  *     difficulty + max HP (Boomer/Smoker 75, Hunter/Jockey 100, Spitter 125,
  *     Charger 150, Witch/Tank 500) + headshot +50 / melee +50 / full-HP +50
@@ -594,7 +602,7 @@
  *     with streak >= 2, alongside the award sound the killer sees
  *     "☠☠ 连杀结算 ×3 +430" (accumulated score + streak bonus
  *     +30/+50/+100 for 2-3/4-5/6+) for 2s on the center channel.
- *   - Volume: si_hud_streak_sound_volume 0.9 → 1.0; all six award mp3s
+ *   - Volume: score_core_streak_sound_volume 0.9 → 1.0; all six award mp3s
  *     re-mastered to uniform loudness (loudnorm mean ≈ -15 dB, previously
  *     -15 to -26 dB) and re-shipped as bf_award_*.mp3 (new names force
  *     clients to re-download; old bf_streak_* files deleted).
@@ -603,7 +611,7 @@
  *   - User decision: the kill card leaves PrintHintText for good. Banner +
  *     card merge into ONE two-line PrintCenterText message (BF5-style:
  *     "☠☠☠ 爆头击杀 +150" over "[M16] ☠ HUNTER 猎人"), shown for
- *     si_hud_killcard_time (2.0s) then cleared with " " — the center
+ *     score_core_killcard_time (2.0s) then cleared with " " — the center
  *     channel has no shadow box, no priming bug, and clears instantly.
  *     The hint channel is a dead end on L4D2: ~10s engine display (NOT the
  *     ~4s of CS:GO) that cannot be shortened without the "" purge that
@@ -612,9 +620,9 @@
  *     KeyHintText shows nothing on this build either.)
  *   - Dropped the "(head shot)" suffix: headshots now show a GOLD ☠
  *     (BF5-style; center text does parse \x07RRGGBB colors — mode 13).
- *     The headshot point bonus already existed (si_hud_bf_points_headshot).
- *   - si_hud_banner_time deprecated: banner + card now share one message
- *     timed by si_hud_killcard_time (default 2.0s).
+ *     The headshot point bonus already existed (score_core_bf_points_headshot).
+ *   - score_core_banner_time deprecated: banner + card now share one message
+ *     timed by score_core_killcard_time (default 2.0s).
  *   - SOUND FIX (streak award was silent): the play/precache path stripped
  *     the .mp3 extension — L4D2 resolves bare sound names to .wav only, so
  *     precache and playback both failed silently. Now keeps the full path
@@ -634,7 +642,7 @@
  *     never garbled before v1.6.6 introduced the purge (v1.6.4/1.6.5 used
  *     natural fade-out). Fix: REMOVE ALL ACTIVE CLEARING. The card now fades
  *     out with the engine's fixed ~4s hint timer — text and shadow box are
- *     one element and fade together, nothing lingers. si_hud_killcard_time
+ *     one element and fade together, nothing lingers. score_core_killcard_time
  *     is DEPRECATED (the engine hint duration is fixed at ~4s and cannot be
  *     shortened; the cvar is kept only so existing cfg files don't error).
  *
@@ -651,13 +659,13 @@
  *     records the frame it was displayed in, and Timer_HideKillCard skips the
  *     clear when it expires in that same frame (the newer card's own timer
  *     clears it). This is order-independent — no reliance on event-vs-timer
- *     sequencing inside a frame. Also fixed the si_hud_version ConVar never
+ *     sequencing inside a frame. Also fixed the score_core_version ConVar never
  *     updating (CreateConVar doesn't overwrite existing cvars — the runtime
  *     value still said 1.6.5; plugin Version field was already correct).
  *
  * Changelog v1.6.8:
  *   - FIX (user feedback): kill card text shows GARBLED (乱码) when
- *     si_hud_killcard_time is reduced. Root cause: a frame race between the
+ *     score_core_killcard_time is reduced. Root cause: a frame race between the
  *     hide timer and the card prime. Timer_HideKillCard fires at END of the
  *     frame its deadline falls in and sends PrintHintText("") which PURGES
  *     the client's whole hint list. If a kill lands in that same frame, the
@@ -684,9 +692,9 @@
  *     display list" (PurgeAndDeleteElements) — so ClearHintBox now sends
  *     PrintHintText(""). Note " " (space) does NOT work — a space is a
  *     non-empty hint that lingers 4s (v1.4.1 finding). Card now hides after
- *     si_hud_killcard_time (2.0s) for real.
+ *     score_core_killcard_time (2.0s) for real.
  *   - ADD: BF1 streak award sounds (Step 1 of the score system). When a kill
- *     streak settles (window si_hud_bf_window ends with streak >= 2), the
+ *     streak settles (window score_core_bf_window ends with streak >= 2), the
  *     killer hears the BF1 award sound for their streak tier:
  *       streak 2-3   → bf_streak_spotting.mp3   (UI_SpottingIcon_PickUp)
  *       streak 4-5   → bf_streak_purchase.mp3   (UI_PurchaseSuccess)
@@ -697,19 +705,19 @@
  *     Per-client one-shot settle timer; window-gap re-checks on fire. Streak
  *     resets on settle and on round_end. Sounds distributed via
  *     AddFileToDownloadsTable + PrecacheSound (same channel as v4.4.0 mode,
- *     no sound.cache needed). New cvars si_hud_streak_sound_enable/_volume/
+ *     no sound.cache needed). New cvars score_core_streak_sound_enable/_volume/
  *     _l2/_l4/_l6/_l9/_l12/_l15 (empty path = tier silent).
  *
  * Changelog v1.6.5:
- *   - TIMING (user feedback): kill card hides after si_hud_killcard_time
- *     (2.0s) and the center banner after si_hud_banner_time (1.0s).
+ *   - TIMING (user feedback): kill card hides after score_core_killcard_time
+ *     (2.0s) and the center banner after score_core_banner_time (1.0s).
  *   - Card clear via KeyHintText count=0 (protocol-level, EXPERIMENTAL):
  *     HintText and KeyHintText share the client's hint display list
  *     (CHudHintDisplay), so sending an empty KeyHintText removes the card
  *     AND its shadow box immediately — no 4s engine hint timer, no empty
  *     box. If this proves ineffective on this build, the card simply falls
  *     back to natural fade-out (harmless, just stays ~4s).
- *   - New cvar si_hud_banner_time (default 1.0) — center banner duration.
+ *   - New cvar score_core_banner_time (default 1.0) — center banner duration.
  *
  * Changelog v1.6.4:
  *   - REWORK (user feedback): kill card back on PrintHintText — the hint's
@@ -740,7 +748,7 @@
  *   - REWORK kill card format (user feedback): single line
  *     "[weapon] ☠ SI name" (headshot: "[weapon] ☠ SI name(head shot)")
  *     — dropped the big type word + points line.
- *   - ADD auto-clear: card hides after si_hud_killcard_time (default 2.5s)
+ *   - ADD auto-clear: card hides after score_core_killcard_time (default 2.5s)
  *     via PrintHintText(" ") — text vanishes immediately; the shadow box
  *     lingers until its natural fade (engine limitation, v1.4.1).
  *
@@ -766,7 +774,7 @@
  *     line 1 = ☠ skull row, one skull per kill inside the streak window
  *     (BF5-style side-by-side, capped at 6); line 2 = kill type · SI name
  *     + points. Points: SI 100 / headshot +50 / melee +50 / Tank 500 /
- *     Witch 500, all cvar-tunable. Same gate: si_hud_kill_hint_enable.
+ *     Witch 500, all cvar-tunable. Same gate: score_core_kill_hint_enable.
  *
  * Changelog v1.3.2:
  *   - FIX: Frame_ShowHurtVictims no longer clears PrintCenterText when all victims
@@ -781,7 +789,7 @@
  *
  * Changelog v1.3.0:
  *   - SI HP now shows ONLY when you damage the SI (on-hit), not persistent
- *   - HP auto-hides after si_hud_hp_interval seconds (default 0.5 s)
+ *   - HP auto-hides after score_core_hp_interval seconds (default 0.5 s)
  *   - Kill confirm moved from PrintHintText to PrintCenterText — eliminates
  *     the hint-box shadow artifact that PrintHintText leaves on clear
  *
@@ -798,7 +806,7 @@
  *    Rochelle [M16] HEADSHOT BOOMER），去掉中文"爆头"后缀（近战/坦克
  *    ★ 保留）；GetSIName 全插件去中文昵称（只留 SMOKER/BOOMER/…），
  *    Witch 的"女巫"昵称同去。
- * ② 过关奖励——map_transition 每人 +si_hud_mapend_reward（2000）积分,
+ * ② 过关奖励——map_transition 每人 +score_core_mapend_reward（2000）积分,
  *    PrintToChatAll 聊天播报；替代 l4d2_survivor_transition 的过关回满血
  *    （该插件已禁用,2026-08-03）。
  */
@@ -915,7 +923,7 @@ int       g_iRescueStreak[MAXPLAYERS + 1];            // v1.7.51: 连杀窗口�
 float     g_fLastStreakKillTime[MAXPLAYERS + 1];      // BF banner: last streak-kill time
 int       g_iCommonStreak[MAXPLAYERS + 1];            // v1.7.4: common streak count (separate icons from SI skulls, shared window)
 int       g_iTotalScore[MAXPLAYERS + 1];              // v1.7.6: 本关积分 (scoreboard; 每关从 0 算, OnMapEnd 清零)
-int       g_iWallet[MAXPLAYERS + 1];                  // v1.7.27: 可用积分 (商店钱包; v1.13.0 起跨图永久保留, 上限 si_hud_wallet_max)
+int       g_iWallet[MAXPLAYERS + 1];                  // v1.7.27: 可用积分 (商店钱包; v1.13.0 起跨图永久保留, 上限 score_core_wallet_max)
 // v1.7.28: 复活次数系统（用户：每图初始 1 次=2 条命，复活 20s；复活币 12000 无限购；
 // 次数用完不自动复活 → 电击器回归价值）
 int       g_iRevivesLeft[MAXPLAYERS + 1];             // 本图剩余自动复活次数（OnMapStart 重置 base）
@@ -981,9 +989,9 @@ void GetCampaignKey(const char[] map, char[] out, int maxlen);
 
 public Plugin myinfo =
 {
-    name        = "[L4D2] SI HUD",
+    name        = "[L4D2] Score Core",
     author      = "suli",
-    description = "SI HP + kill confirm (PrintCenterText) + chat feed + sounds",
+    description = "Scoring/wallet/revive core + kill banner + chat scoreboard (renamed from l4d2_si_hud v1.13.6, 2026-08-26; data file & SH_ API unchanged)",
     version     = PLUGIN_VERSION,
     url         = ""
 };
@@ -1003,7 +1011,7 @@ public int Native_SH_GetWallet(Handle plugin, int numParams)
 }
 
 // v1.13.0 (user): 可用积分统一入账入口——所有加分点 + SH_ 外部消费都走这里，
-// 钳制 [0, si_hud_wallet_max]（默认 30000）。排行榜历史积分 g_iTotalScore
+// 钳制 [0, score_core_wallet_max]（默认 30000）。排行榜历史积分 g_iTotalScore
 // 不走这里（无限增长，不受上限影响）。
 int AddWallet(int client, int amount)
 {
@@ -1073,7 +1081,7 @@ public int Native_SH_ShowMissileBanner(Handle plugin, int numParams)
 
     // v1.13.4: 图标按类别（用户定稿：小僵尸 † / 特感 ☠，与单体击杀横幅/结算卡
     // 同规范——全骷髅不可读且误导）；Witch/Tank 归特感类 ☠，共用
-    // si_hud_icons_max 封顶，超出显示 +N
+    // score_core_icons_max 封顶，超出显示 +N
     int si = siKills + witchKills + tankKills;
     int cm = commonKills;
     int total = si + cm;
@@ -1128,119 +1136,119 @@ public int Native_SH_ShowMissileBanner(Handle plugin, int numParams)
 
 public void OnPluginStart()
 {
-    CreateConVar("si_hud_version", PLUGIN_VERSION,
+    CreateConVar("score_core_version", PLUGIN_VERSION,
         "SI HUD version", FCVAR_NOTIFY | FCVAR_DONTRECORD);
 
-    g_cvEnable = CreateConVar("si_hud_enable", "1",
+    g_cvEnable = CreateConVar("score_core_enable", "1",
         "Master switch (0=off, 1=on).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     // ── Persistent HP display (PrintCenterText) ─────────
 
-    g_cvHPEnable = CreateConVar("si_hud_hp_enable", "1",
+    g_cvHPEnable = CreateConVar("score_core_hp_enable", "1",
         "Show persistent SI HP via PrintCenterText.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvHPInterval = CreateConVar("si_hud_hp_interval", "0.5",
+    g_cvHPInterval = CreateConVar("score_core_hp_interval", "0.5",
         "HP display duration in seconds (on-hit mode: auto-hides after this long).",
         FCVAR_NOTIFY, true, 0.2, true, 5.0);
 
-    g_cvHPShowWitch = CreateConVar("si_hud_hp_show_witch", "0",
+    g_cvHPShowWitch = CreateConVar("score_core_hp_show_witch", "0",
         "Include Witch in HP display (0=off, 1=on).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     // ── Kill feedback ───────────────────────────────────
 
-    g_cvKillHintEnable = CreateConVar("si_hud_kill_hint_enable", "1",
+    g_cvKillHintEnable = CreateConVar("score_core_kill_hint_enable", "1",
         "PrintCenterText kill banner for attacker (☠ skulls + type + points).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvKillCardEnable = CreateConVar("si_hud_killcard_enable", "1",
+    g_cvKillCardEnable = CreateConVar("score_core_killcard_enable", "1",
         "Kill card line (second line of the center kill feedback, v1.7.1): [weapon] ☠ SI name (gold ☠ on headshot).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvKillCardTime = CreateConVar("si_hud_killcard_time", "2.0",
+    g_cvKillCardTime = CreateConVar("score_core_killcard_time", "2.0",
         "Kill feedback (banner + kill card, one center message) display duration in seconds before the center clear.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
     // v1.9.3 (user): 过关奖励 — 每小关进安全门结束每人 +N 积分
     //（替代 l4d2_survivor_transition 的过关回满血，该插件已禁用；0=关闭）
     // v1.13.2: 默认 2000 → 1500
-    g_cvMapEndReward = CreateConVar("si_hud_mapend_reward", "1500",
+    g_cvMapEndReward = CreateConVar("score_core_mapend_reward", "1500",
         "Map-end reward: score granted to every survivor on map_transition (0 = off).", FCVAR_NOTIFY, true, 0.0, true, 99999.0);
 
     // v1.13.0 (user): 可用积分上限 — 跨图永久保留不再清零，仅钳制到该值（0=无上限）
-    g_cvWalletMax = CreateConVar("si_hud_wallet_max", "30000",
+    g_cvWalletMax = CreateConVar("score_core_wallet_max", "30000",
         "Spendable-score cap. Wallet is NEVER cleared on map change (v1.13.0); only clamped to this max (0 = no cap).",
         FCVAR_NOTIFY, true, 0.0, true, 999999.0);
 
-    CreateConVar("si_hud_banner_time", "1.0",
-        "DEPRECATED (v1.7.1): banner and kill card share one message timed by si_hud_killcard_time. Kept so cfg files don't error.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+    CreateConVar("score_core_banner_time", "1.0",
+        "DEPRECATED (v1.7.1): banner and kill card share one message timed by score_core_killcard_time. Kept so cfg files don't error.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
     // ── BF-style kill banner (skulls + points) ─────────
 
-    g_cvBFWindow = CreateConVar("si_hud_bf_window", "6.0",
+    g_cvBFWindow = CreateConVar("score_core_bf_window", "6.0",
         "Kill streak window (s) — the streak-interrupt timeout: kills within this time stack skulls; when it closes the streak settles (award sound + settle score).", FCVAR_NOTIFY, true, 1.0, true, 30.0);
 
     // v1.7.52 (user): 击杀分重做——基础分 = 特感实际最大血量 ×
-    // si_hud_bf_points_base_pct (25%)，向上取整；Tank 固定 1500 / Witch 固定
+    // score_core_bf_points_base_pct (25%)，向上取整；Tank 固定 1500 / Witch 固定
     // 500（大头在伤害分）；爆头 ×1.5、满血 ×1.25 倍率制（取代固定 +50），
     // 近战加成取消（近战优势已有伤害分倍率 1.75）。
-    g_cvBFPointsBasePct = CreateConVar("si_hud_bf_points_base_pct", "25",
+    g_cvBFPointsBasePct = CreateConVar("score_core_bf_points_base_pct", "25",
         "Kill base points = SI actual max HP × this %% (ceiled). Tank/Witch fixed below.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
-    g_cvBFPointsTank = CreateConVar("si_hud_bf_points_tank", "1500",
+    g_cvBFPointsTank = CreateConVar("score_core_bf_points_tank", "1500",
         "Kill points: Tank fixed (damage points are the main share).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
-    g_cvBFPointsWitch = CreateConVar("si_hud_bf_points_witch", "500",
+    g_cvBFPointsWitch = CreateConVar("score_core_bf_points_witch", "500",
         "Kill points: Witch fixed.", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
-    g_cvBFHeadshotMult = CreateConVar("si_hud_bf_headshot_mult", "1.5",
+    g_cvBFHeadshotMult = CreateConVar("score_core_bf_headshot_mult", "1.5",
         "Kill points multiplier: headshot kill (was fixed +50).", FCVAR_NOTIFY, true, 1.0, true, 10.0);
-    g_cvBFFullHPMult = CreateConVar("si_hud_bf_fullhp_mult", "1.25",
+    g_cvBFFullHPMult = CreateConVar("score_core_bf_fullhp_mult", "1.25",
         "Kill points multiplier: full-HP kill — SI never hurt before dying (stacks with headshot).", FCVAR_NOTIFY, true, 1.0, true, 10.0);
 
     // v1.7.53 (user): 连杀奖励 = 加权人头档位制。小僵尸 1 人头 / 特感 6 人头，
-    // 档位 20/40/55/70/85/100；奖励 = 该档阈值 × si_hud_streak_bonus_coeff (1.3)
-    // × 档位倍率（一级 si_hud_streak_bonus_mult_l1 = 10，每档 +1.5，鼓励多杀）。
-    g_cvStreakHwL1 = CreateConVar("si_hud_streak_hw_l1", "20",
+    // 档位 20/40/55/70/85/100；奖励 = 该档阈值 × score_core_streak_bonus_coeff (1.3)
+    // × 档位倍率（一级 score_core_streak_bonus_mult_l1 = 10，每档 +1.5，鼓励多杀）。
+    g_cvStreakHwL1 = CreateConVar("score_core_streak_hw_l1", "20",
         "Weighted-head bonus tier 1 threshold (SI×6 + common×1).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvStreakHwL2 = CreateConVar("si_hud_streak_hw_l2", "40",
+    g_cvStreakHwL2 = CreateConVar("score_core_streak_hw_l2", "40",
         "Weighted-head bonus tier 2 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvStreakHwL3 = CreateConVar("si_hud_streak_hw_l3", "55",
+    g_cvStreakHwL3 = CreateConVar("score_core_streak_hw_l3", "55",
         "Weighted-head bonus tier 3 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvStreakHwL4 = CreateConVar("si_hud_streak_hw_l4", "70",
+    g_cvStreakHwL4 = CreateConVar("score_core_streak_hw_l4", "70",
         "Weighted-head bonus tier 4 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvStreakHwL5 = CreateConVar("si_hud_streak_hw_l5", "85",
+    g_cvStreakHwL5 = CreateConVar("score_core_streak_hw_l5", "85",
         "Weighted-head bonus tier 5 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvStreakHwL6 = CreateConVar("si_hud_streak_hw_l6", "100",
+    g_cvStreakHwL6 = CreateConVar("score_core_streak_hw_l6", "100",
         "Weighted-head bonus tier 6 threshold.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvStreakBonusMultL1 = CreateConVar("si_hud_streak_bonus_mult_l1", "10",
+    g_cvStreakBonusMultL1 = CreateConVar("score_core_streak_bonus_mult_l1", "10",
         "Bonus formula: tier-1 multiplier (reward = heads × coeff × mult).", FCVAR_NOTIFY, true, 1.0, true, 100.0);
     // v1.7.63 (user 拍板): 每档手配倍率，加速曲线——10/14/19/25/32/40，
     // 满档奖励 260/624/995/1483/2107/2887，高段增量逐段放大（+260/+364/
     // +371/+488/+624/+780），替代旧 mult_step 线性步进。
-    g_cvStreakBonusMultL2 = CreateConVar("si_hud_streak_bonus_mult_l2", "14",
+    g_cvStreakBonusMultL2 = CreateConVar("score_core_streak_bonus_mult_l2", "14",
         "Bonus formula: tier-2 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
-    g_cvStreakBonusMultL3 = CreateConVar("si_hud_streak_bonus_mult_l3", "19",
+    g_cvStreakBonusMultL3 = CreateConVar("score_core_streak_bonus_mult_l3", "19",
         "Bonus formula: tier-3 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
-    g_cvStreakBonusMultL4 = CreateConVar("si_hud_streak_bonus_mult_l4", "25",
+    g_cvStreakBonusMultL4 = CreateConVar("score_core_streak_bonus_mult_l4", "25",
         "Bonus formula: tier-4 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
-    g_cvStreakBonusMultL5 = CreateConVar("si_hud_streak_bonus_mult_l5", "32",
+    g_cvStreakBonusMultL5 = CreateConVar("score_core_streak_bonus_mult_l5", "32",
         "Bonus formula: tier-5 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
-    g_cvStreakBonusMultL6 = CreateConVar("si_hud_streak_bonus_mult_l6", "40",
+    g_cvStreakBonusMultL6 = CreateConVar("score_core_streak_bonus_mult_l6", "40",
         "Bonus formula: tier-6 multiplier.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
-    g_cvStreakBonusCoeff = CreateConVar("si_hud_streak_bonus_coeff", "1.3",
+    g_cvStreakBonusCoeff = CreateConVar("score_core_streak_bonus_coeff", "1.3",
         "Bonus formula coefficient.", FCVAR_NOTIFY, true, 0.0, true, 100.0);
     // v1.7.51: 救援奖励分 (user)——救援队友计入连杀（刷新窗口+滚动分+结算卡）
-    g_cvPointsRescue = CreateConVar("si_hud_points_rescue", "75",
+    g_cvPointsRescue = CreateConVar("score_core_points_rescue", "75",
         "Rescue score: reviving a teammate (revive_success) awards this, stacking the streak window.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
 
     // v1.7.3: common infected fully taken over — they score, stack the
     // streak (and the award settle), and show a center kill line (†).
-    g_cvCommonEnable = CreateConVar("si_hud_common_enable", "1",
+    g_cvCommonEnable = CreateConVar("score_core_common_enable", "1",
         "Common infected kill line on the center channel (†).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvCommonTime = CreateConVar("si_hud_common_time", "1.0",
+    g_cvCommonTime = CreateConVar("score_core_common_time", "1.0",
         "Common infected kill line display duration in seconds (shorter than the SI card — no spam).", FCVAR_NOTIFY, true, 0.2, true, 5.0);
-    g_cvBFPointsCommon = CreateConVar("si_hud_bf_points_common", "5",
+    g_cvBFPointsCommon = CreateConVar("score_core_bf_points_common", "5",
         "BF banner points: common infected kill.", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
-    g_cvBFPointsCommonHS = CreateConVar("si_hud_bf_points_common_hs", "5",
+    g_cvBFPointsCommonHS = CreateConVar("score_core_bf_points_common_hs", "5",
         "BF banner points: common infected headshot bonus (total = base + this).", FCVAR_NOTIFY, true, 0.0, true, 10000.0);
 
     // v1.7.4: icon row cap — SI skulls (☠) and common daggers (†) counted
     // separately, one row of up to this many icons; over it shows "+N".
-    g_cvIconsMax = CreateConVar("si_hud_icons_max", "15",
+    g_cvIconsMax = CreateConVar("score_core_icons_max", "15",
         "Max kill icons on one line (☠ skulls + † daggers, separate segments); over this shows +N.", FCVAR_NOTIFY, true, 1.0, true, 30.0);
 
     // v1.7.16: BF-style damage points — hurting an SI (incl. Tank) earns
@@ -1248,95 +1256,95 @@ public void OnPluginStart()
     // Damage points go to the scoreboard total only — NOT the streak
     // (award = kill streaks), NOT the chat (spam). Witch excluded (NPC
     // Witch fires no player_hurt); commons excluded (no player_hurt).
-    g_cvDamageEnable = CreateConVar("si_hud_bf_damage_enable", "1",
+    g_cvDamageEnable = CreateConVar("score_core_bf_damage_enable", "1",
         "Damage points: earn score for damaging SI (incl. Tank).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvDamageCoeff = CreateConVar("si_hud_bf_damage_coeff", "0.1",
+    g_cvDamageCoeff = CreateConVar("score_core_bf_damage_coeff", "0.1",
         "Damage points coefficient: points = dmg_health × weapon mult × this (0.1 = 10 damage = 1 point — user: 血量分全部/10, a 50hp common scores 5, not 50).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDamageCoeffCommon = CreateConVar("si_hud_bf_damage_coeff_common", "0.1",
+    g_cvDamageCoeffCommon = CreateConVar("score_core_bf_damage_coeff_common", "0.1",
         "Common infected damage points coefficient (infected_hurt): amount × weapon mult × this (0.1, same as SI — a 50hp common = 5 dmg pts; kill pts 5/10 stay unchanged).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDmgMultAR = CreateConVar("si_hud_bf_damage_mult_ar", "1.0",
+    g_cvDmgMultAR = CreateConVar("score_core_bf_damage_mult_ar", "1.0",
         "Damage mult: assault rifles (rifle/ak47/desert/sg552).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDmgMultSMG = CreateConVar("si_hud_bf_damage_mult_smg", "1.5",
+    g_cvDmgMultSMG = CreateConVar("score_core_bf_damage_mult_smg", "1.5",
         "Damage mult: SMGs (smg/silenced/mp5).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDmgMultMagnum = CreateConVar("si_hud_bf_damage_mult_magnum", "1.75",
+    g_cvDmgMultMagnum = CreateConVar("score_core_bf_damage_mult_magnum", "1.75",
         "Damage mult: magnum pistol.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDmgMultPistol = CreateConVar("si_hud_bf_damage_mult_pistol", "1.75",
+    g_cvDmgMultPistol = CreateConVar("score_core_bf_damage_mult_pistol", "1.75",
         "Damage mult: pistols (pistol/dual_pistols) — user: 手枪 1.75.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDmgMultMelee = CreateConVar("si_hud_bf_damage_mult_melee", "1.75",
+    g_cvDmgMultMelee = CreateConVar("score_core_bf_damage_mult_melee", "1.75",
         "Damage mult: melee weapons.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDmgMultPump = CreateConVar("si_hud_bf_damage_mult_pump", "1.5",
+    g_cvDmgMultPump = CreateConVar("score_core_bf_damage_mult_pump", "1.5",
         "Damage mult: pump shotgun.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDmgMultAuto = CreateConVar("si_hud_bf_damage_mult_auto", "0.75",
+    g_cvDmgMultAuto = CreateConVar("score_core_bf_damage_mult_auto", "0.75",
         "Damage mult: auto shotguns (autoshotgun/spas).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDmgMultSniper = CreateConVar("si_hud_bf_damage_mult_sniper", "0.75",
+    g_cvDmgMultSniper = CreateConVar("score_core_bf_damage_mult_sniper", "0.75",
         "Damage mult: snipers (hunting/military/awp/scout).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
-    g_cvDmgMultOther = CreateConVar("si_hud_bf_damage_mult_other", "1.0",
+    g_cvDmgMultOther = CreateConVar("score_core_bf_damage_mult_other", "1.0",
         "Damage mult: everything else (pistol etc.).", FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
-    // v1.7.62: score-based award tiers (si_hud_streak_score_l2..l15) REMOVED —
+    // v1.7.62: score-based award tiers (score_core_streak_score_l2..l15) REMOVED —
     // sound tiers now follow the hw segments (L1..L6) directly, one ladder
     // for both bonus amount and sound (user 拍板, 2026-08-02).
 
     // v1.7.6: Y-key chat scoreboard — !rank / !score / !top
-    g_cvScoreboardEnable = CreateConVar("si_hud_scoreboard_enable", "1",
+    g_cvScoreboardEnable = CreateConVar("score_core_scoreboard_enable", "1",
         "Enable the chat scoreboard (!rank / !score / !top).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvScoreboardTop = CreateConVar("si_hud_scoreboard_top", "6",
+    g_cvScoreboardTop = CreateConVar("score_core_scoreboard_top", "6",
         "Scoreboard shows this many top entries, then a divider and your own score.", FCVAR_NOTIFY, true, 1.0, true, 24.0);
-    g_cvScoreboardInterval = CreateConVar("si_hud_scoreboard_interval", "45.0",
+    g_cvScoreboardInterval = CreateConVar("score_core_scoreboard_interval", "45.0",
         "Auto-broadcast the scoreboard to every survivor every N seconds (0=off).", FCVAR_NOTIFY, true, 0.0, true, 600.0);
     // v1.13.6: 常驻左上 EMS 得分榜（替代聊天刷屏，上游已验证 bf_killfeed EMS 链路）
-    g_cvScoreHudEnable = CreateConVar("si_hud_score_hud_enable", "1",
-        "Enable persistent top-left EMS scoreboard HUD (updates every si_hud_score_hud_interval).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvScoreHudInterval = CreateConVar("si_hud_score_hud_interval", "1.0",
+    g_cvScoreHudEnable = CreateConVar("score_core_score_hud_enable", "1",
+        "Enable persistent top-left EMS scoreboard HUD (updates every score_core_score_hud_interval).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvScoreHudInterval = CreateConVar("score_core_score_hud_interval", "1.0",
         "Interval (sec) to refresh the EMS scoreboard HUD.", FCVAR_NOTIFY, true, 0.2, true, 10.0);
-    g_cvScoreHudTop = CreateConVar("si_hud_score_hud_top", "4",
+    g_cvScoreHudTop = CreateConVar("score_core_score_hud_top", "4",
         "How many top entries to show in the EMS scoreboard HUD (excluding title/footer).", FCVAR_NOTIFY, true, 1.0, true, 5.0);
 
 
     // v1.7.28: respawn limit — 每图初始复活次数 + 复活秒数 + 总开关
     //（替代 l4d2_auto_respawn；复活币商店 12000 无限购）
-    g_cvRespawnEnable = CreateConVar("si_hud_respawn_enable", "1",
+    g_cvRespawnEnable = CreateConVar("score_core_respawn_enable", "1",
         "Enable the limited auto-respawn system (replaces l4d2_auto_respawn).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvRespawnBase = CreateConVar("si_hud_respawn_base", "1",
+    g_cvRespawnBase = CreateConVar("score_core_respawn_base", "1",
         "Auto-respawn count per player per map (2 lives total with the initial one).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
-    g_cvRespawnDelay = CreateConVar("si_hud_respawn_delay", "30.0",
+    g_cvRespawnDelay = CreateConVar("score_core_respawn_delay", "30.0",
         "Seconds before auto respawn (v1.12.0 user: 30s revive window for defib/teammates, free and paid alike).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
-    g_cvReviveCost = CreateConVar("si_hud_revive_cost", "6000",
+    g_cvReviveCost = CreateConVar("score_core_revive_cost", "6000",
         "Points deducted when auto-respawning after free revives are exhausted (v1.12.0; only charged on successful revive).", FCVAR_NOTIFY, true, 0.0, true, 100000.0);
 
     // ── Kill sounds (all empty = off by default) ────────
 
-    g_cvSoundSI = CreateConVar("si_hud_sound_si", "",
+    g_cvSoundSI = CreateConVar("score_core_sound_si", "",
         "Default SI kill sound (empty=off).", FCVAR_NOTIFY);
 
-    g_cvSoundHeadshot = CreateConVar("si_hud_sound_headshot", "",
+    g_cvSoundHeadshot = CreateConVar("score_core_sound_headshot", "",
         "SI headshot kill sound (empty=off).", FCVAR_NOTIFY);
 
-    g_cvSoundTank = CreateConVar("si_hud_sound_tank", "",
+    g_cvSoundTank = CreateConVar("score_core_sound_tank", "",
         "Tank kill sound (empty=off).", FCVAR_NOTIFY);
 
-    g_cvSoundWitch = CreateConVar("si_hud_sound_witch", "",
+    g_cvSoundWitch = CreateConVar("score_core_sound_witch", "",
         "Witch kill sound (empty=off).", FCVAR_NOTIFY);
 
-    g_cvSoundMelee = CreateConVar("si_hud_sound_melee", "",
+    g_cvSoundMelee = CreateConVar("score_core_sound_melee", "",
         "Melee SI kill sound (empty=off).", FCVAR_NOTIFY);
 
-    g_cvSoundCommonHS = CreateConVar("si_hud_sound_common_hs", "",
+    g_cvSoundCommonHS = CreateConVar("score_core_sound_common_hs", "",
         "Common infected headshot kill sound (empty=off).", FCVAR_NOTIFY);
 
-    g_cvSoundVolume = CreateConVar("si_hud_sound_volume", "0.8",
+    g_cvSoundVolume = CreateConVar("score_core_sound_volume", "0.8",
         "Sound volume (0.0 – 1.0).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvSoundCooldown = CreateConVar("si_hud_sound_cooldown", "0.1",
+    g_cvSoundCooldown = CreateConVar("score_core_sound_cooldown", "0.1",
         "Min seconds between kill sounds per client.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
     // ── BF1 streak award sounds (v1.6.6) ────────────────
 
-    g_cvStreakEnable = CreateConVar("si_hud_streak_sound_enable", "1",
+    g_cvStreakEnable = CreateConVar("score_core_streak_sound_enable", "1",
         "Play the BF1 award sound when a kill streak settles (streak >= 2).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-    g_cvStreakVol = CreateConVar("si_hud_streak_sound_volume", "1.0",
-        "Streak award sound volume, independent of si_hud_sound_volume. Keep ≤ 1.0 — engine handles >1.0 unpredictably.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvStreakVol = CreateConVar("score_core_streak_sound_volume", "1.0",
+        "Streak award sound volume, independent of score_core_sound_volume. Keep ≤ 1.0 — engine handles >1.0 unpredictably.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     // v1.7.47 FIX (engine-residue cvar): a cfg exec once auto-created this cvar
     // in the engine before the plugin loaded; CreateConVar returns the existing
     // cvar WITHOUT updating bounds — force them (no server restart).
@@ -1348,23 +1356,23 @@ public void OnPluginStart()
     // v1.7.62 (user): 音效档位 = 人头阶梯段位 L1..L6（与奖励同一把尺子）。
     // 段位编号直接对应 hw 段：L1=20-39、L2=40-54、L3=55-69、L4=70-84、
     // L5=85-99、L6=100+。
-    g_cvStreakSnd1 = CreateConVar("si_hud_streak_sound_l1", "battlefield/bf_award_spotting.mp3",
+    g_cvStreakSnd1 = CreateConVar("score_core_streak_sound_l1", "battlefield/bf_award_spotting.mp3",
         "Award sound tier L1 (hw 20-39, smallest bonus) — file relative to sound/, empty=off.", FCVAR_NOTIFY);
-    g_cvStreakSnd2 = CreateConVar("si_hud_streak_sound_l2", "battlefield/bf_award_purchase.mp3",
+    g_cvStreakSnd2 = CreateConVar("score_core_streak_sound_l2", "battlefield/bf_award_purchase.mp3",
         "Award sound tier L2 (hw 40-54).", FCVAR_NOTIFY);
-    g_cvStreakSnd3 = CreateConVar("si_hud_streak_sound_l3", "battlefield/bf_award_war_bonds.mp3",
+    g_cvStreakSnd3 = CreateConVar("score_core_streak_sound_l3", "battlefield/bf_award_war_bonds.mp3",
         "Award sound tier L3 (hw 55-69).", FCVAR_NOTIFY);
-    g_cvStreakSnd4 = CreateConVar("si_hud_streak_sound_l4", "battlefield/bf_award_dogtag.mp3",
+    g_cvStreakSnd4 = CreateConVar("score_core_streak_sound_l4", "battlefield/bf_award_dogtag.mp3",
         "Award sound tier L4 (hw 70-84).", FCVAR_NOTIFY);
-    g_cvStreakSnd5 = CreateConVar("si_hud_streak_sound_l5", "battlefield/bf_award_medal.mp3",
+    g_cvStreakSnd5 = CreateConVar("score_core_streak_sound_l5", "battlefield/bf_award_medal.mp3",
         "Award sound tier L5 (hw 85-99).", FCVAR_NOTIFY);
-    g_cvStreakSnd6 = CreateConVar("si_hud_streak_sound_l6", "battlefield/bf_award_rankup.mp3",
+    g_cvStreakSnd6 = CreateConVar("score_core_streak_sound_l6", "battlefield/bf_award_rankup.mp3",
         "Award sound tier L6 (hw 100+, biggest bonus).", FCVAR_NOTIFY);
 
-    AutoExecConfig(true, "l4d2_si_hud");
+    AutoExecConfig(true, "l4d2_score_core");
 
     // v1.9.0: SH_ public API（l4d2_shop.sp 消费）——商店解耦
-    RegPluginLibrary("l4d2_si_hud_api");
+    RegPluginLibrary("score_core_api");
     CreateNative("SH_GetWallet",      Native_SH_GetWallet);
     CreateNative("SH_AddWallet",      Native_SH_AddWallet);
     CreateNative("SH_ShowMissileBanner", Native_SH_ShowMissileBanner);  // v1.13.3: 导弹聚合击杀横幅(纯显示)
@@ -1464,7 +1472,7 @@ void ScoreSave_Player(int client)
     if (!GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth), false))
         return;
 
-    KeyValues kv = new KeyValues("si_hud_scores");
+    KeyValues kv = new KeyValues("score_core_scores");
     if (FileExists(g_sSavePath))
         kv.ImportFromFile(g_sSavePath);
 
@@ -1498,7 +1506,7 @@ void ScoreLoad_Player(int client)
     if (!GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth), false))
         return;
 
-    KeyValues kv = new KeyValues("si_hud_scores");
+    KeyValues kv = new KeyValues("score_core_scores");
     if (!kv.ImportFromFile(g_sSavePath))
     {
         delete kv;
@@ -1565,7 +1573,7 @@ void BroadcastScoreboard()
 }
 
 // v1.7.6: periodic broadcast — every player gets the scoreboard to their
-// own chat every si_hud_scoreboard_interval seconds (no cross-player spam).
+// own chat every score_core_scoreboard_interval seconds (no cross-player spam).
 public Action Timer_ScoreboardBroadcast(Handle timer)
 {
     if (!g_cvEnable.BoolValue || !g_cvScoreboardEnable.BoolValue)
@@ -1809,7 +1817,7 @@ public void OnMapStart()
     // Persistent timer is no longer started — SI HP only shows when you damage them.
 
     // v1.13.0 (user 拍板): 可用积分跨图永久保留——不再按战役键/换图清零，
-    // 只受上限 si_hud_wallet_max（默认 30000）钳制。存档 campaign 字段仍
+    // 只受上限 score_core_wallet_max（默认 30000）钳制。存档 campaign 字段仍
     // 写入（兼容旧逻辑），但 ScoreLoad_Player 不再校验，恢复一律放行。
     //（v1.7.28 战役判定 / v1.11.0 战役键清零体系全部废弃：官图、三方图
     //  大图小图一律换图不清。）
@@ -1950,14 +1958,14 @@ public void GetMapPrefix(const char[] map, char[] out, int maxlen)
     out[cut] = '\0';
 }
 
-// v1.11.0: 三方图大地图清单匹配——configs/si_hud_big_maps.txt，每行一个
+// v1.11.0: 三方图大地图清单匹配——configs/score_core_big_maps.txt，每行一个
 // 战役前缀（// 或 ; 注释，自上而下第一个命中生效）。匹配 = 图名以
 // 前缀 +（_ / m<数字> / 结尾）开头，防误配：前缀 "de" 不会配到
 // "deathttoiletmaze10_5"（后随 'a'），"dc2" 能配 "dc2m1_riverside"。
 bool GetBigMapConfigPrefix(const char[] map, char[] out, int maxlen)
 {
     char path[PLATFORM_MAX_PATH];
-    BuildPath(Path_SM, path, sizeof(path), "configs/si_hud_big_maps.txt");
+    BuildPath(Path_SM, path, sizeof(path), "configs/score_core_big_maps.txt");
     File f = OpenFile(path, "r");
     if (f == null)
     {
@@ -2434,7 +2442,7 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
 
         // v1.7.28: 复活次数判定——次数用完 → 积分复活/躺尸等电击器
         // v1.12.0 (user 拍板): 移除复活币——免费次数耗尽后，积分
-        // >= si_hud_revive_cost（6000）→ 30s 后自动复活（复活成功才扣）；
+        // >= score_core_revive_cost（6000）→ 30s 后自动复活（复活成功才扣）；
         // 积分不足 → 躺尸等电击器/过关。配套 shop 躺尸禁购，死亡→复活
         // 窗口积分只增不减，复活瞬间必够 6000。
         // v1.9.5: bot 与玩家走同一套复活逻辑（引擎不会自动复活幸存者 bot，
@@ -2467,7 +2475,7 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
 // v1.7.16 (user): commons' HP damage counts into the damage points too.
 // Commons fire NO player_hurt — infected_hurt is their equivalent
 // (fields: entityid / attacker / amount / type). Same rules as SI damage:
-// points = amount × weapon mult × si_hud_bf_damage_coeff_common (default
+// points = amount × weapon mult × score_core_bf_damage_coeff_common (default
 // 1.0 = 1:1 like SI). Scoreboard total only — no streak, no chat spam.
 // WARNING in the cvar help: commons are unlimited, so at 1.0 horde-mowing
 // out-scores SI kills (melee 1.75 × ~50hp = 87 一刀 vs 击杀 5 分).
@@ -2905,7 +2913,7 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
     // ONE PrintCenterText message, two lines (BF5-style):
     //   line 1: banner — ☠☠☠ skull row + type + rolling score (BuildBFBanner)
     //   line 2: card   — [weapon] ☠ SI name (gold ☠ = headshot) (BuildKillCard)
-    // Shown si_hud_killcard_time then cleared with " " — the center channel
+    // Shown score_core_killcard_time then cleared with " " — the center channel
     // has no shadow box, no priming bug, and clears instantly. The hint
     // channel was abandoned in v1.7.1 (dead end on L4D2, see changelog).
 
@@ -3133,7 +3141,7 @@ void StackStreakKill(int client, int points, bool isCommon)
 // v1.7.51 (user): 救援队友算分——救援计入连杀（刷新 6 秒窗口 + 累计滚动分 +
 // 结算卡显示），奖励分直接入账钱包/总分。revive_success 覆盖拉人（被扑/骑/
 // 舌头/挂边）和电击（L4D2 无专门 defib 事件，实锤也走 revive_success），
-// 统一 si_hud_points_rescue 分（默认 75）。
+// 统一 score_core_points_rescue 分（默认 75）。
 public Action Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
 {
     if (!g_cvEnable.BoolValue)
@@ -3174,7 +3182,7 @@ public Action Event_ReviveSuccess(Event event, const char[] name, bool dontBroad
 
 // v1.7.4: one icon row, SI skulls (☠) and common daggers (†) as separate
 // segments — "3 commons + 1 SI" shows "☠ †††", NOT 4 skulls. Up to
-// si_hud_icons_max icons in the row; over that shows "+N".
+// score_core_icons_max icons in the row; over that shows "+N".
 void BuildStreakIcons(char[] buffer, int maxlen, int client)
 {
     int si = g_iKillStreak[client];
@@ -3202,7 +3210,7 @@ void BuildStreakIcons(char[] buffer, int maxlen, int client)
 
 // v1.7.57: pure display — streak/score stacking moved OUT to the callers
 // (SurvivorKilledSI / SurvivorKilledWitch, before the HUD gate), so kills
-// still count when si_hud_kill_hint_enable is off (same as commons).
+// still count when score_core_kill_hint_enable is off (same as commons).
 void BuildBFBanner(char[] buffer, int maxlen, int client,
                    const char[] type, const char[] siName)
 {
@@ -3497,7 +3505,7 @@ void PlayClientSound(int client, const char[] sound)
 // SI name lookup (by m_zombieClass)
 // ============================================================================
 
-// v1.7.52 (user): 基础分 = 特感实际最大血量 × si_hud_bf_points_base_pct (25%),
+// v1.7.52 (user): 基础分 = 特感实际最大血量 × score_core_bf_points_base_pct (25%),
 // 向上取整；Tank/Witch 固定（1500/500，大头在伤害分）。血量实时读
 // m_iMaxHealth——服务器调过特感血量（[[l4d2-si-health]] 配置）则按调后算。
 int PointsForSI(int victim)
@@ -3625,7 +3633,7 @@ void KillHPHideTimer(int client)
 
 // v1.7.28: 复活系统（移植 l4d2_auto_respawn，限次数 + 复活币）
 // v1.12.0 (user): 复活币废除——免费次数（每图 base 次 = 2 条命）耗尽后，
-// 积分 >= si_hud_revive_cost → 复活延迟后自动复活，复活成功才扣积分；
+// 积分 >= score_core_revive_cost → 复活延迟后自动复活，复活成功才扣积分；
 // 积分不足 → 躺尸（电击器回归价值）。复活延迟 g_cvRespawnDelay（30s）。
 // ============================================================================
 

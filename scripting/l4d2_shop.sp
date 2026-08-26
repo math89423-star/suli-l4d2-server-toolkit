@@ -424,7 +424,7 @@ ConVar g_cvSIHudEnable;      // si_hud 总开关（FindConVar 读；null 视为�
 
 bool SH_Ready()
 {
-    Handle plugin = FindPluginByFile("l4d2_si_hud.smx");
+    Handle plugin = FindPluginByFile("l4d2_score_core.smx");
     if (plugin == INVALID_HANDLE)
         return false;
     // v1.8.x 及更早无 SH_ API（商店内嵌）；v1.9.0 起导出
@@ -850,7 +850,7 @@ public void OnPluginStart()
         "Score Shop version", FCVAR_NOTIFY | FCVAR_DONTRECORD);
 
     // v1.7.27: score shop — !shop / !buy (prices are compile-time in g_ShopTable)
-    g_cvShopEnable = CreateConVar("si_hud_shop_enable", "1",
+    g_cvShopEnable = CreateConVar("score_core_shop_enable", "1",
         "Enable the score shop (!shop / !buy).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     g_cvShopEnable.SetBounds(ConVarBound_Upper, true, 1.0);
     g_cvShopEnable.SetBounds(ConVarBound_Lower, true, 0.0);
@@ -858,40 +858,40 @@ public void OnPluginStart()
     // v1.7.80: 火炮支援1（!shop 特殊商品；v1.7.93 用户定稿命名，价格暂定 1 分）
     // 所有 cvar 创建后补 SetBounds——残留 cvar 坑：cfg exec 曾自动创建同名
     // cvar 时 CreateConVar 不更新 def/max（v1.7.47 实锤），强制重设
-    g_cvArtEnable = CreateConVar("si_hud_art_enable", "1",
+    g_cvArtEnable = CreateConVar("score_core_art_enable", "1",
         "Enable the artillery strike shop item (0=off, purchase refunded).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     g_cvArtEnable.SetBounds(ConVarBound_Upper, true, 1.0);
     g_cvArtEnable.SetBounds(ConVarBound_Lower, true, 0.0);
 
-    g_cvArtTargetTime = CreateConVar("si_hud_art_target_time", "15.0",
+    g_cvArtTargetTime = CreateConVar("score_core_art_target_time", "15.0",
         "Seconds to designate the strike target with the magnum before auto-cancel+refund.", FCVAR_NOTIFY, true, 3.0, true, 60.0);
     g_cvArtTargetTime.SetBounds(ConVarBound_Upper, true, 60.0);
     g_cvArtTargetTime.SetBounds(ConVarBound_Lower, true, 3.0);
 
     // v1.7.96: 持续轰炸——时长秒数 × 每秒随机 2-3 罐（用户拍板：30s ≈ 60-90 罐）
     // v1.8.1: I-炮击 30s；II-燃烧 25s（用户定稿；v1.0.1 收紧仅限半径，时长不变）
-    g_cvArtDuration = CreateConVar("si_hud_art_duration", "30.0",
+    g_cvArtDuration = CreateConVar("score_core_art_duration", "30.0",
         "Total barrage duration in seconds for 火力支援I-炮击 (2-3 cans fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArtDuration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArtDuration.SetBounds(ConVarBound_Lower, true, 5.0);
 
-    g_cvArtDuration2 = CreateConVar("si_hud_art2_duration", "25.0",
+    g_cvArtDuration2 = CreateConVar("score_core_art2_duration", "25.0",
         "Total barrage duration in seconds for 火力支援II-地狱烈火 (2-3 cans fall randomly each second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArtDuration2.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArtDuration2.SetBounds(ConVarBound_Lower, true, 5.0);
 
     // v1.0.1: I 收紧 25%：750→562.5 / 525→393.75 / 375→281.25
-    g_cvArtRadiusOut = CreateConVar("si_hud_art_radius_out", "562.5",
+    g_cvArtRadiusOut = CreateConVar("score_core_art_radius_out", "562.5",
         "Spread radius (units) of the open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArtRadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArtRadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArtRadiusMid = CreateConVar("si_hud_art_radius_mid", "393.75",
+    g_cvArtRadiusMid = CreateConVar("score_core_art_radius_mid", "393.75",
         "Spread radius for ceiling >= 900.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArtRadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArtRadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArtRadiusSmall = CreateConVar("si_hud_art_radius_small", "281.25",
+    g_cvArtRadiusSmall = CreateConVar("score_core_art_radius_small", "281.25",
         "Spread radius for ceiling 600-900.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArtRadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArtRadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
@@ -899,23 +899,23 @@ public void OnPluginStart()
     // v1.0.1: II 独立半径组，收紧 10%：750→675 / 525→472.5 / 375→337.5
     // v1.8.5: 收紧20%：675→540 / 472.5→378 / 337.5→270
     // v1.15.0: +50%（用户拍板）459→688.5 / 321.3→482 / 229.5→344.3
-    g_cvArt2RadiusOut = CreateConVar("si_hud_art2_radius_out", "688.5",
+    g_cvArt2RadiusOut = CreateConVar("score_core_art2_radius_out", "688.5",
         "Spread radius (units) of the 火力支援II-地狱烈火 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt2RadiusMid = CreateConVar("si_hud_art2_radius_mid", "482.0",
+    g_cvArt2RadiusMid = CreateConVar("score_core_art2_radius_mid", "482.0",
         "Spread radius for ceiling >= 900 (火力支援II-地狱烈火).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt2RadiusSmall = CreateConVar("si_hud_art2_radius_small", "344.3",
+    g_cvArt2RadiusSmall = CreateConVar("score_core_art2_radius_small", "344.3",
         "Spread radius for ceiling 600-900 (火力支援II-地狱烈火).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt2RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt2RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
     // v1.1.0: III-胆汁雨独立组（用户定稿 15s；半径 750/525/375 = 无伤害更大覆盖）
-    g_cvArt3Duration = CreateConVar("si_hud_art3_duration", "15.0",
+    g_cvArt3Duration = CreateConVar("score_core_art3_duration", "15.0",
         "Total barrage duration in seconds for 火力支援I-绿色雨幕 (1-2 jars fall randomly every 2 seconds).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArt3Duration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArt3Duration.SetBounds(ConVarBound_Lower, true, 5.0);
@@ -923,38 +923,38 @@ public void OnPluginStart()
     // v1.4.0: III 范围 = 火力支援I-轰炸的 75%（用户定稿）：562.5→421.875 /
     // 393.75→295.3125 / 281.25→210.9375（纯控场圈收小）
     // v1.8.5: 收紧20%：421.875→337.5 / 295.3125→236.25 / 210.9375→168.75
-    g_cvArt3RadiusOut = CreateConVar("si_hud_art3_radius_out", "337.5",
+    g_cvArt3RadiusOut = CreateConVar("score_core_art3_radius_out", "337.5",
         "Spread radius (units) of the 火力支援I-绿色雨幕 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt3RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt3RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt3RadiusMid = CreateConVar("si_hud_art3_radius_mid", "236.25",
+    g_cvArt3RadiusMid = CreateConVar("score_core_art3_radius_mid", "236.25",
         "Spread radius for ceiling >= 900 (火力支援I-绿色雨幕).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt3RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt3RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt3RadiusSmall = CreateConVar("si_hud_art3_radius_small", "168.75",
+    g_cvArt3RadiusSmall = CreateConVar("score_core_art3_radius_small", "168.75",
         "Spread radius for ceiling 600-900 (火力支援I-绿色雨幕).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt3RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt3RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
     // v1.2.0: IV-榴弹雨独立组（TEST 15s；半径收紧档 = 有伤害口径同 I/II）
-    g_cvArt4Duration = CreateConVar("si_hud_art4_duration", "15.0",
+    g_cvArt4Duration = CreateConVar("score_core_art4_duration", "15.0",
         "Total barrage duration in seconds for 火力支援IV-榴弹雨 (disabled item; grenade path reused by 火力支援III-区域轰炸).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArt4Duration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArt4Duration.SetBounds(ConVarBound_Lower, true, 5.0);
 
-    g_cvArt4RadiusOut = CreateConVar("si_hud_art4_radius_out", "562.5",
+    g_cvArt4RadiusOut = CreateConVar("score_core_art4_radius_out", "562.5",
         "Spread radius (units) of the 火力支援IV-榴弹雨 open-area strike (disabled item).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt4RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt4RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt4RadiusMid = CreateConVar("si_hud_art4_radius_mid", "393.75",
+    g_cvArt4RadiusMid = CreateConVar("score_core_art4_radius_mid", "393.75",
         "Spread radius for ceiling >= 900 (火力支援IV-榴弹雨, disabled item).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt4RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt4RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt4RadiusSmall = CreateConVar("si_hud_art4_radius_small", "281.25",
+    g_cvArt4RadiusSmall = CreateConVar("score_core_art4_radius_small", "281.25",
         "Spread radius for ceiling 600-900 (火力支援IV-榴弹雨, disabled item).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt4RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt4RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
@@ -963,138 +963,138 @@ public void OnPluginStart()
     // 混合比 can_pct 罐子占比，余下为榴弹——全引擎路径，无新增 native）
     // v1.8.5: 收紧20%：562.5→450.0 / 393.75→315.0 / 281.25→225.0
     // v1.8.7: 放大10%：450.0→495.0 / 315.0→346.5 / 225.0→247.5
-    g_cvArt5Duration = CreateConVar("si_hud_art5_duration", "30.0",   // v1.4.0: 用户定稿 30s
+    g_cvArt5Duration = CreateConVar("score_core_art5_duration", "30.0",   // v1.4.0: 用户定稿 30s
         "Total barrage duration in seconds for 火力支援III-区域轰炸 (cans+grenades mixed, 2-3 items per second).", FCVAR_NOTIFY, true, 5.0, true, 300.0);
     g_cvArt5Duration.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArt5Duration.SetBounds(ConVarBound_Lower, true, 5.0);
 
-    g_cvArt5RadiusOut = CreateConVar("si_hud_art5_radius_out", "742.5",
+    g_cvArt5RadiusOut = CreateConVar("score_core_art5_radius_out", "742.5",
         "Spread radius (units) of the 火力支援III-区域轰炸 open-area strike; also the target ring radius.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt5RadiusMid = CreateConVar("si_hud_art5_radius_mid", "519.8",
+    g_cvArt5RadiusMid = CreateConVar("score_core_art5_radius_mid", "519.8",
         "Spread radius for ceiling >= 900 (火力支援III-区域轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt5RadiusSmall = CreateConVar("si_hud_art5_radius_small", "371.3",
+    g_cvArt5RadiusSmall = CreateConVar("score_core_art5_radius_small", "371.3",
         "Spread radius for ceiling 600-900 (火力支援III-区域轰炸).", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArt5RadiusSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArt5RadiusSmall.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArt5CanPct = CreateConVar("si_hud_art5_can_pct", "0.0",   // v1.8.5: 改为全榴弹（0% 罐子）
+    g_cvArt5CanPct = CreateConVar("score_core_art5_can_pct", "0.0",   // v1.8.5: 改为全榴弹（0% 罐子）
         "Percent of falling items that are propane/oxygen cans in 火力支援III-区域轰炸 (rest are grenades).", FCVAR_NOTIFY, true, 0.0, true, 100.0);
     g_cvArt5CanPct.SetBounds(ConVarBound_Upper, true, 100.0);
     g_cvArt5CanPct.SetBounds(ConVarBound_Lower, true, 0.0);
 
     // ===== v1.8.0: IV-AGM导弹（artillery6）=====
     // 半径比 III-区域轰炸大（562.5）——V1 是一击清场技，定 1000/700/500
-    g_cvArt6RadiusOut = CreateConVar("si_hud_art6_radius_out", "600.0",
+    g_cvArt6RadiusOut = CreateConVar("score_core_art6_radius_out", "600.0",
         "Kill radius outdoors (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 100.0, true, 2500.0);
     g_cvArt6RadiusOut.SetBounds(ConVarBound_Upper, true, 2500.0);
     g_cvArt6RadiusOut.SetBounds(ConVarBound_Lower, true, 100.0);
 
-    g_cvArt6RadiusMid = CreateConVar("si_hud_art6_radius_mid", "450.0",
+    g_cvArt6RadiusMid = CreateConVar("score_core_art6_radius_mid", "450.0",
         "Kill radius for ceiling >=900 (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 100.0, true, 2500.0);
     g_cvArt6RadiusMid.SetBounds(ConVarBound_Upper, true, 2500.0);
     g_cvArt6RadiusMid.SetBounds(ConVarBound_Lower, true, 100.0);
 
-    g_cvArt6RadiusSmall = CreateConVar("si_hud_art6_radius_small", "350.0",
+    g_cvArt6RadiusSmall = CreateConVar("score_core_art6_radius_small", "350.0",
         "Kill radius for ceiling 600-900 (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 100.0, true, 2500.0);
     g_cvArt6RadiusSmall.SetBounds(ConVarBound_Upper, true, 2500.0);
     g_cvArt6RadiusSmall.SetBounds(ConVarBound_Lower, true, 100.0);
 
-    g_cvArt6DiveTime = CreateConVar("si_hud_art6_dive_time", "1.6",
+    g_cvArt6DiveTime = CreateConVar("score_core_art6_dive_time", "1.6",
         "Missile dive duration seconds (火力支援IV-AGM导弹，音效设计基准 1.6s).", FCVAR_NOTIFY, true, 0.3, true, 8.0);
-    g_cvArt6DiveHeight = CreateConVar("si_hud_art6_dive_height", "2600.0",
+    g_cvArt6DiveHeight = CreateConVar("score_core_art6_dive_height", "2600.0",
         "Missile spawn height above impact point.", FCVAR_NOTIFY, true, 500.0, true, 6000.0);
 
     // 平衡两开关（用户可随时热改；v1.9.1 删 Tank 秒杀开关——1/2 圈层统一 99999）
-    g_cvArt6Friendly = CreateConVar("si_hud_art6_friendly_fire", "1",
+    g_cvArt6Friendly = CreateConVar("score_core_art6_friendly_fire", "1",
         "1 = survivors inside blast are killed too (BF5 behaviour), 0 = survivors immune.",
         FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvArt6SurvInner = CreateConVar("si_hud_art6_surv_inner_radius", "80.0",
+    g_cvArt6SurvInner = CreateConVar("score_core_art6_surv_inner_radius", "80.0",
         "Inner kill zone radius for survivors (instakill/incap).", FCVAR_NOTIFY, true, 0.0, true, 1000.0);
-    g_cvArt6SurvDmgIn = CreateConVar("si_hud_art6_surv_damage_inner", "100.0",
+    g_cvArt6SurvDmgIn = CreateConVar("score_core_art6_surv_damage_inner", "100.0",
         "Damage at inner radius edge (just outside instakill zone).", FCVAR_NOTIFY, true, 10.0, true, 200.0);
-    g_cvArt6SurvDmgOut = CreateConVar("si_hud_art6_surv_damage_outer", "15.0",
+    g_cvArt6SurvDmgOut = CreateConVar("score_core_art6_surv_damage_outer", "15.0",
         "Damage at outer blast radius edge.", FCVAR_NOTIFY, true, 1.0, true, 100.0);
-    g_cvArt6ShakeAmp = CreateConVar("si_hud_art6_shake_amp", "16.0",
+    g_cvArt6ShakeAmp = CreateConVar("score_core_art6_shake_amp", "16.0",
         "Screen shake amplitude (0 = disabled).", FCVAR_NOTIFY, true, 0.0, true, 50.0);
-    g_cvArt6ShakeFreq = CreateConVar("si_hud_art6_shake_freq", "150.0",
+    g_cvArt6ShakeFreq = CreateConVar("score_core_art6_shake_freq", "150.0",
         "Screen shake frequency in Hz.", FCVAR_NOTIFY, true, 50.0, true, 255.0);
-    g_cvArt6ShakeDur = CreateConVar("si_hud_art6_shake_duration", "3.0",
+    g_cvArt6ShakeDur = CreateConVar("score_core_art6_shake_duration", "3.0",
         "Screen shake duration in seconds.", FCVAR_NOTIFY, true, 0.5, true, 10.0);
-    g_cvArt6PushForce = CreateConVar("si_hud_art6_push_force", "600.0",
+    g_cvArt6PushForce = CreateConVar("score_core_art6_push_force", "600.0",
         "Physics push force away from impact (0 = disabled).", FCVAR_NOTIFY, true, 0.0, true, 2000.0);
-    g_cvArt6MaxPerMap = CreateConVar("si_hud_art6_max_per_map", "0",
+    g_cvArt6MaxPerMap = CreateConVar("score_core_art6_max_per_map", "0",
         "Server-wide V1 purchases allowed per map (0 = unlimited).", FCVAR_NOTIFY, true, 0.0, true, 20.0);
-    g_cvArt6FxRings = CreateConVar("si_hud_art6_fx_rings", "0",
+    g_cvArt6FxRings = CreateConVar("score_core_art6_fx_rings", "0",
         "Extra particle rings around impact (0 = center only). Widens the visual blast.",
         FCVAR_NOTIFY, true, 0.0, true, 4.0);
-    g_cvArt6FxPerRing = CreateConVar("si_hud_art6_fx_per_ring", "6",
+    g_cvArt6FxPerRing = CreateConVar("score_core_art6_fx_per_ring", "6",
         "Particle spawn points per ring.", FCVAR_NOTIFY, true, 3.0, true, 12.0);
-    g_cvArt6FxSpread = CreateConVar("si_hud_art6_fx_spread", "0.75",
+    g_cvArt6FxSpread = CreateConVar("score_core_art6_fx_spread", "0.75",
         "Outermost ring radius as a fraction of the kill radius.", FCVAR_NOTIFY, true, 0.1, true, 1.0);
-    g_cvArt6FxWave = CreateConVar("si_hud_art6_fx_wave", "0.09",
+    g_cvArt6FxWave = CreateConVar("score_core_art6_fx_wave", "0.09",
         "Delay per ring in seconds, creating an outward expanding blast wave.",
         FCVAR_NOTIFY, true, 0.0, true, 1.0);
-    g_cvArt6WarnTime = CreateConVar("si_hud_art6_warn", "8.0",
+    g_cvArt6WarnTime = CreateConVar("score_core_art6_warn", "8.0",
         "Warning seconds before V1 dives (火力支援IV-AGM导弹).", FCVAR_NOTIFY, true, 1.0, true, 30.0);
     // v1.8.24: AGM 爆炸后暂停全部特感/小僵尸刷新的秒数（用户定稿 20s）——给幸存者
     // 喘息时间。特感走 specialspawner SS_PauseSpawning native；小僵尸走 director cvar。
-    g_cvArt6PauseSpawn = CreateConVar("si_hud_art6_pause_spawn", "20.0",
+    g_cvArt6PauseSpawn = CreateConVar("score_core_art6_pause_spawn", "20.0",
         "Seconds to pause all special/common infected spawning after V1 detonates (0 = no pause).",
         FCVAR_NOTIFY, true, 0.0, true, 60.0);
 
-    g_cvArtHeightMin = CreateConVar("si_hud_art_height_min", "1800.0",
+    g_cvArtHeightMin = CreateConVar("score_core_art_height_min", "1800.0",
         "Min drop height (units) for open areas.", FCVAR_NOTIFY, true, 400.0, true, 8000.0);
     g_cvArtHeightMin.SetBounds(ConVarBound_Upper, true, 8000.0);
     g_cvArtHeightMin.SetBounds(ConVarBound_Lower, true, 400.0);
 
-    g_cvArtHeightMax = CreateConVar("si_hud_art_height_max", "2600.0",
+    g_cvArtHeightMax = CreateConVar("score_core_art_height_max", "2600.0",
         "Max drop height (units) for open areas.", FCVAR_NOTIFY, true, 400.0, true, 8000.0);
     g_cvArtHeightMax.SetBounds(ConVarBound_Upper, true, 8000.0);
     g_cvArtHeightMax.SetBounds(ConVarBound_Lower, true, 400.0);
 
     // v1.7.93: si_hud_art_damage 已删除——爆炸伤害由模型 propdata 决定（原版 200 falloff）
-    g_cvArtDelay = CreateConVar("si_hud_art_delay", "0.5",
+    g_cvArtDelay = CreateConVar("score_core_art_delay", "0.5",
         "Seconds between confirm and the first can spawning.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
     g_cvArtDelay.SetBounds(ConVarBound_Upper, true, 10.0);
     g_cvArtDelay.SetBounds(ConVarBound_Lower, true, 0.0);
 
-    g_cvArtBurn = CreateConVar("si_hud_art_burn", "2.0",
+    g_cvArtBurn = CreateConVar("score_core_art_burn", "2.0",
         "Secs the can keeps burning after landing (burns out, then detonates).", FCVAR_NOTIFY, true, 1.0, true, 60.0);
     g_cvArtBurn.SetBounds(ConVarBound_Upper, true, 60.0);
     g_cvArtBurn.SetBounds(ConVarBound_Lower, true, 1.0);
 
-    g_cvArtCooldown = CreateConVar("si_hud_art_cooldown", "10.0",
+    g_cvArtCooldown = CreateConVar("score_core_art_cooldown", "10.0",
         "Global hard cooldown after a strike ends before anyone can buy again (user: 10s).", FCVAR_NOTIFY, true, 0.0, true, 300.0);
     g_cvArtCooldown.SetBounds(ConVarBound_Upper, true, 300.0);
     g_cvArtCooldown.SetBounds(ConVarBound_Lower, true, 0.0);
 
     // v1.0.4: 爆炸震退触发距离——玩家距爆炸罐子 <= 阈值时保留震退，
     // 更远只受伤不震退。v1.0.5 用户定稿两档：油桶/烟花 100、瓦斯/煤气 200
-    g_cvArtNkRadiusOil = CreateConVar("si_hud_art_nk_radius_oil", "100.0",
+    g_cvArtNkRadiusOil = CreateConVar("score_core_art_nk_radius_oil", "100.0",
         "Stagger trigger radius (units) for gas-can/firework explosions (oil cans); beyond this players take damage without stagger knockback.", FCVAR_NOTIFY, true, 0.0, true, 1500.0);
     g_cvArtNkRadiusOil.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArtNkRadiusOil.SetBounds(ConVarBound_Lower, true, 0.0);
 
-    g_cvArtNkRadiusGas = CreateConVar("si_hud_art_nk_radius_gas", "200.0",
+    g_cvArtNkRadiusGas = CreateConVar("score_core_art_nk_radius_gas", "200.0",
         "Stagger trigger radius (units) for propane/oxygen tank explosions; beyond this players take damage without stagger knockback.", FCVAR_NOTIFY, true, 0.0, true, 1500.0);
     g_cvArtNkRadiusGas.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArtNkRadiusGas.SetBounds(ConVarBound_Lower, true, 0.0);
 
     // v1.0.6: 确认后预警时长——目标光圈全员可见 + 聊天播报，预警结束才开始落罐
     // v1.0.7: 用户定稿 8s，每秒倒计时播报
-    g_cvArtWarnTime = CreateConVar("si_hud_art_warn_time", "8.0",
+    g_cvArtWarnTime = CreateConVar("score_core_art_warn_time", "8.0",
         "Pre-strike warning seconds after confirm: target ring visible to all + chat broadcast, then cans start falling.", FCVAR_NOTIFY, true, 1.0, true, 30.0);
     g_cvArtWarnTime.SetBounds(ConVarBound_Upper, true, 30.0);
     g_cvArtWarnTime.SetBounds(ConVarBound_Lower, true, 1.0);
 
     // v1.15.0: 火力支援II/III 专用预警时长（用户拍板 3s; 共享 cvar 保持 8s 供 I 等）
-    g_cvArtWarnTime25 = CreateConVar("si_hud_art_warn_time_ii_iii", "3.0",
+    g_cvArtWarnTime25 = CreateConVar("score_core_art_warn_time_ii_iii", "3.0",
         "Pre-strike warning seconds for 火力支援II/III only.", FCVAR_NOTIFY, true, 1.0, true, 30.0);
     g_cvArtWarnTime25.SetBounds(ConVarBound_Upper, true, 30.0);
     g_cvArtWarnTime25.SetBounds(ConVarBound_Lower, true, 1.0);
@@ -1112,17 +1112,17 @@ public void OnPluginStart()
     g_cvArtDebug.SetBounds(ConVarBound_Lower, true, 0.0);
 
     // v1.0.7: 光圈显示半径（收紧前原值档位）——瞄准圈/预警圈用，与轰炸半径解耦
-    g_cvArtRingOut = CreateConVar("si_hud_art_ring_out", "750.0",
+    g_cvArtRingOut = CreateConVar("score_core_art_ring_out", "750.0",
         "Ring display radius (units) for open-area aim/warning rings; actual can spread uses si_hud_art_radius_*.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArtRingOut.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArtRingOut.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArtRingMid = CreateConVar("si_hud_art_ring_mid", "525.0",
+    g_cvArtRingMid = CreateConVar("score_core_art_ring_mid", "525.0",
         "Ring display radius for ceiling >= 900.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArtRingMid.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArtRingMid.SetBounds(ConVarBound_Lower, true, 50.0);
 
-    g_cvArtRingSmall = CreateConVar("si_hud_art_ring_small", "375.0",
+    g_cvArtRingSmall = CreateConVar("score_core_art_ring_small", "375.0",
         "Ring display radius for ceiling 600-900.", FCVAR_NOTIFY, true, 50.0, true, 1500.0);
     g_cvArtRingSmall.SetBounds(ConVarBound_Upper, true, 1500.0);
     g_cvArtRingSmall.SetBounds(ConVarBound_Lower, true, 50.0);
@@ -1179,7 +1179,7 @@ public void OnPluginStart()
     g_hWitchList = new ArrayList();          // 透视特感 Witch 实体表（自家独立）
     WallhackClearGlow();                     // reload 安全网——清掉残留特感发光（防 reload 后光不灭）
 
-    g_cvSIHudEnable = FindConVar("si_hud_enable");   // 总开关（可能为 null——si_hud 未加载）
+    g_cvSIHudEnable = FindConVar("score_core_enable");   // 总开关（可能为 null——si_hud 未加载）
 
     // v1.0.4 FIX: reload 时不触发 OnClientPutInServer → 已在服玩家补挂震退 hook
     for (int i = 1; i <= MaxClients; i++)
@@ -5650,7 +5650,7 @@ void V1_Detonate(int client, const float target[3], float radius)
             attacker, killedCommon, killedSI, killedWitch, killedTank);
 
         // v1.8.25: 显示导弹聚合击杀横幅（si_hud v1.13.3+ native）
-        if (FindPluginByFile("l4d2_si_hud.smx") != INVALID_HANDLE)
+        if (FindPluginByFile("l4d2_score_core.smx") != INVALID_HANDLE)
             SH_ShowMissileBanner(attacker, killedCommon, killedSI, killedWitch, killedTank);
     }
     else
