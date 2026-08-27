@@ -511,8 +511,7 @@ BT_Status ChargerAct_TryShockCharge(int client) {
     }
 
     float tryAt = SI_AbilityGetTryAt(client, "_charger_shock");
-    if (SI_AbilityGetState(client, "_charger_shock") != ABILITY_TRYING ||
-        now - tryAt > CHARGER_TRY_TIMEOUT) {
+    if (SI_AbilityGetState(client, "_charger_shock") != ABILITY_TRYING) {
         tryAt = now;
         SI_AbilityMarkTry(client, "_charger_shock", tryAt);
         SI_AbilitySetState(client, "_charger_shock", ABILITY_TRYING);

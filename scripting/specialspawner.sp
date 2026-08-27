@@ -416,6 +416,7 @@ int Native_MarkWaveTank(Handle plugin, int numParams) {
 // 冷静期本来就不刷特感，暂停 20s 被冷静期覆盖 = 无额外价值；冻结后暂停是
 // "从当前状态额外 +N 秒安静"，暂停结束冷静期续走）。
 void SS_FreezeWaveTimers() {
+	if (g_fRestFrozenRemaining > 0.0) return; // 已冻结，避免二次覆盖
 	g_fRestFrozenRemaining = 0.0;
 	if (g_Phase == PHASE_REST && g_hRestTimer != null && IsValidHandle(g_hRestTimer)) {
 		float remaining = g_fRestEndTime - GetEngineTime();
@@ -478,7 +479,7 @@ void SS_PauseDirectorSpecials() {
 	ConVar cv = FindConVar("director_no_specials");
 	if (cv == null)
 		return;
-	g_iDirectorSpecialsPrev = cv.IntValue;
+	if (g_iDirectorSpecialsPrev == -1) g_iDirectorSpecialsPrev = cv.IntValue;
 	cv.IntValue = 1;
 	LogMessage("[SS] director_no_specials %d -> 1 (pause)", g_iDirectorSpecialsPrev);
 }
@@ -945,7 +946,7 @@ Action tmrForceSuicide(Handle timer) {
 
 	// v6.0.2 波次泄气推进: PRESSURE 期首发已出、场上 0 SI、击杀未达标 → 别干等 60s 真空,
 	// 场上无 SI 持续 ss_wave_stall_advance(6s) 秒就强制 FinishWave → CLEARING → REST → 下一波
-	if (g_Phase == PHASE_PRESSURE && aliveCount == 0 && g_fStallAdvance > 0.0
+	if (!g_bWaveHadTank && g_Phase == PHASE_PRESSURE && aliveCount == 0 && g_fStallAdvance > 0.0
 		&& g_iBatchNext >= g_iBatchTotal && g_iWaveKills < g_iWaveInitial && !g_bSpawningPaused) {
 		if (g_fWaveNoSITime <= 0.0) {
 			g_fWaveNoSITime = time;
@@ -1387,7 +1388,7 @@ public void OnMapStart() {
 	{
 		ConVar cvSafety = FindConVar("z_spawn_safety_range");
 		if (cvSafety != null) {
-			g_fOrigSafetyRange = cvSafety.FloatValue;
+			if (g_fOrigSafetyRange == 0.0) g_fOrigSafetyRange = cvSafety.FloatValue;
 			cvSafety.SetFloat(500.0);
 		}
 	}
@@ -2195,13 +2196,16 @@ Action tmrReserveTimeout(Handle timer) {
 // v6.0.3: 出生点是否在伤害触发器(trigger_hurt 等"陷阱")包围盒内 → 一出生就被机关秒杀
 // （实测 2026-08-18 波6: charger/spitter 出生 2.2s/2.7s "陷阱"秒死）。硬拒。
 bool SISpawn_InHurtTrigger(const float pos[3]) {
-	float mins[3], maxs[3];
+	float mins[3], maxs[3], origin[3];
 	int ent = -1;
 	while ((ent = FindEntityByClassname(ent, "trigger_hurt")) != -1) {
 		if (!IsValidEntity(ent))
 			continue;
 		GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
 		GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
+		GetEntPropVector(ent, Prop_Send, "m_vecOrigin", origin);
+		mins[0] += origin[0]; mins[1] += origin[1]; mins[2] += origin[2];
+		maxs[0] += origin[0]; maxs[1] += origin[1]; maxs[2] += origin[2];
 		// 防止未初始化(全 0)的触发器把整个地图当命中 → 跳过
 		if (mins[0] == 0.0 && mins[1] == 0.0 && mins[2] == 0.0
 			&& maxs[0] == 0.0 && maxs[1] == 0.0 && maxs[2] == 0.0)
@@ -2668,6 +2672,7 @@ void SpawnSliced(int from, int to) {
 }
 
 void TMR_SliceFrame(any data) {
+	if (g_hBatchQueue == null || g_Phase != PHASE_PRESSURE) return;
 	if (g_iSliceCursor >= g_iSliceEnd) {
 		g_iBatchNext = g_iSliceEnd;
 		SliceDone();
@@ -2675,6 +2680,7 @@ void TMR_SliceFrame(any data) {
 	}
 	int i = g_iSliceCursor;
 	{
+		if (g_hBatchQueue == null) return;
 		int zClass0 = g_hBatchQueue.Get(i);		// 0..5
 
 		// 段类型 → 方向 + 参照者子集 [refMin, refMax]（闭区间）
@@ -2748,10 +2754,9 @@ bool SpawnReplacement() {
 	if (g_iWaveReserve < 0) return false;
 	if (GetTotalSI() >= g_iSILimit) return false;  // 场上已满，不补
 
-	// 随机选一个 SI class（按权重）
+	// 随机选一个 SI class（按权重）— P2: 去 jockey 跳过，首发/补位一致
 	int totalWeight = 0;
 	for (int i = 0; i < SI_MAX_SIZE; i++) {
-		if (i == 4) continue;  // 继承原语义: 权重池不含 i==4
 		totalWeight += g_iSpawnWeights[i];
 	}
 	if (totalWeight <= 0) return false;
@@ -2760,7 +2765,6 @@ bool SpawnReplacement() {
 	int class = 0;
 	int accum = 0;
 	for (int i = 0; i < SI_MAX_SIZE; i++) {
-		if (i == 4) continue;
 		accum += g_iSpawnWeights[i];
 		if (roll < accum) {
 			class = i;
@@ -2780,7 +2784,10 @@ bool SpawnReplacement() {
 	if (g_iBatchSurvivorCount <= 0) return false;
 
 	int dir = g_bRandomDirection ? SPAWN_NO_PREFERENCE : SPAWN_LARGE_VOLUME;
-	if (SISpawn_PlaceOne(class, dir, 0, g_iBatchSurvivorCount - 1, true)) {
+	g_bInSpawnTime = true;
+	bool ok = SISpawn_PlaceOne(class, dir, 0, g_iBatchSurvivorCount - 1, true);
+	g_bInSpawnTime = false;
+	if (ok) {
 		g_iWaveReserveSpawned++;
 		// v6.1.1 起移除"补位"聊天播报（防刷屏；保留 LogMessage 补位日志）
 		// PrintToChatAll("\x04[补位]\x01 %s 补刷成功（剩余 \x03%d\x01）",
@@ -3353,7 +3360,8 @@ int GetTotalSI() {
 			continue;
 	
 		if (IsPlayerAlive(i)) {
-			if (1 <= GetEntProp(i, Prop_Send, "m_zombieClass") <= 6)
+			int zc = GetEntProp(i, Prop_Send, "m_zombieClass");
+			if (1 <= zc && zc <= 6)
 				count++;
 		}
 		else if (IsFakeClient(i))

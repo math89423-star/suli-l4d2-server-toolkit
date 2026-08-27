@@ -811,9 +811,14 @@ stock int BT_CreateTankTree() {
     );
 
     // ==========================================
-    // Root
+    // Root — P0: Sequence(spawnPush, ...) 3s 后 FAIL 全树冻结，已改 Selector
     // ==========================================
-    int root = BT_CreateSequence(3, spawnPushSeq, targetSelector, attackSelector);
+    int root = BT_Create(BTN_SELECTOR);
+    BT_AddChild(root, spawnPushSeq);
+    int normalSeq = BT_Create(BTN_SEQUENCE);
+    BT_AddChild(normalSeq, targetSelector);
+    BT_AddChild(normalSeq, attackSelector);
+    BT_AddChild(root, normalSeq);
     return root;
 }
 
