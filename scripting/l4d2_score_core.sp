@@ -967,6 +967,9 @@ int       g_iDmgPtsKiller[MAXPLAYERS + 1][2048];
 // debug logs: hit carries ent=126 pts=13, death carries ent=0 → this fixes
 // the lookup. Shotgun multi-kills: only the LAST kill is exact.
 int       g_iLastCommonEnt[MAXPLAYERS + 1];
+// v1.14.0: fallback 音效按客户端下载设置分流（QueryClientConVar cl_downloadfilter）
+bool      g_bClientCanDownload[MAXPLAYERS + 1];
+bool      g_bClientDLQueried[MAXPLAYERS + 1];
 
 // v1.7.34: 持久化——钱包/复活币按 SteamID 存 KeyValues（data/si_hud_scores.txt），
 // reload/重启不丢；保存时机: 断线 / OnPluginEnd(reload) / 60s 周期 / 新战役清零后
@@ -1482,7 +1485,12 @@ public void OnPluginStart()
         g_iFFDamage[i] = 0;
         g_iBlacked[i] = 0;
         if (!IsFakeClient(i))
+        {
             ScoreLoad_Player(i);   // v1.7.34: 恢复钱包/复活币（仅真人，bot 无存档）
+            g_bClientDLQueried[i] = false;
+            g_bClientCanDownload[i] = true;
+            QueryClientConVar(i, "cl_downloadfilter", OnDownloadFilterQuery);
+        }
     }
 
     // v1.7.34: 周期持久化（防崩溃丢数据 + 中途进服玩家恢复接近实时的值）
@@ -2226,6 +2234,12 @@ public Action Event_MapTransition(Event event, const char[] name, bool dontBroad
 
 public void OnClientPutInServer(int client)
 {
+    // v1.14.0: 查询客户端下载设置，用于击杀音效分流（BF vs fallback）
+    g_bClientDLQueried[client] = false;
+    g_bClientCanDownload[client] = true; // 默认可下载，查询失败也按可下载处理
+    if (!IsFakeClient(client))
+        QueryClientConVar(client, "cl_downloadfilter", OnDownloadFilterQuery);
+
     // v1.7.31 (user): 新加入玩家 = 全默认状态 —— 0 可用积分 + start 复活币 + base 复活次数
     // v1.7.34: 钱包/复活币恢复移到 OnClientPostAdminCheck（此时 Steam auth 才可用）
     g_iRevivesLeft[client] = g_cvRespawnBase.IntValue;
@@ -2262,6 +2276,8 @@ public void OnClientPostAdminCheck(int client)
 public void OnClientDisconnect(int client)
 {
     ScoreSave_Player(client);            // v1.7.34: 断线保存（必须在清零前）
+    g_bClientDLQueried[client] = false;
+    g_bClientCanDownload[client] = true;
     g_fLastKillSoundTime[client] = 0.0;
     g_iKillStreak[client] = 0;
     g_iCommonStreak[client] = 0;           // v1.7.4
@@ -2284,6 +2300,24 @@ public void OnClientDisconnect(int client)
     KillStreakTimer(client);
     g_bFrameQueued[client] = false;
     delete g_hHurtVictims[client];
+}
+
+// v1.14.0: 客户端下载设置查询回调
+public void OnDownloadFilterQuery(QueryCookie cookie, int client, ConVarQueryResult result, const char[] cvarName, const char[] cvarValue)
+{
+    if (!IsClientInGame(client))
+        return;
+    g_bClientDLQueried[client] = true;
+    if (result != ConVarQuery_Okay)
+    {
+        g_bClientCanDownload[client] = true; // 查询失败默认可下载
+        return;
+    }
+    // cl_downloadfilter: "all"=全部, "none"=全关, "nosounds"=不下声音, "mapsonly"=只下地图
+    if (StrEqual(cvarValue, "none", false) || StrEqual(cvarValue, "nosounds", false))
+        g_bClientCanDownload[client] = false;
+    else
+        g_bClientCanDownload[client] = true;
 }
 
 // ============================================================================
@@ -3540,44 +3574,50 @@ void PickSound(char[] buffer, int maxlen, ConVar primary, ConVar fallback)
 
 void PlayClientSound(int client, const char[] sound)
 {
-    if (sound[0] == '\0')
-        return;
-
     float vol = g_cvSoundVolume.FloatValue;
     if (vol <= 0.0)
         return;
 
     float fVol = vol >= 1.0 ? 1.0 : vol;
-    EmitSoundToClient(client, sound, client, SNDCHAN_AUTO,
-        SNDLEVEL_NORMAL, SND_NOFLAGS, fVol);
 
-    // v1.14.0: fallback 音效 — 延迟 0.05s 播放。
-    // BF 音效成功 → 铃声被盖住听不到；BF 失效（客户端没下载）→ 铃声兜底。
     char fallback[64];
     g_cvKillSoundFallback.GetString(fallback, sizeof(fallback));
-    if (fallback[0] != '\0')
+
+    bool hasPrimary = (sound[0] != '\0');
+    bool hasFallback = (fallback[0] != '\0');
+
+    if (!hasPrimary && !hasFallback)
+        return;
+
+    // 只有一个配置时直接播
+    if (!hasPrimary)
     {
-        DataPack dp = new DataPack();
-        dp.WriteCell(client);
-        dp.WriteFloat(fVol);
-        dp.WriteString(fallback);
-        CreateTimer(0.05, Timer_PlayFallbackSound, dp, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
+        EmitSoundToClient(client, fallback, client, SNDCHAN_AUTO,
+            SNDLEVEL_NORMAL, SND_NOFLAGS, fVol);
+        return;
     }
-}
-
-Action Timer_PlayFallbackSound(Handle timer, DataPack dp)
-{
-    dp.Reset();
-    int client = dp.ReadCell();
-    float vol = dp.ReadFloat();
-    char sound[64];
-    dp.ReadString(sound, sizeof(sound));
-
-    if (client > 0 && client <= MaxClients && IsClientInGame(client))
+    if (!hasFallback)
+    {
         EmitSoundToClient(client, sound, client, SNDCHAN_AUTO,
-            SNDLEVEL_NORMAL, SND_NOFLAGS, vol);
+            SNDLEVEL_NORMAL, SND_NOFLAGS, fVol);
+        return;
+    }
 
-    return Plugin_Continue;
+    // 两个都配置时按客户端下载设置分流
+    if (client < 1 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client) || !g_bClientDLQueried[client])
+    {
+        // 未查询到默认播 BF（假设可下载）
+        EmitSoundToClient(client, sound, client, SNDCHAN_AUTO,
+            SNDLEVEL_NORMAL, SND_NOFLAGS, fVol);
+        return;
+    }
+
+    if (g_bClientCanDownload[client])
+        EmitSoundToClient(client, sound, client, SNDCHAN_AUTO,
+            SNDLEVEL_NORMAL, SND_NOFLAGS, fVol);
+    else
+        EmitSoundToClient(client, fallback, client, SNDCHAN_AUTO,
+            SNDLEVEL_NORMAL, SND_NOFLAGS, fVol);
 }
 
 // ============================================================================
