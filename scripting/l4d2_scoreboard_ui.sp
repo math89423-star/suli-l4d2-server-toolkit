@@ -20,7 +20,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.3.4"
+#define PLUGIN_VERSION      "1.3.5"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -64,6 +64,11 @@ public void OnPluginStart()
 
     g_cvEnable    = CreateConVar("sui_enable", "1", "常驻得分榜总开关 [0=关|1=开]", _, true, 0.0, true, 1.0);
     g_cvTop       = CreateConVar("sui_top", "5", "显示前 N 名 [1-5]（标题+表头+5行）", _, true, 1.0, true, 5.0);
+    g_cvTop.SetBounds(ConVarBound_Upper, true, 5.0);
+    g_cvTop.SetBounds(ConVarBound_Lower, true, 1.0);
+    // v1.3.2 旧 cvar 上限 3 残留, 热重载需强制扩到 5
+    if (g_cvTop.IntValue > 5) g_cvTop.SetInt(5);
+    else if (g_cvTop.IntValue < 1) g_cvTop.SetInt(1);
     g_cvInterval  = CreateConVar("sui_interval", "1.0", "刷新间隔秒（修改需重载插件）", _, true, 0.5, true, 10.0);
     g_cvNameLen   = CreateConVar("sui_name_len", "10", "玩家名最大字节数（UTF-8 安全截断）", _, true, 4.0, true, 24.0);
 
