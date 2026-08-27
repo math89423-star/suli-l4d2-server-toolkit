@@ -13,8 +13,8 @@ stock bool Wave_IsStaging() { return false; }
 public Plugin myinfo = {
     name = "Bot AI BT - Survivor",
     author = "Muse Spark",
-    description = "Survivor bot AI via Behavior Tree (follow/scout/door/scavenge/rescue/combat + acid/mounted gun, rescue 4-branch + heal + dodge + flow + formation, priority fix 1.7.5)",
-    version = "1.7.5",
+    description = "Survivor bot AI via Behavior Tree (follow/scout/door/scavenge/rescue/combat + acid/mounted gun, rescue 4-branch + heal + dodge + flow + formation, priority fix 1.7.6)",
+    version = "1.7.6",
     url = ""
 };
 
@@ -956,6 +956,12 @@ BT_Status BotAct_PickupWeapon(int client) {
 BT_Status BotAct_ShootSI(int client) {
     int target = BB_GetInt(client, "combat_target", -1);
     if (target<=0 || !IsClientInGame(target) || !IsPlayerAlive(target)) return BT_FAILURE;
+    // 对空开火根因：粘滞期内 LOS 已断仍按旧 target 射
+    float myEye[3], tEye[3];
+    GetClientEyePosition(client, myEye);
+    GetClientEyePosition(target, tEye);
+    TR_TraceRayFilter(myEye, tEye, MASK_SOLID, RayType_EndPoint, LOS_TraceFilter, client);
+    if (TR_DidHit() && TR_GetEntityIndex() != target) return BT_FAILURE;
     float myPos[3], tPos[3], dir[3], ang[3];
     GetClientAbsOrigin(client, myPos);
     GetClientAbsOrigin(target, tPos);
