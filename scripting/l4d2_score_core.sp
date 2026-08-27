@@ -2314,10 +2314,11 @@ public void OnDownloadFilterQuery(QueryCookie cookie, int client, ConVarQueryRes
         return;
     }
     // cl_downloadfilter: "all"=全部, "none"=全关, "nosounds"=不下声音, "mapsonly"=只下地图
-    if (StrEqual(cvarValue, "none", false) || StrEqual(cvarValue, "nosounds", false))
-        g_bClientCanDownload[client] = false;
-    else
+    // 2024 年后 cl_allowdownload 已废弃，仅此 cvar 生效；只有 "all" 会下载声音
+    if (StrEqual(cvarValue, "all", false))
         g_bClientCanDownload[client] = true;
+    else
+        g_bClientCanDownload[client] = false;
 }
 
 // ============================================================================
