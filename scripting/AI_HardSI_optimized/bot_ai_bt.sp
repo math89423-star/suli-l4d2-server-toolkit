@@ -360,6 +360,15 @@ BT_Status BotCond_HordeNearby(int client) {
     return ok ? BT_SUCCESS : BT_FAILURE;
 }
 BT_Status BotCond_InAcid(int client) {
+    // Top1: 救一半不让酸抢占 — 近距扶人时酸让步
+    int resq = BB_GetInt(client, "rescue_target", -1);
+    if (resq > 0 && IsClientInGame(resq) && GetEntProp(resq, Prop_Send, "m_isIncapacitated")) {
+        float myPos[3], rPos[3]; GetClientAbsOrigin(client, myPos); GetClientAbsOrigin(resq, rPos);
+        if (GetVectorDistance(myPos, rPos) < 120.0) {
+            BB_SetInt(client, "_inacid_cached", 0); BB_SetFloat(client, "_inacid_last", GetGameTime());
+            return BT_FAILURE;
+        }
+    }
     // P0-3: 0.5s 节流 — 3 类全表扫 per-tick 压帧
     float nowAcid = GetGameTime();
     float lastAcid = BB_GetFloat(client, "_inacid_last", 0.0);
@@ -563,6 +572,9 @@ BT_Status BotCond_IsTankFight(int client) {
 BT_Status BotAct_RescueTeammate(int client) {
     int target = BB_GetInt(client, "rescue_target", -1);
     if (target<=0 || !IsClientInGame(target) || !IsPlayerAlive(target)) return BT_FAILURE;
+    // Top2: 途中 SI 盲区 — 远距救援遇 SI 切战斗，近距顶打
+    float myPosChk[3], tPosChk[3]; GetClientAbsOrigin(client, myPosChk); GetClientAbsOrigin(target, tPosChk);
+    if (GetVectorDistance(myPosChk, tPosChk) > 150.0 && FindVisibleSI(client, 400.0) > 0) return BT_FAILURE;
     bool isPinned = IsPinned(target);
     bool isIncapped = GetEntProp(target, Prop_Send, "m_isIncapacitated") != 0;
     float myPos[3], tPos[3], dir[3], ang[3];
