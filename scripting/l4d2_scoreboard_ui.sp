@@ -20,7 +20,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.3.5"
+#define PLUGIN_VERSION      "1.3.6"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -71,6 +71,7 @@ public void OnPluginStart()
     else if (g_cvTop.IntValue < 1) g_cvTop.SetInt(1);
     g_cvInterval  = CreateConVar("sui_interval", "1.0", "刷新间隔秒（修改需重载插件）", _, true, 0.5, true, 10.0);
     g_cvNameLen   = CreateConVar("sui_name_len", "10", "玩家名最大字节数（UTF-8 安全截断）", _, true, 4.0, true, 24.0);
+    RegConsoleCmd("sm_boarddebug", Cmd_BoardDebug, "Dump raw board values (blacked check)");
 
     AutoExecConfig(true, "l4d2_scoreboard_ui");
 }
@@ -330,6 +331,26 @@ void TruncateByDisplayWidth(char[] s, int maxWidth)
         w += cw;
     }
     s[pos] = '\0';
+}
+public Action Cmd_BoardDebug(int client, int args)
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (!IsClientInGame(i) || GetClientTeam(i) != 2) continue;
+        int sc = -1, si = -1, kill = -1, ff = -1, blk = -1;
+        if (GetFeatureStatus(FeatureType_Native, "SH_GetRoundScore") == FeatureStatus_Available) sc = SH_GetRoundScore(i);
+        if (GetFeatureStatus(FeatureType_Native, "SH_GetSIKills") == FeatureStatus_Available) si = SH_GetSIKills(i);
+        if (GetFeatureStatus(FeatureType_Native, "SH_GetCommonKills") == FeatureStatus_Available) kill = SH_GetCommonKills(i);
+        if (GetFeatureStatus(FeatureType_Native, "SH_GetFFDamage") == FeatureStatus_Available) ff = SH_GetFFDamage(i);
+        if (GetFeatureStatus(FeatureType_Native, "SH_GetBlacked") == FeatureStatus_Available) blk = SH_GetBlacked(i);
+        char name[32]; GetClientName(i, name, sizeof(name));
+        if (client > 0 && IsClientInGame(client))
+            PrintToChat(client, "[DBG] %s: 分%d 特%d 杀%d 友伤%d 被黑%d (blk %s)", name, sc, si, kill, ff, blk, blk==-1?"缺":"有");
+        PrintToServer("[DBG] %N: score %d SI %d kill %d FF %d blacked %d", i, sc, si, kill, ff, blk);
+    }
+    if (client == 0) PrintToServer("[DBG] dump done (see server log)");
+    else ReplyToCommand(client, "[DBG] dump done (see chat+server log)");
+    return Plugin_Handled;
 }
 void SanitizeName(char[] name, int maxBytes)
 {
