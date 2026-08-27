@@ -2697,14 +2697,13 @@ void TMR_SliceFrame(any data) {
 				dir = g_bBatchFind ? SPAWN_IN_FRONT_OF_SURVIVORS
 					: (g_bRandomDirection ? SPAWN_NO_PREFERENCE : SPAWN_LARGE_VOLUME);
 			} else if (g_bRandomDirection) {
-				// 4 方向轮换：前/后/上/随机，每只不同
 				static const int dirCycle[4] = {
 					SPAWN_NO_PREFERENCE,
 					SPAWN_IN_FRONT_OF_SURVIVORS,
 					SPAWN_BEHIND_SURVIVORS,
 					SPAWN_ABOVE_SURVIVORS
 				};
-				dir = dirCycle[i & 3];
+				dir = dirCycle[GetRandomInt(0, 3)];
 			} else {
 				dir = SPAWN_LARGE_VOLUME;
 			}
