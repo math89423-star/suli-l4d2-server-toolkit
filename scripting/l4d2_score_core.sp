@@ -824,7 +824,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.14.2"	// v1.14.2: 被黑=被队友打掉的血量(FFTaken)
+#define PLUGIN_VERSION "1.14.3"	// v1.14.3: B 团灭也清榜(同源同清)
 
 // ============================================================================
 // ConVar handles
@@ -2191,23 +2191,36 @@ public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 }
 
 // v1.7.30: 团灭重开判定——round_start 时若没有 OnMapStart（同图 restart）
-// v1.14.2 团灭不回退：保留当前可用积分，有多少分就是多少分
+// v1.14.2 团灭不回退钱包；v1.14.3 B 方案：排行榜同源同清零（团灭也清）
 public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
     if (!g_bFreshMapStart)
     {
-        // 不再 RestoreScoreState()，保留当前钱包/总分，仅重置复活次数并同步存档
         for (int i = 1; i <= MaxClients; i++)
         {
-            if (IsClientInGame(i) && GetClientTeam(i) == 2)
-            {
-                g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
-                KillRespawnTimer(i);
-            }
+            g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
+            KillRespawnTimer(i);
+            // B: 排行榜本图累计清零（与换图同口径，聊天/常驻同源）
+            g_iTotalScore[i] = 0;
+            g_iSIKills[i] = 0;
+            g_iCommonKills[i] = 0;
+            g_iDeaths[i] = 0;
+            g_iFFDamage[i] = 0;
+            g_iFFTaken[i] = 0;
+            g_iBlacked[i] = 0;
+            g_iKillStreak[i] = 0;
+            g_iCommonStreak[i] = 0;
+            g_iStreakScore[i] = 0;
+            g_iRescueStreak[i] = 0;
+            g_fLastStreakKillTime[i] = 0.0;
         }
+        // 清全服伤害分网格 (防跨 wipe 串台)
+        for (int i = 0; i <= MaxClients; i++)
+            for (int j = 0; j < 2048; j++)
+                g_iDmgPtsKiller[i][j] = 0;
         ScoreSave_All();
-        PrintToChatAll("\x04[得分榜]\x01 团灭重开：积分已保留");
-        LogMessage("[Score] Wipe restart: wallet kept (no rollback), revives reset");
+        PrintToChatAll("\x04[得分榜]\x01 团灭重开：排行榜已重置");
+        LogMessage("[Score] Wipe restart: board reset (B), wallet kept, revives reset");
     }
     g_bFreshMapStart = false;
     return Plugin_Continue;
