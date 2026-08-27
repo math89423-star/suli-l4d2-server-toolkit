@@ -824,7 +824,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.14.4"	// v1.14.4: B 调试日志
+#define PLUGIN_VERSION "1.14.5"	// v1.14.4: B 调试日志
 
 // ============================================================================
 // ConVar handles
@@ -2191,17 +2191,24 @@ public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 }
 
 // v1.7.30: 团灭重开判定——round_start 时若没有 OnMapStart（同图 restart）
-// v1.14.2 团灭不回退钱包；v1.14.3 B 方案：排行榜同源同清零（团灭也清）
+// v1.14.2 团灭不回退钱包；v1.14.3 B 方案：排行榜同源同清零（团灭也清）；v1.14.5 投票重开也清
 public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
-    if (!g_bFreshMapStart)
+    bool isWipe = !g_bFreshMapStart;
+    // 投票重开可能走 OnMapStart 刷新 g_bFreshMapStart=true 但仍需清榜 (非首局且榜非空)
+    if (!isWipe)
     {
-        LogMessage("[Score] Wipe restart detected: clearing board (B)");
+        bool hasScore = false;
+        for (int i = 1; i <= MaxClients; i++) if (IsClientInGame(i) && g_iTotalScore[i] != 0) { hasScore = true; break; }
+        if (hasScore && GetGameTime() > 30.0) isWipe = true;
+    }
+    if (isWipe)
+    {
+        LogMessage("[Score] Wipe/Vote restart detected: clearing board (B) g_bFreshMapStart=%d", g_bFreshMapStart);
         for (int i = 1; i <= MaxClients; i++)
         {
             g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
             KillRespawnTimer(i);
-            // B: 排行榜本图累计清零（与换图同口径，聊天/常驻同源）
             g_iTotalScore[i] = 0;
             g_iSIKills[i] = 0;
             g_iCommonKills[i] = 0;
@@ -2215,20 +2222,18 @@ public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcas
             g_iRescueStreak[i] = 0;
             g_fLastStreakKillTime[i] = 0.0;
         }
-        // 清全服伤害分网格 (防跨 wipe 串台)
         for (int i = 0; i <= MaxClients; i++)
             for (int j = 0; j < 2048; j++)
                 g_iDmgPtsKiller[i][j] = 0;
         ScoreSave_All();
-        PrintToChatAll("\x04[得分榜]\x01 团灭重开：排行榜已重置");
-        LogMessage("[Score] Wipe restart: board reset (B), wallet kept, revives reset, scores now 0");
-        // 调试: 打当前榜
+        PrintToChatAll("\x04[得分榜]\x01 重开：排行榜已重置");
+        LogMessage("[Score] Restart: board reset (B), wallet kept");
         for (int i = 1; i <= MaxClients; i++) if (IsClientInGame(i) && GetClientTeam(i)==2)
-            LogMessage("[Score][WipeDBG] %N score %d SI %d", i, g_iTotalScore[i], g_iSIKills[i]);
+            LogMessage("[Score][WipeDBG] %N score %d", i, g_iTotalScore[i]);
     }
     else
     {
-        LogMessage("[Score] RoundStart fresh map, no wipe clear (g_bFreshMapStart=true)");
+        LogMessage("[Score] RoundStart fresh map, no wipe clear");
     }
     g_bFreshMapStart = false;
     return Plugin_Continue;
