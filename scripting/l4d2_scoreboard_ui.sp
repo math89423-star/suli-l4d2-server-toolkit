@@ -20,7 +20,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.3.7"
+#define PLUGIN_VERSION      "1.3.8"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -233,17 +233,17 @@ int BuildLeaderboard(char lines[7][128])
 
     // 标题 (去排序提示)
     Format(lines[0], 128, "[得分榜 TOP%d] 共%d人", top, count);
-    // 表头: 显示宽度对齐, 列宽按用户定: 积分6 特感3(表头4需容纳"特感"故取4) 击杀4 友伤5 被黑5, 玩家10
+    // 表头: 左对齐, 列间距拉宽到2空格, 保证数字列不串
     {
         char hRank[16], hName[32], hScore[16], hSI[16], hKill[16], hFF[16], hBlk[16];
         PadRight(hRank, sizeof(hRank), "#", 3);
         PadRight(hName, sizeof(hName), "玩家", 10);
-        PadLeft(hScore, sizeof(hScore), "积分", 6);
-        PadLeft(hSI, sizeof(hSI), "特感", 4);
-        PadLeft(hKill, sizeof(hKill), "击杀", 4);
-        PadLeft(hFF, sizeof(hFF), "友伤", 5);
-        PadLeft(hBlk, sizeof(hBlk), "被黑", 5);
-        Format(lines[1], 128, "%s %s %s %s %s %s %s", hRank, hName, hScore, hSI, hKill, hFF, hBlk);
+        PadRight(hScore, sizeof(hScore), "积分", 6);
+        PadRight(hSI, sizeof(hSI), "特感", 4);
+        PadRight(hKill, sizeof(hKill), "击杀", 4);
+        PadRight(hFF, sizeof(hFF), "友伤", 5);
+        PadRight(hBlk, sizeof(hBlk), "被黑", 5);
+        Format(lines[1], 128, "%s  %s  %s  %s  %s  %s  %s", hRank, hName, hScore, hSI, hKill, hFF, hBlk);
     }
 
     char name[32];
@@ -274,12 +274,12 @@ int BuildLeaderboard(char lines[7][128])
         Format(killStr, sizeof(killStr), "%d", kill);
         Format(ffStr, sizeof(ffStr), "%d", ff);
         Format(blkStr, sizeof(blkStr), "%d", blacked);
-        PadLeft(scorePad, sizeof(scorePad), scoreStr, 6);
-        PadLeft(siPad, sizeof(siPad), siStr, 4);
-        PadLeft(killPad, sizeof(killPad), killStr, 4);
-        PadLeft(ffPad, sizeof(ffPad), ffStr, 5);
-        PadLeft(blkPad, sizeof(blkPad), blkStr, 5);
-        Format(lines[2+k], 128, "%s %s %s %s %s %s %s", rankPad, namePad, scorePad, siPad, killPad, ffPad, blkPad);
+        PadRight(scorePad, sizeof(scorePad), scoreStr, 6);
+        PadRight(siPad, sizeof(siPad), siStr, 4);
+        PadRight(killPad, sizeof(killPad), killStr, 4);
+        PadRight(ffPad, sizeof(ffPad), ffStr, 5);
+        PadRight(blkPad, sizeof(blkPad), blkStr, 5);
+        Format(lines[2+k], 128, "%s  %s  %s  %s  %s  %s  %s", rankPad, namePad, scorePad, siPad, killPad, ffPad, blkPad);
     }
     return 2 + top;
 }
