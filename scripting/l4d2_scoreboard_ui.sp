@@ -20,7 +20,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.3.0"
+#define PLUGIN_VERSION      "1.3.1"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -74,12 +74,12 @@ public void OnMapStart()
 {
     RemoveAllHUD();
     EnableHUD();
-    // 5 行表: 标题 0.02, 表头 0.05, 数据 0.08/0.11/0.14, 宽 0.55 放 5 列
-    HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.55, 0.03);
-    HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.55, 0.03);
-    HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.55, 0.03);
-    HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.55, 0.03);
-    HUDPlace(HUD_RIGHT_TOP,0.02, 0.14, 0.55, 0.03);
+    // 5 行表: 标题 0.02, 表头 0.05, 数据 0.08/0.11/0.14, 宽 0.40 紧贴内容 (图3 0.55 太宽拦中屏)
+    HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.40, 0.025);
+    HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.40, 0.025);
+    HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.40, 0.025);
+    HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.40, 0.025);
+    HUDPlace(HUD_RIGHT_TOP,0.02, 0.14, 0.40, 0.025);
     g_bHudReady = true;
 
     if (g_hTimer == null)
@@ -110,18 +110,18 @@ public Action Timer_Refresh(Handle timer)
     {
         RemoveAllHUD();
         EnableHUD();
-        HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.55, 0.03);
-        HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.55, 0.03);
-        HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.55, 0.03);
-        HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.55, 0.03);
-        HUDPlace(HUD_RIGHT_TOP,0.02, 0.14, 0.55, 0.03);
+        HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.40, 0.025);
+        HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.40, 0.025);
+        HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.40, 0.025);
+        HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.40, 0.025);
+        HUDPlace(HUD_RIGHT_TOP,0.02, 0.14, 0.40, 0.025);
         g_bHudReady = true;
     }
-    HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.55, 0.03);
-    HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.55, 0.03);
-    HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.55, 0.03);
-    HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.55, 0.03);
-    HUDPlace(HUD_RIGHT_TOP,0.02, 0.14, 0.55, 0.03);
+    HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.40, 0.025);
+    HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.40, 0.025);
+    HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.40, 0.025);
+    HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.40, 0.025);
+    HUDPlace(HUD_RIGHT_TOP,0.02, 0.14, 0.40, 0.025);
     for (int s = HUD_SCORE_TITLE; s <= HUD_SCORE_4; s++) RemoveHUD(s);
     // 旧 LEFT/MID 以外残留也清 (5槽外)
     RemoveHUD(HUD_RIGHT_BOT);
@@ -138,7 +138,7 @@ public Action Timer_Refresh(Handle timer)
 
     if (lineCount == 1 && (StrContains(lines[0], "未加载") != -1 || StrContains(lines[0], "暂无数据") != -1))
     {
-        int flags = HUD_FLAG_TEXT|HUD_FLAG_ALIGN_LEFT; // 带底框, 表格更像 Excel
+        int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT; // 无底框 (用户定)
         HUDSetLayout(HUD_LEFT_TOP, flags, lines[0]);
         RemoveHUD(HUD_LEFT_BOT);
         RemoveHUD(HUD_MID_TOP);
@@ -147,7 +147,7 @@ public Action Timer_Refresh(Handle timer)
         return Plugin_Continue;
     }
 
-    int flags = HUD_FLAG_TEXT|HUD_FLAG_ALIGN_LEFT; // 有底框, 阴天也清晰
+    int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT; // 无底框
     int slots[5] = {HUD_LEFT_TOP, HUD_LEFT_BOT, HUD_MID_TOP, HUD_MID_BOT, HUD_RIGHT_TOP};
     for (int i = 0; i < 5; i++)
     {
