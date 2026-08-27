@@ -6,9 +6,9 @@
  *   不再依赖 Marttt l4d2_scripted_hud 中转 (4 cvar 喂食已废弃)。
  *   社区 100% 常驻榜都用此法 (LinLinLin t=340601 / Gold Fish t=352495)。
  *
- * 槽位: HUD_SCORE_TITLE(10)=标题, HUD_SCORE_1(11)=#1, _2(12)=#2, _3(13)=#3
- *   避开 0-6 预定义区, 纯文本 127 字符/槽, NOBG 左对齐。
- *   位置 0.02,0.02 起纵向 0.04 步进, 与 Valve EMS/Appendix:HUD 一致。
+ * 槽位: HUD_LEFT_TOP(0)=标题, LEFT_BOT(1)=#1, MID_TOP(2)=#2, MID_BOT(3)=#3
+ *   用通用左侧槽 (非 SCORE 专用 10-13, SCORE 槽受计分板布局影响 y 会漂), 纯文本 127 字符/槽, NOBG 左对齐。
+ *   位置 0.02,0.02 起纵向 0.03 步进, 紧凑贴左上 (图1实测 0.04 步进仍散到中屏, 改 0.03 并每帧重申 Place)。
  *
  * 数据源: l4d2_score_core SH_GetRoundScore/SIKills/CommonKills 只读 native
  *   三级排序 积分>特感>击杀 同 !rank 口径, 可选绑定 score_core 未加载时空转。
@@ -21,7 +21,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.2.0"
+#define PLUGIN_VERSION      "1.2.1"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -69,12 +69,12 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
-    // EMS 启用 + 槽位定位 (0.0-1.0 屏占比, 左上 0.02,0.02 起)
+    // EMS 启用 + 槽位定位 (左上四槽, 紧凑 0.03 步进, 用 LEFT/MID 通用槽而非 SCORE 专用槽——SCORE 槽受计分板布局管理器影响 y 会漂到中屏)
     EnableHUD();
-    HUDPlace(HUD_SCORE_TITLE, 0.02, 0.02, 0.30, 0.03);
-    HUDPlace(HUD_SCORE_1,     0.02, 0.06, 0.30, 0.03);
-    HUDPlace(HUD_SCORE_2,     0.02, 0.10, 0.30, 0.03);
-    HUDPlace(HUD_SCORE_3,     0.02, 0.14, 0.30, 0.03);
+    HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.30, 0.03);
+    HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.30, 0.03);
+    HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.30, 0.03);
+    HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.30, 0.03);
     g_bHudReady = true;
 
     // late load / 热重载后 timer 需重建 (OnConfigsExecuted 不一定再调)
@@ -107,12 +107,17 @@ public Action Timer_Refresh(Handle timer)
     if (!g_bHudReady)
     {
         EnableHUD();
-        HUDPlace(HUD_SCORE_TITLE, 0.02, 0.02, 0.30, 0.03);
-        HUDPlace(HUD_SCORE_1,     0.02, 0.06, 0.30, 0.03);
-        HUDPlace(HUD_SCORE_2,     0.02, 0.10, 0.30, 0.03);
-        HUDPlace(HUD_SCORE_3,     0.02, 0.14, 0.30, 0.03);
+        HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.30, 0.03);
+        HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.30, 0.03);
+        HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.30, 0.03);
+        HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.30, 0.03);
         g_bHudReady = true;
     }
+    // 每轮重申 Place (社区证实: HUDSetLayout 后位置可能被重置, 需每帧同设)
+    HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.30, 0.03);
+    HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.30, 0.03);
+    HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.30, 0.03);
+    HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.30, 0.03);
 
     char lines[4][96];
     int lineCount = BuildLeaderboard(lines);
@@ -127,17 +132,18 @@ public Action Timer_Refresh(Handle timer)
     if (lineCount == 1 && (StrContains(lines[0], "未加载") != -1 || StrContains(lines[0], "暂无数据") != -1))
     {
         int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT;
-        HUDSetLayout(HUD_SCORE_TITLE, flags, lines[0]);
-        RemoveHUD(HUD_SCORE_1);
-        RemoveHUD(HUD_SCORE_2);
-        RemoveHUD(HUD_SCORE_3);
+        HUDSetLayout(HUD_LEFT_TOP, flags, lines[0]);
+        RemoveHUD(HUD_LEFT_BOT);
+        RemoveHUD(HUD_MID_TOP);
+        RemoveHUD(HUD_MID_BOT);
         return Plugin_Continue;
     }
 
     int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT;
+    int slots[4] = {HUD_LEFT_TOP, HUD_LEFT_BOT, HUD_MID_TOP, HUD_MID_BOT};
     for (int i = 0; i < 4; i++)
     {
-        int slot = HUD_SCORE_TITLE + i;
+        int slot = slots[i];
         if (i < lineCount)
             HUDSetLayout(slot, flags, lines[i]);
         else
