@@ -15,7 +15,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.4.3"
+#define PLUGIN_VERSION      "1.4.4"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -83,15 +83,15 @@ public void OnMapStart()
 {
     RemoveAllHUD();
     EnableHUD();
-    // 再缩: Name 0.09->0.05, 总宽 0.375->0.335
-    HUDPlace(COL_TITLE, 0.02, 0.005, 0.34, 0.020);
+    // 再收: Name 0.05->0.04, 总宽 0.335->0.325, 玩家-积分再贴 0.01
+    HUDPlace(COL_TITLE, 0.02, 0.005, 0.33, 0.020);
     HUDPlace(COL_RANK,  0.02, 0.030, 0.025, 0.16);
-    HUDPlace(COL_NAME,  0.045,0.030, 0.05, 0.16);
-    HUDPlace(COL_SCORE, 0.095,0.030, 0.06, 0.16);
-    HUDPlace(COL_SI,    0.155,0.030, 0.04, 0.16);
-    HUDPlace(COL_KILL,  0.195,0.030, 0.04, 0.16);
-    HUDPlace(COL_FF,    0.235,0.030, 0.05, 0.16);
-    HUDPlace(COL_BLK,   0.285,0.030, 0.05, 0.16);
+    HUDPlace(COL_NAME,  0.045,0.030, 0.04, 0.16);
+    HUDPlace(COL_SCORE, 0.085,0.030, 0.06, 0.16);
+    HUDPlace(COL_SI,    0.145,0.030, 0.04, 0.16);
+    HUDPlace(COL_KILL,  0.185,0.030, 0.04, 0.16);
+    HUDPlace(COL_FF,    0.225,0.030, 0.05, 0.16);
+    HUDPlace(COL_BLK,   0.275,0.030, 0.05, 0.16);
     g_bHudReady = true;
     if (g_hTimer == null)
         g_hTimer = CreateTimer(g_cvInterval.FloatValue, Timer_Refresh, _, TIMER_REPEAT);
@@ -116,24 +116,24 @@ public Action Timer_Refresh(Handle timer)
     {
         RemoveAllHUD();
         EnableHUD();
-        HUDPlace(COL_TITLE, 0.02, 0.005, 0.34, 0.020);
+        HUDPlace(COL_TITLE, 0.02, 0.005, 0.33, 0.020);
         HUDPlace(COL_RANK,  0.02, 0.030, 0.025, 0.16);
-        HUDPlace(COL_NAME,  0.045,0.030, 0.05, 0.16);
-        HUDPlace(COL_SCORE, 0.095,0.030, 0.06, 0.16);
-        HUDPlace(COL_SI,    0.155,0.030, 0.04, 0.16);
-        HUDPlace(COL_KILL,  0.195,0.030, 0.04, 0.16);
-        HUDPlace(COL_FF,    0.235,0.030, 0.05, 0.16);
-        HUDPlace(COL_BLK,   0.285,0.030, 0.05, 0.16);
+        HUDPlace(COL_NAME,  0.045,0.030, 0.04, 0.16);
+        HUDPlace(COL_SCORE, 0.085,0.030, 0.06, 0.16);
+        HUDPlace(COL_SI,    0.145,0.030, 0.04, 0.16);
+        HUDPlace(COL_KILL,  0.185,0.030, 0.04, 0.16);
+        HUDPlace(COL_FF,    0.225,0.030, 0.05, 0.16);
+        HUDPlace(COL_BLK,   0.275,0.030, 0.05, 0.16);
         g_bHudReady = true;
     }
-    HUDPlace(COL_TITLE, 0.02, 0.005, 0.34, 0.020);
+    HUDPlace(COL_TITLE, 0.02, 0.005, 0.33, 0.020);
     HUDPlace(COL_RANK,  0.02, 0.030, 0.025, 0.16);
-    HUDPlace(COL_NAME,  0.045,0.030, 0.05, 0.16);
-    HUDPlace(COL_SCORE, 0.095,0.030, 0.06, 0.16);
-    HUDPlace(COL_SI,    0.155,0.030, 0.04, 0.16);
-    HUDPlace(COL_KILL,  0.195,0.030, 0.04, 0.16);
-    HUDPlace(COL_FF,    0.235,0.030, 0.05, 0.16);
-    HUDPlace(COL_BLK,   0.285,0.030, 0.05, 0.16);
+    HUDPlace(COL_NAME,  0.045,0.030, 0.04, 0.16);
+    HUDPlace(COL_SCORE, 0.085,0.030, 0.06, 0.16);
+    HUDPlace(COL_SI,    0.145,0.030, 0.04, 0.16);
+    HUDPlace(COL_KILL,  0.185,0.030, 0.04, 0.16);
+    HUDPlace(COL_FF,    0.225,0.030, 0.05, 0.16);
+    HUDPlace(COL_BLK,   0.275,0.030, 0.05, 0.16);
     for (int s = 7; s <= 9; s++) RemoveHUD(s); // 清旧 FAR 残留
     for (int s = HUD_SCORE_1; s <= HUD_SCORE_4; s++) RemoveHUD(s);
 
@@ -215,7 +215,7 @@ int BuildColumns(char[] title, int tlen, char[] cRank, char[] cName, char[] cSco
         int c=clients[k];
         GetClientName(c, name, sizeof(name));
         SanitizeName(name, nameMax);
-        TruncateByDisplayWidth(name, 8);
+        TruncateByDisplayWidth(name, 6);
         char rankStr[8], scoreStr[16], siStr[16], killStr[16], ffStr[16], blkStr[16];
         Format(rankStr,sizeof(rankStr),"#%d",k+1);
         int si=SH_GetSIKills(c), kill=SH_GetCommonKills(c), ff=0, blk=0;
