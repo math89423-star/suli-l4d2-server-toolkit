@@ -3547,20 +3547,37 @@ void PlayClientSound(int client, const char[] sound)
     if (vol <= 0.0)
         return;
 
-    // v1.7.1 FIX: full path (with .mp3) — bare names resolve to .wav only.
-    // v1.7.49: SOUND_FROM_PLAYER → entity=client (spatialized, same as
-    // PlayStreakSound — non-spatialized UI sounds attenuate).
     float fVol = vol >= 1.0 ? 1.0 : vol;
     EmitSoundToClient(client, sound, client, SNDCHAN_AUTO,
         SNDLEVEL_NORMAL, SND_NOFLAGS, fVol);
 
-    // v1.14.0: fallback 音效 — BF 音效需要客户端开启自定义下载才能听到，
-    // 如果没开就静音了。额外播一个原版游戏音作为保底。
+    // v1.14.0: fallback 音效 — 延迟 0.05s 播放。
+    // BF 音效成功 → 铃声被盖住听不到；BF 失效（客户端没下载）→ 铃声兜底。
     char fallback[64];
     g_cvKillSoundFallback.GetString(fallback, sizeof(fallback));
     if (fallback[0] != '\0')
-        EmitSoundToClient(client, fallback, client, SNDCHAN_AUTO,
-            SNDLEVEL_NORMAL, SND_NOFLAGS, fVol);
+    {
+        DataPack dp = new DataPack();
+        dp.WriteCell(client);
+        dp.WriteFloat(fVol);
+        dp.WriteString(fallback);
+        CreateTimer(0.05, Timer_PlayFallbackSound, dp, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
+    }
+}
+
+Action Timer_PlayFallbackSound(Handle timer, DataPack dp)
+{
+    dp.Reset();
+    int client = dp.ReadCell();
+    float vol = dp.ReadFloat();
+    char sound[64];
+    dp.ReadString(sound, sizeof(sound));
+
+    if (client > 0 && client <= MaxClients && IsClientInGame(client))
+        EmitSoundToClient(client, sound, client, SNDCHAN_AUTO,
+            SNDLEVEL_NORMAL, SND_NOFLAGS, vol);
+
+    return Plugin_Continue;
 }
 
 // ============================================================================
