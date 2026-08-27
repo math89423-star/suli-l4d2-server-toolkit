@@ -12,7 +12,7 @@
 #include <sdktools>
 #include <sdkhooks>
 
-#define PLUGIN_VERSION "5.0.0"
+#define PLUGIN_VERSION "5.0.2"
 
 #define FLARE_FUSE_TIME     2.5
 #define FLARE_DESCENT_RATE  40.0   // units per second falling speed
@@ -177,18 +177,31 @@ public int Native_AerialFlareCancel(Handle p, int n) {
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
+    // v5.0.2 对齐信号弹结构: 门序/右键排除/吞键/防抖全部一致
     if (!g_bEnabled || !g_bHasFlare[client]) return Plugin_Continue;
     if (client <= 0 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client)) return Plugin_Continue;
     if (GetClientTeam(client) != 2) return Plugin_Continue;
 
     float now = GetGameTime();
-    if (now - g_fLastFire[client] < FLARE_DEBOUNCE) return Plugin_Continue;
+    // v5.0.1 诊断保留: 有弹在手时每秒采样按键状态
+    static int lastDbg[MAXPLAYERS + 1];
+    if (GetGameTickCount() - lastDbg[client] > 64)
+    {
+        lastDbg[client] = GetGameTickCount();
+        LogMessage("[aerial_flare DBG] c=%d btn=%d atk=%d atk2=%d", client, buttons, (buttons & IN_ATTACK) ? 1 : 0, (buttons & IN_ATTACK2) ? 1 : 0);
+    }
+    // 对齐: 右键(IN_ATTACK2)按住时不开火(瞄准意图)
+    if (buttons & IN_ATTACK2) return Plugin_Continue;
+    if (now - g_fLastFire[client] < 0.4) return Plugin_Continue;
 
     if (buttons & IN_ATTACK)
     {
         g_bHasFlare[client] = false;
         g_fLastFire[client] = now;
         FireAerialFlare(client);
+        // 对齐信号弹: 吞掉开火键, 本次扣扳机只发照明弹不打枪
+        buttons &= ~IN_ATTACK;
+        return Plugin_Changed;
     }
 
     return Plugin_Continue;
