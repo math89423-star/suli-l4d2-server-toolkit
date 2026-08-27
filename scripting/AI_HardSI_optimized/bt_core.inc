@@ -107,7 +107,8 @@ enum BT_ControlFlags {
     BTCTRL_ATTACK  = (1 << 2),   // IN_ATTACK / IN_ATTACK2
     BTCTRL_DUCK    = (1 << 3),   // IN_DUCK
     BTCTRL_JUMP    = (1 << 4),   // IN_JUMP
-    BTCTRL_FULL    = BTCTRL_MOVE | BTCTRL_VIEW | BTCTRL_ATTACK | BTCTRL_DUCK | BTCTRL_JUMP
+    BTCTRL_USE     = (1 << 5),   // IN_USE | IN_SPEED (P0-2 生还者)
+    BTCTRL_FULL    = BTCTRL_MOVE | BTCTRL_VIEW | BTCTRL_ATTACK | BTCTRL_DUCK | BTCTRL_JUMP | BTCTRL_USE
 };
 
 int     g_iBT_ButtonsAdd[MAXPLAYERS + 1];       // buttons to ADD
@@ -457,12 +458,17 @@ stock void BT_ApplyControlFrame(int client, int &buttons) {
         // 只清移动类：导航相关。意图明确 = BT 接管移动（走走停停）。
         // 注意：不包含 IN_SPEED（冲刺键）—— 由 BT Add 表达。
         buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
+        // P0-2: 生还者 IN_SPEED 随 MOVE 一并清理（原 MOVE 不含 SPEED，奶时泄漏跑）
+        if (mask & _:BTCTRL_USE) buttons &= ~IN_SPEED;
     }
     if (mask & _:BTCTRL_DUCK) {
         buttons &= ~IN_DUCK;
     }
     if (mask & _:BTCTRL_JUMP) {
         buttons &= ~IN_JUMP;
+    }
+    if (mask & _:BTCTRL_USE) {
+        buttons &= ~IN_USE;
     }
     BT_ApplyMovement(client, buttons);
 }
@@ -495,6 +501,7 @@ stock int BT_FlagsForButtons(int buttons) {
     if (buttons & (IN_ATTACK | IN_ATTACK2)) flags |= _:BTCTRL_ATTACK;
     if (buttons & IN_DUCK) flags |= _:BTCTRL_DUCK;
     if (buttons & IN_JUMP) flags |= _:BTCTRL_JUMP;
+    if (buttons & (IN_USE | IN_SPEED)) flags |= _:BTCTRL_USE;
     return flags;
 }
 

@@ -13,8 +13,8 @@ stock bool Wave_IsStaging() { return false; }
 public Plugin myinfo = {
     name = "Bot AI BT - Survivor",
     author = "Muse Spark",
-    description = "Survivor bot AI via Behavior Tree (follow/scout/door/scavenge/rescue/combat + acid/mounted gun, rescue 4-branch + heal + dodge + flow + formation, priority fix 1.7.3)",
-    version = "1.7.3",
+    description = "Survivor bot AI via Behavior Tree (follow/scout/door/scavenge/rescue/combat + acid/mounted gun, rescue 4-branch + heal + dodge + flow + formation, priority fix 1.7.4)",
+    version = "1.7.4",
     url = ""
 };
 
@@ -281,7 +281,7 @@ BT_Status BotCond_TeammateNeedsHeal(int client) {
         int hp = GetEntProp(i, Prop_Send, "m_iHealth");
         if (hp < 35 && hp < lowest) {
             float p[3]; GetClientAbsOrigin(i,p);
-            if (GetVectorDistance(pos,p) < 800.0) { lowest=hp; best=i; }
+            if (GetVectorDistance(pos,p) < 270.0) { lowest=hp; best=i; }
         }
     }
     if (best>0) { BB_SetInt(client, "heal_target", best); return BT_SUCCESS; }
@@ -347,43 +347,61 @@ BT_Status BotCond_HasVisibleSI(int client) {
 BT_Status BotCond_HordeNearby(int client) {
     if (g_hCvarGrenadeEnabled==null || !g_hCvarGrenadeEnabled.BoolValue) return BT_FAILURE;
     if (!HasGrenade(client)) return BT_FAILURE;
+    float nowH = GetGameTime();
+    float lastH = BB_GetFloat(client, "_horde_last", 0.0);
+    if (nowH - lastH < 0.5) return BB_GetInt(client, "_horde_cached", 0) ? BT_SUCCESS : BT_FAILURE;
+    BB_SetFloat(client, "_horde_last", nowH);
     float pos[3]; GetClientAbsOrigin(client,pos);
     float mult = g_hCvarGrenadeHordeMult != null ? g_hCvarGrenadeHordeMult.FloatValue : 3.0;
-    int need = RoundToNearest(mult * 5); // 5 survivors * mult
+    int need = RoundToNearest(mult * 5);
     int cnt = CountCommonInRange(pos, 450.0);
-    return cnt >= need ? BT_SUCCESS : BT_FAILURE;
+    bool ok = cnt >= need;
+    BB_SetInt(client, "_horde_cached", ok ? 1 : 0);
+    return ok ? BT_SUCCESS : BT_FAILURE;
 }
 BT_Status BotCond_InAcid(int client) {
+    // P0-3: 0.5s 节流 — 3 类全表扫 per-tick 压帧
+    float nowAcid = GetGameTime();
+    float lastAcid = BB_GetFloat(client, "_inacid_last", 0.0);
+    if (nowAcid - lastAcid < 0.5) {
+        return BB_GetInt(client, "_inacid_cached", 0) ? BT_SUCCESS : BT_FAILURE;
+    }
+    BB_SetFloat(client, "_inacid_last", nowAcid);
+    bool isIn = false;
     float pos[3]; GetClientAbsOrigin(client,pos);
     float acidPos[3];
     int ent=-1;
     while ((ent = FindEntityByClassname(ent, "insect_swarm")) != -1) {
         GetEntPropVector(ent, Prop_Send, "m_vecOrigin", acidPos);
-        if (GetVectorDistance(pos, acidPos) < 150.0) { BB_SetInt(client, "danger_pos_ent", ent); return BT_SUCCESS; }
+        if (GetVectorDistance(pos, acidPos) < 150.0) { BB_SetInt(client, "danger_pos_ent", ent); isIn=true; break; }
     }
-    ent=-1;
-    while ((ent = FindEntityByClassname(ent, "spit_acid")) != -1) {
-        GetEntPropVector(ent, Prop_Send, "m_vecOrigin", acidPos);
-        if (GetVectorDistance(pos, acidPos) < 180.0) return BT_SUCCESS;
-        // 路径预探：前方 300u 路径点若在酸内则提前躲
-        float fwd[3];
-        if (SI_ProbeForwardRouteDir(client, fwd, 300.0)) {
-            float probe[3]; probe[0]=pos[0]+fwd[0]*300; probe[1]=pos[1]+fwd[1]*300; probe[2]=pos[2];
-            if (GetVectorDistance(probe, acidPos) < 200.0) return BT_SUCCESS;
+    if (!isIn) {
+        ent=-1;
+        while ((ent = FindEntityByClassname(ent, "spit_acid")) != -1) {
+            GetEntPropVector(ent, Prop_Send, "m_vecOrigin", acidPos);
+            if (GetVectorDistance(pos, acidPos) < 180.0) { isIn=true; break; }
+            float fwd[3];
+            if (SI_ProbeForwardRouteDir(client, fwd, 300.0)) {
+                float probe[3]; probe[0]=pos[0]+fwd[0]*300; probe[1]=pos[1]+fwd[1]*300; probe[2]=pos[2];
+                if (GetVectorDistance(probe, acidPos) < 200.0) { isIn=true; break; }
+            }
         }
     }
-    float p[3]; GetClientAbsOrigin(client,p);
-    int fire = -1;
-    while ((fire = FindEntityByClassname(fire, "inferno")) != -1) {
-        float fPos[3]; GetEntPropVector(fire, Prop_Send, "m_vecOrigin", fPos);
-        if (GetVectorDistance(p, fPos) < 200.0) return BT_SUCCESS;
-        float fwd[3];
-        if (SI_ProbeForwardRouteDir(client, fwd, 300.0)) {
-            float probe[3]; probe[0]=p[0]+fwd[0]*300; probe[1]=p[1]+fwd[1]*300; probe[2]=p[2];
-            if (GetVectorDistance(probe, fPos) < 220.0) return BT_SUCCESS;
+    if (!isIn) {
+        float p[3]; GetClientAbsOrigin(client,p);
+        int fire = -1;
+        while ((fire = FindEntityByClassname(fire, "inferno")) != -1) {
+            float fPos[3]; GetEntPropVector(fire, Prop_Send, "m_vecOrigin", fPos);
+            if (GetVectorDistance(p, fPos) < 200.0) { isIn=true; break; }
+            float fwd[3];
+            if (SI_ProbeForwardRouteDir(client, fwd, 300.0)) {
+                float probe[3]; probe[0]=p[0]+fwd[0]*300; probe[1]=p[1]+fwd[1]*300; probe[2]=p[2];
+                if (GetVectorDistance(probe, fPos) < 220.0) { isIn=true; break; }
+            }
         }
     }
-    return BT_FAILURE;
+    BB_SetInt(client, "_inacid_cached", isIn ? 1 : 0);
+    return isIn ? BT_SUCCESS : BT_FAILURE;
 }
 BT_Status BotCond_TankRockIncoming(int client) {
     float pos[3]; GetClientAbsOrigin(client,pos);
@@ -555,6 +573,7 @@ BT_Status BotAct_RescueTeammate(int client) {
     GetVectorAngles(dir, ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     if (dist < 80.0) {
+        BT_ClearMoveDirection(client); // P0-2: 扶/救时锁 MOVE 防边走边奶
         if (isIncapped && !isPinned) {
             // 倒地未被控 -> 长按 USE 扶起，禁止推搡（修复不断推搡 bug）
             BT_AddButton(client, IN_USE);
@@ -603,6 +622,7 @@ BT_Status BotAct_DefibTeammate(int client) {
     float dir[3], ang[3]; MakeVectorFromPoints(pos,tPos,dir); GetVectorAngles(dir,ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     if (dist < 100.0) {
+        BT_ClearMoveDirection(client);
         BT_AddButton(client, IN_USE);
         return BT_RUNNING;
     }
@@ -623,6 +643,7 @@ BT_Status BotAct_HealSelf(int client) {
             char cls[32]; GetEdictClassname(slot, cls, sizeof(cls));
             if (StrContains(cls,"pain_pills")!=-1 || StrContains(cls,"adrenaline")!=-1) {
                 // 肾上腺素在拉倒地/被控时更快
+                BT_ClearMoveDirection(client);
                 BT_AddButton(client, IN_USE);
                 return BT_RUNNING;
             }
@@ -630,6 +651,7 @@ BT_Status BotAct_HealSelf(int client) {
     }
     if (HasMedkit(client)) {
         if (FindVisibleSI(client, 400.0) > 0) return BT_FAILURE;
+        BT_ClearMoveDirection(client);
         BT_AddButton(client, IN_USE);
         return BT_RUNNING;
     }
@@ -647,10 +669,7 @@ BT_Status BotAct_HealTeammate(int client) {
         if (StrContains(cls,"pain_pills")!=-1 || StrContains(cls,"adrenaline")!=-1) hasPills=true;
     }
     float pos[3], tPos[3]; GetClientAbsOrigin(client,pos); GetClientAbsOrigin(target,tPos);
-    if (GetVectorDistance(pos,tPos) > 270.0) {
-        // 递药距离 270
-        if (!hasPills) return BT_FAILURE;
-    }
+    // P0-1: 统一寻路阈值 — 270/800 割裂已由条件侧收敛至 270，本处仅留 150 逼近
     if (GetVectorDistance(pos,tPos) > 150.0) {
         float dir[3], ang[3]; MakeVectorFromPoints(pos,tPos,dir); GetVectorAngles(dir,ang);
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
@@ -661,6 +680,7 @@ BT_Status BotAct_HealTeammate(int client) {
     }
     float dir[3], ang[3]; MakeVectorFromPoints(pos,tPos,dir); GetVectorAngles(dir,ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+    BT_ClearMoveDirection(client);
     BT_AddButton(client, IN_USE);
     return BT_RUNNING;
 }
@@ -769,8 +789,8 @@ BT_Status BotAct_DodgeCharger(int client) {
 }
 BT_Status BotAct_Scavenge(int client) {
     int ent = BB_GetInt(client, "scavenge_ent", -1);
-    if (ent<=0 || !IsValidEntity(ent)) return BT_FAILURE;
-    if (GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity")>0) return BT_FAILURE;
+    if (ent<=0 || !IsValidEntity(ent)) { BB_SetFloat(client, "_scavenge_start", 0.0); return BT_FAILURE; }
+    if (GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity")>0) { BB_SetFloat(client, "_scavenge_start", 0.0); return BT_FAILURE; }
     float pos[3], wPos[3]; GetClientAbsOrigin(client,pos); GetEntPropVector(ent, Prop_Send, "m_vecOrigin", wPos);
     // 超时防卡死原地跳：4s 仍够不到则放弃
     float start = BB_GetFloat(client, "_scavenge_start", 0.0);
@@ -781,6 +801,7 @@ BT_Status BotAct_Scavenge(int client) {
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     if (GetVectorDistance(pos,wPos) < 90.0) {
         BB_SetFloat(client, "_scavenge_start", 0.0);
+        BT_ClearMoveDirection(client);
         BT_AddButton(client, IN_USE);
         return BT_RUNNING;
     }
@@ -795,6 +816,7 @@ BT_Status BotAct_UseMountedGun(int client) {
     float pos[3], gPos[3]; GetClientAbsOrigin(client,pos); GetEntPropVector(gun, Prop_Send, "m_vecOrigin", gPos);
     float dist = GetVectorDistance(pos, gPos);
     if (dist < 80.0) {
+        BT_ClearMoveDirection(client);
         BT_AddButton(client, IN_USE);
         // 上机后自动射击由引擎接管，这里保持瞄准最近 SI
         int si = FindVisibleSI(client, 2500.0);
@@ -849,6 +871,7 @@ BT_Status BotAct_OpenDoor(int client) {
     float dir[3], ang[3]; MakeVectorFromPoints(pos,dPos,dir); GetVectorAngles(dir,ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     if (GetVectorDistance(pos,dPos) < 80.0) {
+        BT_ClearMoveDirection(client);
         BT_AddButton(client, IN_USE);
         return BT_RUNNING;
     }
@@ -889,22 +912,25 @@ BT_Status BotAct_TankFormation(int client) {
     for(int i=1;i<=MaxClients;i++) if (IsClientInGame(i) && GetClientTeam(i)==3 && IsPlayerAlive(i) && GetEntProp(i,Prop_Send,"m_zombieClass")==8) { tank=i; break; }
     if (tank<=0) return BT_FAILURE;
     float tPos[3]; GetClientAbsOrigin(tank,tPos);
+    float dist = GetVectorDistance(pos, tPos);
     float away[3]; MakeVectorFromPoints(tPos,pos,away); if (GetVectorLength(away) > 1.0) NormalizeVector(away,away); else { away[0]=1.0; away[1]=0.0; away[2]=0.0; }
-    // 瞄坦克射击，同时用 BACK+侧移后退分散
     float toTank[3], ang[3]; MakeVectorFromPoints(pos,tPos,toTank); GetVectorAngles(toTank, ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     BT_AddButton(client, IN_ATTACK);
-    BT_AddButton(client, IN_BACK);
-    BT_AddButton(client, IN_SPEED);
-    if (client%2==0) BT_AddButton(client, IN_MOVERIGHT); else BT_AddButton(client, IN_MOVELEFT);
-    BT_BeginMovement(client);
-    BT_StuckDetour(client);
+    // P0-6: 近距才散退 (>300 仅瞄准射击，避免远处无谓后退被 Stuck 拐走)
+    if (dist < 300.0) {
+        BT_AddButton(client, IN_BACK);
+        BT_AddButton(client, IN_SPEED);
+        if (client%2==0) BT_AddButton(client, IN_MOVERIGHT); else BT_AddButton(client, IN_MOVELEFT);
+        BT_BeginMovement(client);
+        BT_StuckDetour(client);
+    }
     return BT_RUNNING;
 }
 BT_Status BotAct_PickupWeapon(int client) {
     float pos[3]; GetClientAbsOrigin(client,pos);
     int ent = GetClosestWeaponOnGround(pos);
-    if (ent<=0) return BT_FAILURE;
+    if (ent<=0) { BB_SetFloat(client, "_pickup_start", 0.0); return BT_FAILURE; }
     BB_SetInt(client, "pickup_ent", ent);
     float wPos[3]; GetEntPropVector(ent, Prop_Send, "m_vecOrigin", wPos);
     float start = BB_GetFloat(client, "_pickup_start", 0.0);
@@ -918,6 +944,7 @@ BT_Status BotAct_PickupWeapon(int client) {
     float dist = GetVectorDistance(pos, wPos);
     if (dist < 90.0) {
         BB_SetFloat(client, "_pickup_start", 0.0);
+        BT_ClearMoveDirection(client);
         BT_AddButton(client, IN_USE);
         return BT_RUNNING;
     }
@@ -1034,7 +1061,7 @@ stock int BT_CreateBotTree() {
     int acidSeq = BT_CreateSequence(2, BT_CreateCondition(BotCond_InAcid), BT_CreateAction(BotAct_RetreatFromAcid));
     int rockSeq = BT_CreateSequence(2, BT_CreateCondition(BotCond_TankRockIncoming), BT_CreateAction(BotAct_DodgeRock));
     int chargerSeq = BT_CreateSequence(2, BT_CreateCondition(BotCond_ChargerChargingAtMe), BT_CreateAction(BotAct_DodgeCharger));
-    int survivalSel = BT_CreateSelector(3, acidSeq, rockSeq, chargerSeq);
+    int survivalSel = BT_CreateSelector(3, rockSeq, acidSeq, chargerSeq); // P0-5: rock 致命最高
     int rescuePinnedSeq = BT_CreateSequence(2, BT_CreateCondition(BotCond_TeammatePinnedNearby), BT_CreateAction(BotAct_RescueTeammate));
     int rescueHangingSeq = BT_CreateSequence(2, BT_CreateCondition(BotCond_TeammateHangingNearby), BT_CreateAction(BotAct_RescueTeammate));
     int rescueIncappedSeq = BT_CreateSequence(2, BT_CreateCondition(BotCond_TeammateIncappedNearby), BT_CreateAction(BotAct_RescueTeammate));
@@ -1074,16 +1101,16 @@ stock int BT_CreateBotTree() {
     int chokeSeq = BT_CreateSequence(2, BT_CreateCondition(BotCond_IsInChoke), BT_CreateAction(BotAct_HoldChoke));
     int tankFormSeq = BT_CreateSequence(2, BT_CreateCondition(BotCond_IsTankFight), BT_CreateAction(BotAct_TankFormation));
     int root = BT_Create(BTN_SELECTOR);
-    BT_AddChild(root, BT_CreateSequence(2, BT_CreateCondition(BotCond_IsIncapacitated), BT_CreateAction(ACT_HoldVictim)));
+    // P0-5: 倒地分支与 OnPlayerRunCmd 早退二选一，保留早退，删死代码
     BT_AddChild(root, survivalSel);
     BT_AddChild(root, rescuePinnedSeq);
-    BT_AddChild(root, BT_CreateCooldown(0.8, healSelfBWSeq));
     BT_AddChild(root, rescueHangingSeq);
     BT_AddChild(root, rescueIncappedSeq);
     BT_AddChild(root, rescueDeadSeq);
+    BT_AddChild(root, BT_CreateCooldown(0.8, healSelfBWSeq));
     BT_AddChild(root, BT_CreateCooldown(0.8, healRestSelector));
-    BT_AddChild(root, tankFormSeq);
     BT_AddChild(root, combatSeq);
+    BT_AddChild(root, tankFormSeq);
     BT_AddChild(root, grenadeSeq);
     BT_AddChild(root, chokeSeq);
     BT_AddChild(root, doorSeq);
@@ -1134,10 +1161,10 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
     if (GetEntProp(client, Prop_Send, "m_isIncapacitated") || GetEntProp(client, Prop_Send, "m_isHangingFromLedge")) return Plugin_Continue;
     g_iTickCounter[client]++;
     if (g_iTickCounter[client] < TICK_INTERVAL) {
-        // 非决策帧：保持上次 BT 决策的移动/视角，避免与引擎互抢导致顿挫
-        BT_ApplyControlLite(client, buttons);
+        // P0-5: 对齐 SI v5.23.2 — 非决策帧交还 Valve，仅保留视角保真窗口
+        // 旧 Lite 重放 IN_USE/MOVE 致 33ms 旧意图泄漏 + 梯子卡死
         if (g_bBT_AnglesSet[client]) BT_ApplyAngles(client, angles);
-        return Plugin_Changed;
+        return Plugin_Continue;
     }
     g_iTickCounter[client]=0;
     if (!BT_IsBound(client)) return Plugin_Continue;
