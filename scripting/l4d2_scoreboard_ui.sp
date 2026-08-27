@@ -21,7 +21,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.2.1"
+#define PLUGIN_VERSION      "1.2.2"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -70,6 +70,7 @@ public void OnPluginStart()
 public void OnMapStart()
 {
     // EMS 启用 + 槽位定位 (左上四槽, 紧凑 0.03 步进, 用 LEFT/MID 通用槽而非 SCORE 专用槽——SCORE 槽受计分板布局管理器影响 y 会漂到中屏)
+    RemoveAllHUD(); // 清旧 SCORE 10-14 残留 (v1.2.0 切槽后双榜)
     EnableHUD();
     HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.30, 0.03);
     HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.30, 0.03);
@@ -106,6 +107,7 @@ public Action Timer_Refresh(Handle timer)
     // late load 补一次 EnableHUD+Place (OnMapStart 已过时)
     if (!g_bHudReady)
     {
+        RemoveAllHUD(); // 热重载清旧 SCORE 残留
         EnableHUD();
         HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.30, 0.03);
         HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.30, 0.03);
@@ -118,6 +120,8 @@ public Action Timer_Refresh(Handle timer)
     HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.30, 0.03);
     HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.30, 0.03);
     HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.30, 0.03);
+    // 旧 SCORE 槽 10-14 若残留则清掉 (双榜根因)
+    for (int s = HUD_SCORE_TITLE; s <= HUD_SCORE_4; s++) RemoveHUD(s);
 
     char lines[4][96];
     int lineCount = BuildLeaderboard(lines);
