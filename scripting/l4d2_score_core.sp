@@ -824,7 +824,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.14.0"	// v1.14.0: 新增击杀骷髅头标记（env_instructor_hint icon_skull，仅击杀者可见）
+#define PLUGIN_VERSION "1.14.1"	// v1.14.1: 团灭不回退可用积分，有多少分就是多少分
 
 // ============================================================================
 // ConVar handles
@@ -1212,7 +1212,7 @@ public void OnPluginStart()
         "Kill feedback (banner + kill card, one center message) display duration in seconds before the center clear.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
 
     // v1.14.0: 击杀 fallback 音效（BF 音效客户端不可用时播放原版音）
-    g_cvKillSoundFallback = CreateConVar("score_core_kill_sound_fallback", "ui/skillbadge01.wav",
+    g_cvKillSoundFallback = CreateConVar("score_core_kill_sound_fallback", "level/bell_normal.wav",
         "Fallback kill sound when BF sound is unavailable (original game sound, works without client downloads). Empty = off.", FCVAR_NOTIFY);
 
     // v1.9.3 (user): 过关奖励 — 每小关进安全门结束每人 +N 积分
@@ -2169,26 +2169,24 @@ public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
     return Plugin_Continue;
 }
 
-// v1.7.30: 团灭重开判定——round_start 时若没有 OnMapStart（同图 restart），
-// 回滚本关积分到地图开局快照（用户："这个map团灭了，要回到map初始时积分状态"）
-// v1.13.2: 回滚后给每人补偿 2000 积分——避免消耗大量积分失败后血本无归，补偿鼓励继续尝试
+// v1.7.30: 团灭重开判定——round_start 时若没有 OnMapStart（同图 restart）
+// v1.14.2 团灭不回退：保留当前可用积分，有多少分就是多少分
 public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
     if (!g_bFreshMapStart)
     {
-        RestoreScoreState();
-        // v1.13.2: 团灭补偿——回滚后给每个在场玩家 +2000 积分
-        int compensation = 2000;
+        // 不再 RestoreScoreState()，保留当前钱包/总分，仅重置复活次数并同步存档
         for (int i = 1; i <= MaxClients; i++)
         {
             if (IsClientInGame(i) && GetClientTeam(i) == 2)
-                AddWallet(i, compensation);
+            {
+                g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
+                KillRespawnTimer(i);
+            }
         }
-        // v1.10.0: 回滚当刻立即同步存档——原 v1.8.2"同图重连 20s 严格窗口"防的
-        // 正是"团灭前离场 → 重开后来回恢复回滚前的钱"；窗口废除后必须在此同步，
-        // 否则离场玩家重连时从旧存档恢复回滚前的钱包（60s 周期保存前的空窗）。
         ScoreSave_All();
-        PrintToChatAll("\x04[得分榜]\x01 团灭重开：本关积分已回滚到开局状态，每人补偿 \x05%d\x01 积分", compensation);
+        PrintToChatAll("\x04[得分榜]\x01 团灭重开：积分已保留");
+        LogMessage("[Score] Wipe restart: wallet kept (no rollback), revives reset");
     }
     g_bFreshMapStart = false;
     return Plugin_Continue;
