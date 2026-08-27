@@ -395,7 +395,8 @@ stock void BT_AbortNode(int client, int nodeId) {
 
     // v5.33: abort 时清除 ranged ability 的 TRYING 状态 + locked target
     // 防止子树被抢占后旧 try_at/lock_target 残留，下次进入时继续消费过期窗口
-    if (g_hBTBlackboard[client] != null) {
+    // P2: 仅 infected 清 SI 键，生还者 bot 不污染 StringMap
+    if (g_hBTBlackboard[client] != null && IsClientInGame(client) && GetClientTeam(client) == 3) {
         SI_AbilitySetState(client, "_smoker", ABILITY_IDLE);
         SI_AttackClearTarget(client, "_smoker");
         // v5.34 FIX: 清除 _smoker_try_at —— 原版只清 state+lock_target，

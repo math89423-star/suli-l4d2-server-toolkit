@@ -301,7 +301,7 @@ stock int BT_CreateBoomerTree() {
     int semiHugApproach = BT_CreateSequence(4,
         BT_CreateCondition(CND_IsSemiOpen),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateInverter(BT_CreateIsInRange(300.0)),
+        BT_CreateIsNotTargetInRange(300.0),
         BT_CreateAction(ACT_HugWall)
     );
     // Semi-open: vomit from cover when in range

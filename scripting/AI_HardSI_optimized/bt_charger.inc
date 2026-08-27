@@ -66,16 +66,15 @@ BT_Status CND_ChargerSpawnProtect(int client) {
         BB_SetFloat(client, "_charger_ghost_since", 0.0);
     }
 
-    if (unghostAt > 0.0) {
-        return (GetGameTime() - unghostAt < 2.0) ? BT_SUCCESS : BT_FAILURE;
-    }
-
-    // v4.0.2 freshSpawn 兜底（须在边沿检测之后，避免 long-ghost 场景双重保护）
+    // P2: 合并双窗口取最晚者，避免 2+2 叠成 4s 浪费协同窗
+    float protectUntil = -1.0;
+    if (unghostAt > 0.0) protectUntil = unghostAt + 2.0;
     float spawnAt = BB_GetFloat(client, "_charger_spawn_at", 0.0);
-    if (spawnAt > 0.0 && GetGameTime() - spawnAt < 2.0) {
-        return BT_SUCCESS;
+    if (spawnAt > 0.0) {
+        float spawnUntil = spawnAt + 2.0;
+        if (spawnUntil > protectUntil) protectUntil = spawnUntil;
     }
-
+    if (protectUntil > 0.0 && GetGameTime() < protectUntil) return BT_SUCCESS;
     return BT_FAILURE;
 }
 

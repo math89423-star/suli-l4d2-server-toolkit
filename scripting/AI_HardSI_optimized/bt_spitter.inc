@@ -508,7 +508,7 @@ stock int BT_CreateSpitterTree() {
     int openS0_Approach = BT_CreateSequence(5,
         BT_CreateCondition(CND_IsOpenArea), BT_CreateStrategyIs(0),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateIsNotInRange(900.0),
+        BT_CreateIsNotTargetInRange(900.0),
         BT_CreateAction(ACT_FlankApproach)
     );
     // v5.6: +SpitReady 冷却门 + LOS/距离口径统一
