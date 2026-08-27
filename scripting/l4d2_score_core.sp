@@ -824,7 +824,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.13.7"	// v1.13.7: 新增 SH_GetRoundScore/SH_GetSIKills/SH_GetCommonKills/SH_GetFFDamage/SH_GetBlacked 只读 native（常驻 EMS 排行榜 l4d2_scoreboard_ui 消费）
+#define PLUGIN_VERSION "1.14.0"	// v1.14.0: 新增击杀骷髅头标记（env_instructor_hint icon_skull，仅击杀者可见）
 
 // ============================================================================
 // ConVar handles
@@ -837,6 +837,9 @@ ConVar g_cvHPShowWitch;
 ConVar g_cvKillHintEnable;
 ConVar g_cvKillCardEnable;
 ConVar g_cvKillCardTime;
+ConVar g_cvKillIconEnable;                                     // env_instructor_hint 击杀骷髅头标记
+ConVar g_cvKillIconDuration;
+ConVar g_cvKillIconColor;
 ConVar g_cvMapEndReward;    // v1.9.3: 过关奖励积分/人（替代过关回满血）
 ConVar g_cvWalletMax;       // v1.13.0: 可用积分上限（跨图保留，只设上限不清空）
 ConVar g_cvBFWindow;
@@ -966,6 +969,11 @@ int       g_iDmgPtsKiller[MAXPLAYERS + 1][2048];
 // debug logs: hit carries ent=126 pts=13, death carries ent=0 → this fixes
 // the lookup. Shotgun multi-kills: only the LAST kill is exact.
 int       g_iLastCommonEnt[MAXPLAYERS + 1];
+// v1.14.0: env_instructor_hint 击杀骷髅头标记（仅击杀者可见）
+int       g_iKillIconTargetRef;                                // 当前 info_target 实体引用（全局唯一，每次击杀替换）
+int       g_iKillIconHintRef;                                  // 当前 env_instructor_hint 实体引用
+int       g_iKillIconKiller;                                   // 标记的击杀者 client index
+Handle    g_hKillIconTimer;                                    // 清理计时器
 
 // v1.7.34: 持久化——钱包/复活币按 SteamID 存 KeyValues（data/si_hud_scores.txt），
 // reload/重启不丢；保存时机: 断线 / OnPluginEnd(reload) / 60s 周期 / 新战役清零后
@@ -1209,6 +1217,14 @@ public void OnPluginStart()
 
     g_cvKillCardTime = CreateConVar("score_core_killcard_time", "2.0",
         "Kill feedback (banner + kill card, one center message) display duration in seconds before the center clear.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
+
+    // v1.14.0: env_instructor_hint 击杀骷髅头标记（仅击杀者可见）
+    g_cvKillIconEnable = CreateConVar("score_core_kill_icon_enable", "1",
+        "Show skull icon (env_instructor_hint) at kill location, visible only to the killer.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_cvKillIconDuration = CreateConVar("score_core_kill_icon_duration", "3.0",
+        "Duration (seconds) the kill skull icon stays visible.", FCVAR_NOTIFY, true, 0.5, true, 10.0);
+    g_cvKillIconColor = CreateConVar("score_core_kill_icon_color", "255 0 0",
+        "Kill instructor hint caption color (RGB).", FCVAR_NOTIFY);
 
     // v1.9.3 (user): 过关奖励 — 每小关进安全门结束每人 +N 积分
     //（替代 l4d2_survivor_transition 的过关回满血，该插件已禁用；0=关闭）
@@ -1497,6 +1513,8 @@ public void OnPluginStart()
 
 public void OnPluginEnd()
 {
+    // v1.14.0: 清理击杀骷髅头标记实体
+    KillIconCleanup();
     // reload/卸载前保存所有在线玩家（reload 不触发 OnClientDisconnect）。
     // ⚠ reload 顺序: OnPluginEnd 先于 OnPluginStart → g_sSavePath 还是空串，
     // 必须先重新 Init（BuildPath 纯函数可重复调用）。
@@ -2092,6 +2110,9 @@ bool IsOfficialStyleMap(const char[] map)
 
 public void OnMapEnd()
 {
+    // v1.14.0: 清理击杀骷髅头标记实体
+    KillIconCleanup();
+
     // v1.7.9: fallback broadcast for map changes that never fired
     // map_transition (vote / changelevel / wipe-mapchange paths).
     if (g_cvEnable.BoolValue && g_cvScoreboardEnable.BoolValue && !g_bMapEndBroadcasted)
@@ -3004,6 +3025,9 @@ void SurvivorKilledSI(int attacker, int victim, Event event)
         g_hHPHideTimer[attacker] = CreateTimer(g_cvKillCardTime.FloatValue, Timer_HideHP,
             GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
     }
+
+    // v1.14.0: 击杀位置显示骷髅头图标（仅击杀者可见）
+    ShowKillIcon(attacker, victim, headshot);
 }
 
 // ============================================================================
@@ -3078,11 +3102,15 @@ void SurvivorKilledWitch(int attacker, Event event, int witchEnt)
         g_hHPHideTimer[attacker] = CreateTimer(g_cvKillCardTime.FloatValue, Timer_HideHP,
             GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
     }
-}
 
-// ============================================================================
-// System death: SI suicide / environment kill
-// ============================================================================
+    // v1.14.0: Witch 击杀位置显示骷髅头图标（仅击杀者可见）
+    if (g_cvKillIconEnable.BoolValue && witchEnt >= 1 && witchEnt < 2048 && IsValidEntity(witchEnt))
+    {
+        float vOrigin[3];
+        GetEntPropVector(witchEnt, Prop_Send, "m_vecOrigin", vOrigin);
+        ShowKillIconAtPos(attacker, vOrigin, headshot);
+    }
+}
 
 void SISystemDeath(int victim, Event event)
 {
@@ -3869,5 +3897,140 @@ Action Timer_JoinDeadCheck(Handle timer, int userid)
     PrintToChat(client, "\x04[复活]\x01 检测到你中途加入时处于死亡状态,已自动复活!");
     CreateTimer(0.5, Timer_RespawnTeleport, userid);   // 传送队友身边 + 复活套装
     return Plugin_Stop;
+}
+
+// ============================================================================
+// v1.14.0: env_instructor_hint 击杀骷髅头标记（仅击杀者可见）
+// 在击杀位置创建 info_target + env_instructor_hint，用 SetTransmit hook
+// 限制只有击杀者能看到该图标。图标类型：icon_skull，文字：KILL / HEADSHOT。
+// ============================================================================
+
+void ShowKillIcon(int killer, int victim, bool headshot)
+{
+    if (killer < 1 || killer > MaxClients || !IsClientInGame(killer)) return;
+    float vOrigin[3];
+    GetClientAbsOrigin(victim, vOrigin);
+    ShowKillIconAtPos(killer, vOrigin, headshot);
+}
+
+void ShowKillIconAtPos(int killer, const float vOrigin[3], bool headshot)
+{
+    if (!g_cvKillIconEnable.BoolValue) return;
+    if (killer < 1 || killer > MaxClients || !IsClientInGame(killer)) return;
+
+    // 清理上一次的标记实体
+    KillIconCleanup();
+
+    // 记录击杀者
+    g_iKillIconKiller = killer;
+
+    // 创建 info_target（锚点）
+    int target = CreateEntityByName("info_target");
+    if (!IsValidEntity(target)) return;
+
+    DispatchKeyValue(target, "targetname", "score_core_kill_icon");
+    DispatchKeyValue(target, "spawnflags", "1"); // 仅生还者可见
+    DispatchSpawn(target);
+    TeleportEntity(target, vOrigin, NULL_VECTOR, NULL_VECTOR);
+    g_iKillIconTargetRef = EntIndexToEntRef(target);
+
+    // hook SetTransmit：只有击杀者能收到该实体的网络数据
+    SDKHook(target, SDKHook_SetTransmit, Hook_KillIconTransmit);
+
+    // 创建 env_instructor_hint
+    int hint = CreateEntityByName("env_instructor_hint");
+    if (!IsValidEntity(hint))
+    {
+        KillIconCleanup();
+        return;
+    }
+
+    char sDuration[8];
+    FloatToString(g_cvKillIconDuration.FloatValue, sDuration, sizeof(sDuration));
+
+    char sTargetName[32];
+    FormatEx(sTargetName, sizeof(sTargetName), "sci_%d", target);
+
+    char sCaption[32];
+    if (headshot)
+        strcopy(sCaption, sizeof(sCaption), "HEADSHOT");
+    else
+        strcopy(sCaption, sizeof(sCaption), "KILL");
+
+    char sColor[16];
+    g_cvKillIconColor.GetString(sColor, sizeof(sColor));
+
+    DispatchKeyValue(hint, "hint_target", sTargetName);
+    DispatchKeyValue(hint, "hint_name", sTargetName);
+    DispatchKeyValue(hint, "hint_timeout", sDuration);
+    DispatchKeyValue(hint, "hint_allow_nodraw_target", "1");
+    DispatchKeyValue(hint, "hint_auto_start", "1");
+    DispatchKeyValue(hint, "hint_color", sColor);
+    DispatchKeyValue(hint, "hint_icon_offscreen", "icon_skull");
+    DispatchKeyValue(hint, "hint_icon_onscreen", "icon_skull");
+    DispatchKeyValue(hint, "hint_instance_type", "0"); // 不被 director hint 覆盖
+    DispatchKeyValue(hint, "hint_caption", sCaption);
+    DispatchKeyValue(hint, "hint_static", "0");
+    DispatchKeyValue(hint, "hint_nooffscreen", "0");
+    DispatchKeyValue(hint, "hint_icon_offset", "20"); // 图标在目标上方 20 单位
+    DispatchKeyValue(hint, "hint_range", "2000");
+    DispatchKeyValue(hint, "hint_forcecaption", "1");
+    DispatchKeyValue(hint, "hint_display_limit", "0");
+    DispatchKeyValue(hint, "hint_suppress_rest", "1");
+
+    DispatchSpawn(hint);
+    AcceptEntityInput(hint, "ShowHint");
+    g_iKillIconHintRef = EntIndexToEntRef(hint);
+
+    // 设置定时器清理
+    g_hKillIconTimer = CreateTimer(g_cvKillIconDuration.FloatValue, Timer_KillIconCleanup);
+}
+
+Action Hook_KillIconTransmit(int entity, int client)
+{
+    // 只允许击杀者看到
+    if (client != g_iKillIconKiller)
+        return Plugin_Handled;   // 阻止其他玩家看到
+    return Plugin_Continue;
+}
+
+Action Timer_KillIconCleanup(Handle timer)
+{
+    g_hKillIconTimer = null;
+    KillIconCleanup();
+    return Plugin_Continue;
+}
+
+void KillIconCleanup()
+{
+    // 删除计时器
+    if (g_hKillIconTimer != null)
+    {
+        delete g_hKillIconTimer;
+        g_hKillIconTimer = null;
+    }
+
+    // 删除 env_instructor_hint
+    if (g_iKillIconHintRef != 0)
+    {
+        int hint = EntRefToEntIndex(g_iKillIconHintRef);
+        if (hint != INVALID_ENT_REFERENCE && IsValidEntity(hint))
+            RemoveEntity(hint);
+        g_iKillIconHintRef = 0;
+    }
+
+    // 删除 info_target（先 unhook）
+    if (g_iKillIconTargetRef != 0)
+    {
+        int target = EntRefToEntIndex(g_iKillIconTargetRef);
+        if (target != INVALID_ENT_REFERENCE && IsValidEntity(target))
+        {
+            SDKUnhook(target, SDKHook_SetTransmit, Hook_KillIconTransmit);
+            RemoveEntity(target);
+        }
+        g_iKillIconTargetRef = 0;
+    }
+
+    g_iKillIconKiller = 0;
 }
 
