@@ -154,6 +154,7 @@ BT_Status JockeyAct_HarasserRide(int client) {
 // ============================================================================
 
 BT_Status JockeyAct_SteerRide(int client) {
+    BB_SetBool(client, "_stuck_detour", false);
     int victim = GetEntPropEnt(client, Prop_Send, "m_jockeyVictim");
     if (victim <= 0) return BT_FAILURE;
     if (!IsSurvivor(victim) || !IsPlayerAlive(victim)) return BT_FAILURE;

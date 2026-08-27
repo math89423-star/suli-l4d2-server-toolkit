@@ -197,6 +197,7 @@ BT_Status SmokerAct_ApproachOutside(int client) {
 // ============================================================================
 
 BT_Status SmokerAct_SteerPinToAcid(int client) {
+    BB_SetBool(client, "_stuck_detour", false); // 清绕行残留防覆盖拖拽
     float myPos[3];
     GetClientAbsOrigin(client, myPos);
     float acidPos[3];

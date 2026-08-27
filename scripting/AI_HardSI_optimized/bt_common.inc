@@ -1085,8 +1085,14 @@ BT_Status ACT_StrafeRandom(int client) {
         BT_AddButton(client, IN_MOVERIGHT);
         BT_RemoveButton(client, IN_MOVELEFT);
     }
-    BT_BeginMovement(client);   // v5.34: 声明运动意图
-    BT_StuckDetour(client);   // v5.3: 横移贴墙死锁（如 Spitter 守位）→ 沿墙走
+    // 守位微位移抑跳：interval<=0.7 的小幅横移不判停滞（否则 5u/0.6s 误蹦）
+    float inter2 = g_fBTNodeUserParam1[g_iBTCurrentTickNode];
+    if (inter2 > 0.7 || inter2 == 0.0) {
+        BT_BeginMovement(client);
+        BT_StuckDetour(client);
+    } else {
+        BB_SetBool(client, "_stuck_movement_intent", false);
+    }
     return BT_RUNNING;
 }
 
