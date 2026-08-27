@@ -3354,7 +3354,7 @@ Action tmrRetrySpawn(Handle timer, bool retry) {
 }
 
 int GetTotalSI() {
-	int count;
+	int count = 0;
 	for (int i = 1; i <= MaxClients; i++) {
 		if (!IsClientInGame(i) || IsClientInKickQueue(i) || GetClientTeam(i) != 3)
 			continue;

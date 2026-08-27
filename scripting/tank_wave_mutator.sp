@@ -308,6 +308,16 @@ public void SS_OnWaveStart(bool started) {
     if (!started) {
         // 零波（上限满/全倒等），specialspawner 直接进收尾期
         LogMessage("[Tank Mutator] Wave #%d: zero wave (no SI spawned)", g_iWaveCounter);
+        // 零 SI 波仍需兑现 Tank 预告（否则 Tank 预告永久挂起致断波）
+        if (g_bNextWaveIsTank) {
+            SetClearingHold(true);
+            DataPack pack2;
+            CreateDataTimer(1.5, Timer_SpawnTank, pack2, TIMER_FLAG_NO_MAPCHANGE);
+            pack2.WriteCell(g_iNextTankCount);
+            pack2.WriteCell(0);
+            g_bNextWaveIsTank = false;
+            g_iNextTankCount = 0;
+        }
         return;
     }
 
