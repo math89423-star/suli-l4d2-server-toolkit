@@ -44,8 +44,8 @@ bool g_bSpitterSpitFired[MAXPLAYERS + 1];
 // g_eff = sv_gravity × SPIT_DROP_GRAVITY_SCALE：真实酸液弹体重力系数未知，
 // 0.65 为保守估计（v5.36 实测方向 = 偏短落而非过冲，宁少勿多）；
 // 实机若出现过冲（酸落点越过目标）下调本系数。
-#define SPIT_DROP_GRAVITY_SCALE    0.65
-#define SPIT_DROP_MAX_LIFT_DEG     25.0    // 补偿上限，防远距离离谱吊射
+#define SPIT_DROP_GRAVITY_SCALE    0.25
+#define SPIT_DROP_MAX_LIFT_DEG     12.0    // v6.8.1 Smoker/Spitter命中修复: 0.35→0.25, 15→12 源点改眼后降过冲
 // v5.41 FIX: 1100 → 900 —— 空服 rcon 实测 z_spit_velocity=900（引擎权威值）。
 // 原值高估飞行速度 → t=dist/v 低估 22%，drop(∝t²) 低估 ~49% → v5.37 补偿在
 // 远距离仍系统性短落。900 对齐后补偿量 +49%（远距离段），若出现过冲再调
@@ -206,6 +206,11 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
     }
 
     float now = GetGameTime();
+    // v6.8.1: 空中不吐——Stuck跳跃期间有动作无酸
+    if (!(GetEntityFlags(client) & FL_ONGROUND)) {
+        SI_AbilityBackoff(client, "_spitter", now, 0.4);
+        return BT_FAILURE;
+    }
     if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
         BB_SetBool(client, "_spitter_waiting_spit", true);
         BB_SetFloat(client, "_spitter_press_start", now);
@@ -221,20 +226,39 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
         SI_AttackClearTarget(client, "_spitter");
         return BT_SUCCESS;
     }
+    // v6.8.0 隔墙空吐修复：持续 LOS/距离校验
+    {
+        float sEye[3], tEye[3];
+        GetClientEyePosition(client, sEye);
+        GetClientEyePosition(lockedTarget, tEye);
+        TR_TraceRayFilter(sEye, tEye, MASK_SOLID, RayType_EndPoint, LOS_TraceFilter, client);
+        if (TR_DidHit() && TR_GetEntityIndex() != lockedTarget) {
+            BB_SetBool(client, "_spitter_waiting_spit", false);
+            SI_AttackClearTarget(client, "_spitter");
+            SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
+            return BT_FAILURE;
+        }
+        float sAbsChk[3], tAbsChk[3];
+        GetClientAbsOrigin(client, sAbsChk);
+        GetClientAbsOrigin(lockedTarget, tAbsChk);
+        if (GetVectorDistance(sAbsChk, tAbsChk) > 900.0) {
+            BB_SetBool(client, "_spitter_waiting_spit", false);
+            SI_AttackClearTarget(client, "_spitter");
+            SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
+            return BT_FAILURE;
+        }
+    }
 
     float tPos[3], tVel[3], sPos[3];
     GetClientAbsOrigin(lockedTarget, tPos);
-    tPos[2] += 40.0;   // v5.36 FIX: 胸口高度 —— 原脚底 = 酸液抛物线低抛短落、命中率差
-                       // （同 Tank v5.30 GetClientEyePosition / Smoker v5.32 +30 的先例，Spitter 此前漏改）
+    tPos[2] += 40.0;   // v5.36 FIX: 胸口高度
     GetEntPropVector(lockedTarget, Prop_Data, "m_vecVelocity", tVel);
     float speed = GetVectorLength(tVel);
-    GetClientAbsOrigin(client, sPos);
+    GetClientEyePosition(client, sPos); // v6.8.1: 源点改眼，消除脚底高抛 8-17°
     float aimPos[3];
     if (speed > 50.0) {
-        // v5.32: 预判改为按飞行时间（原固定 0.8s：近处提前过多、远处不足）。
-        // 酸液弹道飞行时间 ≈ 距离/1100，保守系数 0.7（与 SpitterAct_Spit 同口径）
         float dist = GetVectorDistance(sPos, tPos);
-        float flightT = dist / 1100.0;
+        float flightT = dist / SPIT_FLIGHT_SPEED; // v6.8.1: 1100→900 统一口径
         if (flightT > 1.2) flightT = 1.2;
         aimPos[0] = tPos[0] + tVel[0] * flightT * 0.7;
         aimPos[1] = tPos[1] + tVel[1] * flightT * 0.7;
@@ -257,15 +281,15 @@ BT_Status SpitterAct_PredictiveSpit(int client) {
         g_bSpitterSpitFired[client] = false;
         BB_SetBool(client, "_spitter_waiting_spit", false);
         SI_AttackClearTarget(client, "_spitter");   // v5.33: 发射成功释放锁定
-        // 决定 post-spit 行为（同普通吐）—— v5.0 三分：40% 据守 / 35% 撤退 / 25% 靠近
+        // v6.8.1: 30%据守/40%撤/30%靠近——据守占比下调，使吐后更分明“逃或压”
         int r = GetRandomInt(0, 9);
-        BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
+        BB_SetInt(client, "_spitter_post_mode", r < 3 ? 2 : (r < 7 ? 1 : 0));
         BB_SetFloat(client, "_spitter_spit_time", now);
         return BT_SUCCESS;
     }
     // v5.23: 1.5s 超时 = 引擎拒绝（冷却/几何）→ 尝试失败：不设 _spitter_spit_time
     // （未吐出绝不进正式 8s 冷却/成功态），短退避防立刻重试，FAIL 交走位分支
-    if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
+    if (now - BB_GetFloat(client, "_spitter_press_start", now) > 2.0) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
         SI_AttackClearTarget(client, "_spitter");   // v5.33: 超时释放锁定
         SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
@@ -284,6 +308,11 @@ BT_Status SpitterAct_SpitTankCover(int client) {
     if (tank <= 0 || !IsPlayerAlive(tank)) return BT_FAILURE;
 
     float now = GetGameTime();
+    // v6.8.1: 空中不吐
+    if (!(GetEntityFlags(client) & FL_ONGROUND)) {
+        SI_AbilityBackoff(client, "_spitter", now, 0.4);
+        return BT_FAILURE;
+    }
     if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
         BB_SetBool(client, "_spitter_waiting_spit", true);
         BB_SetFloat(client, "_spitter_press_start", now);
@@ -302,7 +331,7 @@ BT_Status SpitterAct_SpitTankCover(int client) {
     aimPos[2] = tPos[2];
 
     float sPos[3], dir[3], ang[3];
-    GetClientAbsOrigin(client, sPos);
+    GetClientEyePosition(client, sPos); // v6.8.1: 源点改眼
     MakeVectorFromPoints(sPos, aimPos, dir);
     GetVectorAngles(dir, ang);
     Spitter_ApplyDropCompensation(sPos, aimPos, ang);   // v5.37: 重力下坠补偿
@@ -319,7 +348,7 @@ BT_Status SpitterAct_SpitTankCover(int client) {
         return BT_SUCCESS;
     }
     // v5.23: 1.5s 超时 = 引擎拒绝 → 尝试失败（不进 8s 冷却/成功态），短退避重试
-    if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
+    if (now - BB_GetFloat(client, "_spitter_press_start", now) > 2.0) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
         SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
         return BT_FAILURE;
@@ -341,6 +370,11 @@ BT_Status SpitterAct_Spit(int client) {
     }
 
     float now = GetGameTime();
+    // v6.8.1: 空中不吐
+    if (!(GetEntityFlags(client) & FL_ONGROUND)) {
+        SI_AbilityBackoff(client, "_spitter", now, 0.4);
+        return BT_FAILURE;
+    }
     if (!BB_GetBool(client, "_spitter_waiting_spit", false)) {
         BB_SetBool(client, "_spitter_waiting_spit", true);
         BB_SetFloat(client, "_spitter_press_start", now);
@@ -356,12 +390,34 @@ BT_Status SpitterAct_Spit(int client) {
         SI_AttackClearTarget(client, "_spitter");
         return BT_SUCCESS;
     }
+    // v6.8.0 隔墙空吐修复：持续 LOS/距离校验
+    {
+        float sEye[3], tEye[3];
+        GetClientEyePosition(client, sEye);
+        GetClientEyePosition(lockedTarget, tEye);
+        TR_TraceRayFilter(sEye, tEye, MASK_SOLID, RayType_EndPoint, LOS_TraceFilter, client);
+        if (TR_DidHit() && TR_GetEntityIndex() != lockedTarget) {
+            BB_SetBool(client, "_spitter_waiting_spit", false);
+            SI_AttackClearTarget(client, "_spitter");
+            SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
+            return BT_FAILURE;
+        }
+        float sAbsChk[3], tAbsChk[3];
+        GetClientAbsOrigin(client, sAbsChk);
+        GetClientAbsOrigin(lockedTarget, tAbsChk);
+        if (GetVectorDistance(sAbsChk, tAbsChk) > 900.0) {
+            BB_SetBool(client, "_spitter_waiting_spit", false);
+            SI_AttackClearTarget(client, "_spitter");
+            SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
+            return BT_FAILURE;
+        }
+    }
 
     float sPos[3], tPos[3], dir[3], ang[3];
     float finalAim[3];   // v5.37: 三分支统一捕获最终瞄准点（预判点/原点），出口做下坠补偿
-    GetClientAbsOrigin(client, sPos);
+    GetClientEyePosition(client, sPos); // v6.8.1: 源点改眼
     GetClientAbsOrigin(lockedTarget, tPos);
-    tPos[2] += 40.0;   // v5.36 FIX: 胸口高度 —— 原脚底 = 酸液低抛短落（同 PredictiveSpit 先例）
+    tPos[2] += 40.0;   // v5.36 FIX: 胸口高度
 
     // === v5.16: 预判投掷 ===
     // 获取目标移动速度
@@ -373,8 +429,7 @@ BT_Status SpitterAct_Spit(int client) {
     if (speed > 150.0) {
         float distance = GetVectorDistance(sPos, tPos);
 
-        // 估算飞行时间（酸液抛物线速度约 1000-1200 u/s）
-        float flightTime = distance / 1100.0;
+        float flightTime = distance / SPIT_FLIGHT_SPEED; // v6.8.1: 1100→900 统一口径
 
         // 计算预判点（保守系数 0.65，避免过度预判）
         float predictedPos[3];
@@ -412,12 +467,12 @@ BT_Status SpitterAct_Spit(int client) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
         SI_AttackClearTarget(client, "_spitter");   // v5.33: 发射成功释放锁定
         int r = GetRandomInt(0, 9);
-        BB_SetInt(client, "_spitter_post_mode", r < 4 ? 2 : (r < 7 ? 1 : 0));
+        BB_SetInt(client, "_spitter_post_mode", r < 3 ? 2 : (r < 7 ? 1 : 0)); // v6.8.1: 30/40/30
         BB_SetFloat(client, "_spitter_spit_time", now);
         return BT_SUCCESS;
     }
     // v5.23: 1.5s 超时 = 引擎拒绝 → 尝试失败（不进 8s 冷却/成功态），短退避重试
-    if (now - BB_GetFloat(client, "_spitter_press_start", now) > 1.5) {
+    if (now - BB_GetFloat(client, "_spitter_press_start", now) > 2.0) {
         BB_SetBool(client, "_spitter_waiting_spit", false);
         SI_AttackClearTarget(client, "_spitter");   // v5.33: 超时释放锁定
         SI_AbilityBackoff(client, "_spitter", now, GetRandomFloat(0.3, 0.8));
@@ -487,13 +542,13 @@ stock int BT_CreateSpitterTree() {
     // v5.6 FIX: 据守改 300-600u 距离带 —— v5.4.2 的 StrafeApproach（横移+前进）
     // 从 600u 进入后一路直线走进生还者脸上（无下界、无后退，观感"吐完送脸"）。
     // 300-600u：StrafeRandom 横移守位；<300u：Retreat 后撤拉开。
-    // v5.27: StrafeRandom(纯横移) -> StrafeApproach(横移+前进)，避免纯横移贴墙Stuck跳
+    // v6.8.1: 据守中距改前压——原StrafeApproach横移观感“晃”，改StrafeMove更主动压
     int postSpitHold = BT_CreateSequence(5,
         BT_CreatePostSpitMode(2),
         BT_CreateIsInRange(600.0),
         BT_CreateInverter(BT_CreateIsInRange(300.0)),
         BT_CreateAction(ACT_AcquireClosestTarget),
-        BT_CreateAction(ACT_StrafeApproach)
+        BT_CreateAction(ACT_StrafeMoveToTarget)
     );
     int postSpitHoldClose = BT_CreateSequence(3,
         BT_CreatePostSpitMode(2),

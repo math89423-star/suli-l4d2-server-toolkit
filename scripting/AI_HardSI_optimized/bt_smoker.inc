@@ -223,7 +223,8 @@ BT_Status SmokerAct_SteerPinToAcid(int client) {
         float vPos[3];
         GetClientAbsOrigin(victim, vPos);
         float dist = GetVectorDistance(myPos, vPos);
-        if (dist < 750.0) {   // v5.41: 850→750
+        // v6.8.1: 修复死代码——原 <750 return 后 <700 分支永假，统一为 <700 后退、≥700 横移
+        if (dist < 700.0) {
             float dir[3], ang[3];
             MakeVectorFromPoints(vPos, myPos, dir);   // 目标→我 = 背对目标方向
             dir[2] = 0.0;
@@ -234,33 +235,25 @@ BT_Status SmokerAct_SteerPinToAcid(int client) {
                 return BT_RUNNING;
             }
         }
-        // v5.37/v5.41: >=750u 时后退拖拽 + 横移保持活性
-        // 原 v5.27 只横移不后退 → 观感傻站；真人 Smoker 拉中会后退拉扯：
-        // 后退 = 舌头把目标拖向自己（拖离队伍/拖进特感堆）。
-        // 后退距离限制：目标距 <700u 时停止后退（防拉断舌头）。
+        // >=700u 横移保持活性（防拉断）
         float dir[3], ang[3];
         MakeVectorFromPoints(vPos, myPos, dir);   // 目标→我 = 背对目标方向
         dir[2] = 0.0;
         GetVectorAngles(dir, ang);
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
-        if (dist < 700.0) {
-            // 目标已被拖近 → 后退拉扯
-            BT_AddButton(client, IN_FORWARD);
+        // 横移保持活性（引擎托管拉，不后退防断舌）
+        float now2 = GetGameTime();
+        float nextSwitch = BB_GetFloat(client, "_smoker_pin_strafe_next", 0.0);
+        if (nextSwitch <= 0.0 || now2 >= nextSwitch) {
+            BB_SetBool(client, "_smoker_pin_strafe_left", GetRandomInt(0,1)==0);
+            BB_SetFloat(client, "_smoker_pin_strafe_next", now2 + GetRandomFloat(0.4, 0.9));
+        }
+        if (BB_GetBool(client, "_smoker_pin_strafe_left", false)) {
+            BT_AddButton(client, IN_MOVELEFT);
+            BT_RemoveButton(client, IN_MOVERIGHT);
         } else {
-            // 目标在射程极限 → 横移保持活性（引擎托管拉，不后退防断舌）
-            float now2 = GetGameTime();
-            float nextSwitch = BB_GetFloat(client, "_smoker_pin_strafe_next", 0.0);
-            if (nextSwitch <= 0.0 || now2 >= nextSwitch) {
-                BB_SetBool(client, "_smoker_pin_strafe_left", GetRandomInt(0,1)==0);
-                BB_SetFloat(client, "_smoker_pin_strafe_next", now2 + GetRandomFloat(0.4, 0.9));
-            }
-            if (BB_GetBool(client, "_smoker_pin_strafe_left", false)) {
-                BT_AddButton(client, IN_MOVELEFT);
-                BT_RemoveButton(client, IN_MOVERIGHT);
-            } else {
-                BT_AddButton(client, IN_MOVERIGHT);
-                BT_RemoveButton(client, IN_MOVELEFT);
-            }
+            BT_AddButton(client, IN_MOVERIGHT);
+            BT_RemoveButton(client, IN_MOVELEFT);
         }
         return BT_RUNNING;
     }
@@ -335,21 +328,54 @@ BT_Status SmokerAct_TryTongue(int client) {
         BB_SetBool(client, "_smoker_tongue_trying", false);   // v5.39: 退出视角保真窗口
         return BT_FAILURE;
     }
+    // v6.8.0 隔墙拉人修复：持续 LOS/距离/可控校验，隔墙或超距立即中断
+    {
+        float sEye[3], tEye[3];
+        GetClientEyePosition(client, sEye);
+        GetClientEyePosition(target, tEye);
+        TR_TraceRayFilter(sEye, tEye, MASK_SOLID, RayType_EndPoint, LOS_TraceFilter, client);
+        if (TR_DidHit() && TR_GetEntityIndex() != target) {
+            float sChest[3], tChest[3];
+            GetClientAbsOrigin(client, sChest); sChest[2] += 45.0;
+            GetClientAbsOrigin(target, tChest); tChest[2] += 40.0;
+            TR_TraceRayFilter(sChest, tChest, MASK_SOLID, RayType_EndPoint, LOS_TraceFilter, client);
+            if (TR_DidHit() && TR_GetEntityIndex() != target) {
+                SI_AttackClearTarget(client, "_smoker");
+                SI_AbilityBackoff(client, "_smoker", now, 0.3);
+                BB_SetBool(client, "_smoker_tongue_trying", false);
+                return BT_FAILURE;
+            }
+        }
+        float sAbs[3], tAbs[3];
+        GetClientAbsOrigin(client, sAbs);
+        GetClientAbsOrigin(target, tAbs);
+        if (GetVectorDistance(sAbs, tAbs) > 750.0 || !SI_IsPinnable(target)) {
+            SI_AttackClearTarget(client, "_smoker");
+            SI_AbilityBackoff(client, "_smoker", now, 0.3);
+            BB_SetBool(client, "_smoker_tongue_trying", false);
+            return BT_FAILURE;
+        }
+    }
     {
         float sPos[3], tPos[3], tVel[3], dir[3], ang[3];
-        GetClientAbsOrigin(client, sPos);
+        GetClientEyePosition(client, sPos);
         GetClientAbsOrigin(target, tPos);
+        tPos[2] += 30.0; // 胸口高度
         GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
         float dist = GetVectorDistance(sPos, tPos);
-        // v5.41: 1600 → 1000 对齐引擎 tongue_fly_speed=1000（原值高估速度
-        // → 提前量小 60% → 移动目标预瞄落后）；clamp 上限随射程 750/1000=0.75s
+        // v5.41: 1600→1000 对齐 tongue_fly_speed; v6.8.1: 源点改眼 + 预判收敛0.6防折返空
         float leadT = dist / 1000.0;
         if (leadT > 0.75) leadT = 0.75;
         if (leadT < 0.1) leadT = 0.1;
         float aimPos[3];
-        aimPos[0] = tPos[0] + tVel[0] * leadT;
-        aimPos[1] = tPos[1] + tVel[1] * leadT;
-        aimPos[2] = tPos[2] + 30.0;    // 胸口高度
+        float speed2d = SquareRoot(tVel[0]*tVel[0] + tVel[1]*tVel[1]);
+        if (speed2d > 100.0) {
+            aimPos[0] = tPos[0] + tVel[0] * leadT * 0.6;
+            aimPos[1] = tPos[1] + tVel[1] * leadT * 0.6;
+            aimPos[2] = tPos[2];
+        } else {
+            aimPos = tPos;
+        }
         MakeVectorFromPoints(sPos, aimPos, dir);
         GetVectorAngles(dir, ang);
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
@@ -634,15 +660,14 @@ stock int BT_CreateSmokerTree() {
         BT_CreateAction(ACT_StrafeApproach)
     );
 
-    // v5.27: Backoff期横移 —— 射程内有LOS但舌头在Backoff(0.5s)时拉人簇FAIL，
-    // approachAct(需!InRange)与closeRangeStrafe(需!LOS)均FAIL -> 零移动。
-    // 此分支InRange+有LOS+Backoff时横移找角度，避免落到零移动retarget。
+    // v6.8.1: Backoff期逃脱 —— miss后短退避内明确后撤(逃跑躲避)，不再横移
+    // 原横移观感“原地晃”，用户反馈释放后不逃。改Retreat拉开距离找掩体
     int backoffStrafe = BT_CreateSequence(5,
         BT_CreateIsInRange(750.0),  // v5.41: 850→750 tongue_range
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateCondition(SmokerCond_BackoffActive),
         BT_CreateAction(ACT_AcquirePinnableTarget),
-        BT_CreateAction(ACT_StrafeApproach)
+        BT_CreateAction(ACT_Retreat)
     );
 
     // v5.37: 冷却期走位 —— 拉人成功后 1.8s Cooldown(1.8) arm 期间：
@@ -689,12 +714,9 @@ stock int BT_CreateSmokerTree() {
     // flow 不可用（无 nav / 三方图）时 CND_IsAheadOnRoute 返回 FAILURE，
     // 整支退化为不存在，行为与 v5.17 完全一致。
     // ==========================================
-    int routeAmbushSeq = BT_CreateSequence(4,
-        BT_CreateIsAheadOnRoute(600.0),                        // 领先队伍 600 flow
-        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),// 有视线就该拉了
-        BT_CreateIsNotInRange(750.0),   // v5.41: 850→750；射程内交给 closeRangeStrafe
-        BT_CreateAction(ACT_HoldRouteAmbush)
-    );
+    // v5.44 激进模式: flow 前置埋伏已移除 —— 远处刷出直接追击，不原地蹲守
+    // 原 routeAmbushSeq(600flow/!LOS/>750) = 站桩等靠近，已按用户"1"选项禁用
+    // int routeAmbushSeq = BT_CreateSequence(4, BT_CreateIsAheadOnRoute(600.0), ... HoldRouteAmbush);
 
     // Root selector — v4.0.3: 攻击簇冷却 → 走位/选人，挠击消除。
     int root = BT_Create(BTN_SELECTOR);
@@ -707,23 +729,21 @@ stock int BT_CreateSmokerTree() {
     );
     BT_AddChild(root, pinSeq); // 1. v5.0: 拉中 → 开窗 + 拖酸
     BT_AddChild(root, cooldownPull);          // 2. v4.0.3: 全部拉人分支（1.8s 冷却）
-    BT_AddChild(root, routeAmbushSeq);        // 2b. v5.18: flow 前方 → 蹲守等人进射程
     BT_AddChild(root, mode3Approach);         // 3. v4.0: mode 3 → 外侧走位接近
     BT_AddChild(root, openStrategyRoll);      // 4a. open → roll token
     BT_AddChild(root, openS0_Approach);       // 4c. open strat0 → flank approach
     BT_AddChild(root, openS1_Approach);       // 5b. open strat1 → erratic approach
     BT_AddChild(root, closeRangeStrafe);      // 6. v3.6: close + noLOS → strafe, don't approach
     BT_AddChild(root, backoffStrafe);         // 6b. v5.27: InRange+有LOS+Backoff → 横移找角度(防零移动)
-    // v5.37: 冷却期走位 —— Cooldown(1.8) arm 期间 + InRange + HasLOS → 横移找角度
-    // 解决"拉完人傻站"：pullCluster 全 FAIL + closeRangeStrafe FAIL(有LOS) +
-    // backoffStrafe FAIL(非Backoff) → 原来直接落到 retarget/Wander。
+    // v6.8.1: 冷却期前压 —— 拉后/拉空冷却期明确前压(主动攻击)，不再横移
+    // 原横移在LOS下“原地晃”，用户反馈释放后不主动压。改StrafeMoveToTarget前压
     int cooldownStrafe = BT_CreateSequence(4,
         BT_CreateIsInRange(750.0),  // v5.41: 850→750 tongue_range
         BT_CreateCondition(CND_HasTargetLOS),
         BT_CreateAction(ACT_AcquirePinnableTarget),
-        BT_CreateAction(ACT_StrafeApproach)
+        BT_CreateAction(ACT_StrafeMoveToTarget)
     );
-    BT_AddChild(root, cooldownStrafe);        // 6c. v5.37: cooldown期+InRange+LOS → 横移
+    BT_AddChild(root, cooldownStrafe);        // 6c. v6.8.1: cooldown期+InRange+LOS → 前压
     BT_AddChild(root, ledgeRetargetGated);    // 7. v4.0.3: ledge 附近 → 90% 拉最远（门控）
     BT_AddChild(root, retargetCooldown);      // 8. standard retarget（孤立度选人）
     BT_AddChild(root, approachAct);           // 9. approach (only when far)

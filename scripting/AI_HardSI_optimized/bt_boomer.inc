@@ -354,12 +354,8 @@ stock int BT_CreateBoomerTree() {
     // 已在队伍前方时蹲住等玩家自己走进 300u 吐射程，是它最强的一手。
     // 排在吐/补刀分支之后，只在够不到人时接管。
     // ==========================================
-    int routeAmbushSeq = BT_CreateSequence(4,
-        BT_CreateIsAheadOnRoute(500.0),
-        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
-        BT_CreateIsNotInRange(450.0),   // 450u 内已进接近战，交给既有分支
-        BT_CreateAction(ACT_HoldRouteAmbush)
-    );
+    // v5.44 激进模式: flow 前置埋伏已移除 —— 远处刷出直接追击
+    // int routeAmbushSeq = BT_CreateSequence(4, BT_CreateIsAheadOnRoute(500.0), ... HoldRouteAmbush);
 
     // Root selector — terrain branches fail when disabled → fallback to standard.
     int root = BT_Create(BTN_SELECTOR);
@@ -376,7 +372,6 @@ stock int BT_CreateBoomerTree() {
     BT_AddChild(root, openS1_Approach);    // 6b. v3.5: open strat1 → erratic approach
     BT_AddChild(root, semiHugVomit);       // 7. v3.2: semi → vomit
     BT_AddChild(root, semiHugApproach);    // 7b. v3.2: semi → hug wall
-    BT_AddChild(root, routeAmbushSeq);     // 7c. v5.18: flow 前方 → 蹲守等人进吐程
     BT_AddChild(root, vomitSeq);           // 8. ← FALLBACK: standard vomit
     BT_AddChild(root, approachSeq);        // 9. ← FALLBACK: approach
     BT_AddChild(root, BT_CreateAction(ACT_Wander));

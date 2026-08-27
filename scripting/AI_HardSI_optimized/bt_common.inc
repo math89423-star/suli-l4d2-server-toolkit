@@ -182,6 +182,14 @@ stock bool BT_StuckDetour(int client) {
             // → 升级长跳窗口 0.8s（翻更高障碍），并重置轮数。
             int rounds = BB_GetInt(client, "_stuck_rounds", 0) + 1;
             BB_SetInt(client, "_stuck_rounds", rounds);
+            // v6.8.1: Tank 卡死快速 Warp——连续2轮不动(1.2s)直接 Warp，比通用3轮长跳更早救
+            if (rounds >= 2 && IsClientInGame(client) && GetClientTeam(client) == 3 && GetEntProp(client, Prop_Send, "m_zombieClass") == 8)
+            {
+                L4D_WarpToValidPositionIfStuck(client);
+                BB_SetInt(client, "_stuck_rounds", 0);
+                BB_SetBool(client, "_stuck_detour", false);
+                BB_SetFloat(client, "_stuck_jump_until", 0.0);
+            }
             float jumpTime = STUCK_JUMP_TIME;
             if (rounds >= STUCK_JUMP_ROUNDS) {
                 rounds = 0;
@@ -321,11 +329,19 @@ BT_Status CND_HasTargetLOS(int client) {
     float myPos[3], tPos[3];
     GetClientEyePosition(client, myPos);
     GetClientEyePosition(target, tPos);
-    TR_TraceRayFilter(myPos, tPos, MASK_PLAYERSOLID, RayType_EndPoint, LOS_TraceFilter, client);
+    // v6.8.0 隔墙拉人修复: MASK_PLAYERSOLID→MASK_SOLID（世界几何更可靠），增加胸口二次 trace 防眼对眼越过低墙
+    TR_TraceRayFilter(myPos, tPos, MASK_SOLID, RayType_EndPoint, LOS_TraceFilter, client);
     if (TR_DidHit()) {
-        return (TR_GetEntityIndex() == target) ? BT_SUCCESS : BT_FAILURE;
+        if (TR_GetEntityIndex() != target) return BT_FAILURE;
+    } else {
+        // 眼对眼通，但可能低墙挡胸口弹道（舌头/酸液实际发射高度低于眼），补胸口 trace
+        float myChest[3], tChest[3];
+        GetClientAbsOrigin(client, myChest); myChest[2] += 45.0;
+        GetClientAbsOrigin(target, tChest); tChest[2] += 40.0;
+        TR_TraceRayFilter(myChest, tChest, MASK_SOLID, RayType_EndPoint, LOS_TraceFilter, client);
+        if (TR_DidHit() && TR_GetEntityIndex() != target) return BT_FAILURE;
     }
-    return BT_SUCCESS;  // 无障碍 = 视线通畅
+    return BT_SUCCESS;
 }
 
 // v5.6: CND_IsTargetInRange —— 对 BB target 测距（原版 CND_IsInRange 量
@@ -381,7 +397,13 @@ stock bool BT_TargetSatisfies(int client, int target, int flags) {
         float myPos[3], tPos[3];
         GetClientEyePosition(client, myPos);
         GetClientEyePosition(target, tPos);
-        TR_TraceRayFilter(myPos, tPos, MASK_PLAYERSOLID, RayType_EndPoint, LOS_TraceFilter, client);
+        TR_TraceRayFilter(myPos, tPos, MASK_SOLID, RayType_EndPoint, LOS_TraceFilter, client);
+        if (TR_DidHit() && TR_GetEntityIndex() != target) return false;
+        // 胸口二次校验（同 CND_HasTargetLOS）
+        float myChest[3], tChest[3];
+        GetClientAbsOrigin(client, myChest); myChest[2] += 45.0;
+        GetClientAbsOrigin(target, tChest); tChest[2] += 40.0;
+        TR_TraceRayFilter(myChest, tChest, MASK_SOLID, RayType_EndPoint, LOS_TraceFilter, client);
         if (TR_DidHit() && TR_GetEntityIndex() != target) return false;
     }
     return true;

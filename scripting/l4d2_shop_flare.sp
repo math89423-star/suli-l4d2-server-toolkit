@@ -12,7 +12,7 @@
 #include <sdktools>
 #include <sdkhooks>
 
-#define PLUGIN_VERSION "5.0.2"
+#define PLUGIN_VERSION "5.0.4"
 
 #define FLARE_FUSE_TIME     2.5
 #define FLARE_DESCENT_RATE  40.0   // units per second falling speed
@@ -78,9 +78,9 @@ public void OnPluginStart()
     CreateConVar("l4d2_aerial_flare_version", PLUGIN_VERSION, "Aerial Flare version", FCVAR_NOTIFY | FCVAR_DONTRECORD);
     g_cvEnable      = CreateConVar("l4d2_aerial_flare_enable", "1", "0=OFF, 1=ON", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     g_cvDuration    = CreateConVar("l4d2_aerial_flare_duration", "18.0", "Seconds of illumination", FCVAR_NOTIFY, true, 3.0, true, 60.0);
-    g_cvMaxFlares   = CreateConVar("l4d2_aerial_flare_max", "5", "Max simultaneous flares", FCVAR_NOTIFY, true, 1.0, true, 10.0);
+    g_cvMaxFlares   = CreateConVar("l4d2_aerial_flare_max", "3", "Max simultaneous flares", FCVAR_NOTIFY, true, 1.0, true, 10.0);
     g_cvFuseTime    = CreateConVar("l4d2_aerial_flare_fuse", "2.5", "Fuse time in seconds before detonation", FCVAR_NOTIFY, true, 0.5, true, 10.0);
-    g_cvLightDist   = CreateConVar("l4d2_aerial_flare_light_dist", "1600.0", "Light radius", FCVAR_NOTIFY, true, 300.0, true, 3000.0);
+    g_cvLightDist   = CreateConVar("l4d2_aerial_flare_light_dist", "800.0", "Light radius", FCVAR_NOTIFY, true, 300.0, true, 3000.0);
     g_cvCooldown    = CreateConVar("l4d2_aerial_flare_cooldown", "0.0", "Purchase cooldown", FCVAR_NOTIFY, true, 0.0, true, 120.0);
     g_cvDescentRate = CreateConVar("l4d2_aerial_flare_descent", "40.0", "Descent rate (units/sec) for the light sphere", FCVAR_NOTIFY, true, 5.0, true, 200.0);
 
@@ -241,6 +241,7 @@ void FireAerialFlare(int client)
     SetEntPropFloat(ent, Prop_Data, "m_flGravity", 0.15); // low gravity = parabolic arc, reaches good height
     DispatchSpawn(ent);
     TeleportEntity(ent, vPos, vAng, vVel);
+    SDKHook(ent, SDKHook_Touch, OnFlareTouch);
 
     // Sound
     EmitAmbientSound("weapons/grenade_launcher/grenadefire/grenade_launcher_fire_1.wav", vPos, SOUND_FROM_WORLD, SNDLEVEL_NORMAL);
@@ -265,8 +266,37 @@ void FireAerialFlare(int client)
     dp.WriteCell(client);
     CreateTimer(0.05, Timer_CheckApex, dp, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
 
-    // Safety timeout — force detonate after 2s if apex not detected
-    CreateTimer(2.0, Timer_SafetyTimeout, EntIndexToEntRef(ent), TIMER_FLAG_NO_MAPCHANGE);
+    // Fuse timeout — 2.5s (FLARE_FUSE_TIME) force detonate, covers air-wall/narrow tunnel where apex never reached
+    CreateTimer(g_fFuseTime, Timer_SafetyTimeout, EntIndexToEntRef(ent), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// ============================================================================
+// Touch — air-wall / ceiling / narrow tunnel immediate detonate
+// ============================================================================
+public Action OnFlareTouch(int ent, int other)
+{
+    if (ent <= 0 || !IsValidEntity(ent)) return Plugin_Continue;
+    // other==0 world, func_brush air-wall is also world (contents), just detonate
+    float detPos[3];
+    GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", detPos);
+    int client = GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity");
+    if (client < 1 || client > MaxClients) client = 0;
+    // prevent double spawn: kill first, apex timer will see invalid and stop
+    AcceptEntityInput(ent, "Kill");
+    float groundZ = detPos[2];
+    float down[3] = {90.0, 0.0, 0.0};
+    Handle trace = TR_TraceRayFilterEx(detPos, down, MASK_PLAYERSOLID, RayType_Infinite, TraceFilter_NoSelf, client);
+    if (TR_DidHit(trace))
+    {
+        float endPos[3];
+        TR_GetEndPosition(endPos, trace);
+        groundZ = endPos[2];
+    }
+    delete trace;
+    LogMessage("[aerial_flare] touch at (%.1f,%.1f,%.1f) other=%d", detPos[0], detPos[1], detPos[2], other);
+    EmitAmbientSound("weapons/grenade_launcher/grenadefire/grenade_launcher_explode_2.wav", detPos, SOUND_FROM_WORLD, SNDLEVEL_GUNFIRE);
+    SpawnLightSphere(detPos, groundZ);
+    return Plugin_Handled;
 }
 
 // ============================================================================

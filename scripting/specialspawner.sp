@@ -159,6 +159,9 @@ ConVar
 	g_cRestForce,
 	g_cRestPerfMin,				// v6.3.0 完美剿灭奖励区间
 	g_cRestPerfMax,
+	g_cPerfectHealthBonus,		// v6.6.0 完美剿灭实血奖励（+5实血，虚实合计≤100，满额虚转实）
+	g_cCompRestBonus,			// v6.7.0 补偿剿灭下一波冷静期额外秒数
+	g_cCompNextTankChance,		// v6.7.0 补偿剿灭下一波Tank概率覆盖（共享给 tank_mutator）
 	// v2.5.0 剿灭得分（三档互斥, 波次清缴完成时全体生还者每人得分）
 	g_cClearScoreBase,
 	g_cClearScorePerfect,
@@ -374,7 +377,7 @@ public Plugin myinfo = {
 	name = "Special Spawner",
 	author = "Tordecybombo, breezy",
 	description = "Provides customisable special infected spawing beyond vanilla coop limits",
-	version = "6.5.0",		// v6.5.0 点位人性化三件套: 分散降级(治failClose饿死803次/日) + 不可见兜底距离上限(治幽灵处决) + 可见性评估提前
+	version = "6.7.0",		// v6.7.0 补偿剿灭惩罚: 下波冷静期+6s，Tank基础概率3%
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
@@ -640,6 +643,11 @@ public void OnPluginStart() {
 	// v6.3.0 完美剿灭奖励: 波内无人倒地/死亡 → 冷静期改抽 20-30s
 	g_cRestPerfMin =				CreateConVar("ss_rest_perfect_min",		"20.0",						"完美剿灭奖励: 冷静期下限(波内无人倒地/死亡)", _, true, 1.0, true, 60.0);
 	g_cRestPerfMax =				CreateConVar("ss_rest_perfect_max",		"30.0",						"完美剿灭奖励: 冷静期上限", _, true, 1.0, true, 60.0);
+	// v6.6.0 完美剿灭实血奖励: 达成完美剿灭时全体存活且站立的生还者 +5实血，实+虚≤100，满额时虚转实
+	g_cPerfectHealthBonus =			CreateConVar("ss_perfect_health_bonus",	"5",						"完美剿灭实血奖励: 完美时每人+实血数(0=关闭)", _, true, 0.0, true, 100.0);
+	// v6.7.0 补偿剿灭惩罚: 损伤过多→下一波冷静期+6s，Tank基础概率3%
+	g_cCompRestBonus =				CreateConVar("ss_comp_rest_bonus",		"6.0",						"补偿剿灭下一波冷静期额外秒数", _, true, 0.0, true, 60.0);
+	g_cCompNextTankChance =			CreateConVar("ss_comp_next_tank_chance","-1.0",						"补偿剿灭下一波Tank概率覆盖(-1=用默认)", _, true, -1.0, true, 1.0);
 	// v2.5.0 剿灭得分（用户设计 2026-08-17）: 波次清缴完成时全体生还者每人得分, 三档互斥:
 	// 完美（波内无人倒地/死亡）> 补偿（倒地/死亡 ≥ 队伍人数×ss_clear_comp_ratio）> 基础（其余）。
 	// Tank 波（tank_wave_mutator 突变, SS_MarkWaveTank）三档同乘 ss_clear_tank_mult。
@@ -2962,6 +2970,18 @@ Action tmrClearCheck(Handle timer) {
 // forward 里判定"下一波是否 Tank"并可能把 ss_rest_min/max ×1.5（用户设计：
 // Tank 波前冷静期 37.5-52.5s）。先通知后抽取才能让倍率作用于本波。
 void EnterRest() {
+	// v6.7.0 补偿剿灭下一波惩罚判定（出现损伤过多→下一波冷静期+6s，Tank概率3%）
+	bool bCompClear = false;
+	if (g_bWaveStarted && g_iWaveDownDeaths > 0) {
+		float ratioComp = g_iWaveBase > 0 ? float(g_iWaveDownDeaths) / float(g_iWaveBase) : 0.0;
+		if (ratioComp >= g_cClearCompRatio.FloatValue) bCompClear = true;
+	}
+	if (bCompClear) {
+		if (g_cCompNextTankChance != null) g_cCompNextTankChance.SetFloat(0.03);
+	} else {
+		if (g_cCompNextTankChance != null && g_cCompNextTankChance.FloatValue >= 0.0) g_cCompNextTankChance.SetFloat(-1.0);
+	}
+
 	// 1) 先通知（tank_wave_mutator 判定下一波 + 可能调整 ss_rest cvar ×1.5）。
 	//    参数传 0.0 占位：当前消费者（tank_mutator/si_comp）不使用该值，
 	//    播报在 rest 抽取后重新计算，保证数字精确。
@@ -3010,6 +3030,14 @@ void EnterRest() {
 		else if (!g_bLossCompEnable)
 			g_fWaveLossRate = 0.0;
 	}
+	// v6.7.0 补偿剿灭惩罚: 下一波冷静期额外+6s
+	if (bCompClear && g_cCompRestBonus != null) {
+		float bonus = g_cCompRestBonus.FloatValue;
+		if (bonus > 0.0) {
+			rest += bonus;
+			LogMessage("[SS] Comp bonus REST: +%.1fs (comp tier)", bonus);
+		}
+	}
 	g_Phase = PHASE_REST;
 	if (g_hRestTimer != null && IsValidHandle(g_hRestTimer))
 		delete g_hRestTimer;
@@ -3030,6 +3058,64 @@ void EnterRest() {
 	// v2.5.0 剿灭得分结算（发钱 + 播报合并进清剿完成消息；原"波次清剿完毕"播报由
 	// SettleWaveClearScore 内部按零波/关闭时兜底输出）
 	SettleWaveClearScore(totalCountdown);
+}
+
+// v6.6.0 完美剿灭实血奖励: 虚实合计≤100，满额虚转实
+stock int SS_GetTempHealth(int client) {
+	float buffer = GetEntPropFloat(client, Prop_Send, "m_healthBuffer");
+	float time = GetEntPropFloat(client, Prop_Send, "m_healthBufferTime");
+	ConVar cv = FindConVar("pain_pills_decay_rate");
+	float decay = cv != null ? cv.FloatValue : 0.27;
+	float cur = buffer - (GetGameTime() - time) * decay;
+	if (cur < 0.0) cur = 0.0;
+	return RoundToCeil(cur);
+}
+stock void SS_SetSurvivorHealth(int client, int perm, int temp) {
+	if (perm < 0) perm = 0; if (perm > 100) perm = 100;
+	if (temp < 0) temp = 0; if (temp > 100) temp = 100;
+	SetEntProp(client, Prop_Send, "m_iHealth", perm);
+	SetEntPropFloat(client, Prop_Send, "m_healthBuffer", float(temp));
+	SetEntPropFloat(client, Prop_Send, "m_healthBufferTime", GetGameTime());
+}
+void RewardPerfectHealth(int &healthGiven, int &pointGiven) {
+	healthGiven = 0; pointGiven = 0;
+	int bonus = g_cPerfectHealthBonus != null ? g_cPerfectHealthBonus.IntValue : 5;
+	if (bonus <= 0) return;
+	for (int i = 1; i <= MaxClients; i++) {
+		if (!IsClientInGame(i) || GetClientTeam(i) != 2) continue;
+		if (!IsPlayerAlive(i)) continue;
+		if (GetEntProp(i, Prop_Send, "m_isIncapacitated")) continue;
+		if (GetEntProp(i, Prop_Send, "m_isHangingFromLedge")) continue;
+		int perm = GetEntProp(i, Prop_Send, "m_iHealth");
+		if (perm >= 100) {
+			if (GetFeatureStatus(FeatureType_Native, "SH_AddWallet") == FeatureStatus_Available) {
+				SH_AddWallet(i, 50);
+			}
+			pointGiven++;
+			LogMessage("[SS] Perfect bonus: %N perm 100 -> +50 points (instead of health)", i);
+			continue;
+		}
+		int temp = SS_GetTempHealth(i);
+		int totalBefore = perm + temp;
+		int newPerm, newTemp;
+		if (totalBefore >= 100) {
+			newPerm = perm + bonus;
+			if (newPerm > 100) newPerm = 100;
+			newTemp = totalBefore - newPerm;
+			if (newTemp < 0) newTemp = 0;
+			if (newTemp > 100) newTemp = 100;
+		} else {
+			newPerm = perm + bonus;
+			newTemp = temp;
+			if (newPerm + newTemp > 100) newPerm = 100 - newTemp;
+			if (newPerm > 100) newPerm = 100;
+			if (newPerm < 0) newPerm = 0;
+		}
+		if (newPerm == perm && newTemp == temp) continue;
+		SS_SetSurvivorHealth(i, newPerm, newTemp);
+		healthGiven++;
+		LogMessage("[SS] Perfect health +%d: %N %d+%d=%d -> %d+%d=%d", bonus, i, perm, temp, totalBefore, newPerm, newTemp, newPerm+newTemp);
+	}
 }
 
 // v2.5.0 剿灭得分结算（用户设计 2026-08-17 拍板）:
@@ -3091,6 +3177,11 @@ void SettleWaveClearScore(float totalCountdown) {
 		}
 	}
 
+	int healthBonus = 0, pointBonus = 0;
+	// v6.6.0 完美剿灭实血奖励: 完美时全体存活站立者 +5实血，满实血转50分（实+虚≤100，满额虚转实）
+	if (g_bWaveStarted && g_iWaveDownDeaths == 0) {
+		RewardPerfectHealth(healthBonus, pointBonus);
+	}
 	if (score > 0) {
 		// 入账: 全体生还者（含 bot; si_hud 未加载时静默跳过——optional native 守卫）
 		if (GetFeatureStatus(FeatureType_Native, "SH_AddWallet") == FeatureStatus_Available) {
@@ -3102,12 +3193,17 @@ void SettleWaveClearScore(float totalCountdown) {
 		// v2.5.3 FIX: LogMessage 格式串参数不匹配（v2.5.0-2.5.2: downDeaths=%d/%d 缺
 		// 第二个值 + tank=%s 传 int）→ 每次结算抛 "String formatted incorrectly"
 		// 异常 → 函数中断 → 剿灭播报永远不显示（分已入账）。8 格式符 ↔ 8 参数。
-		LogMessage("[SS] Clear score: tier=%s score=%d downDeaths=%d/%d base=%d tank=%d next=%ds (timeMult=%.2f loss=%.0f%% sys=%d/%d)",
+		LogMessage("[SS] Clear score: tier=%s score=%d downDeaths=%d/%d base=%d tank=%d next=%ds (timeMult=%.2f loss=%.0f%% sys=%d/%d) health=%d points=%d",
 			tier, score, g_iWaveDownDeaths, g_iWaveBase, g_iWaveBase,
-			g_bWaveHadTank ? 1 : 0, total, timeMult, g_fWaveLossRate*100.0, g_iWaveSystemKills, g_iWaveBudget);
-		// v6.2.0 损失补偿静默生效：不公示扣减/冷静压缩细节，保持原播报格式
-		PrintToChatAll("\x04[特感]\x01 本波次剿灭完成，\x03%s%s\x01全体 \x05+%d\x01 分，下一波来袭 \x05%d\x01 秒",
-			tankTag, tier, score, total);
+			g_bWaveHadTank ? 1 : 0, total, timeMult, g_fWaveLossRate*100.0, g_iWaveSystemKills, g_iWaveBudget, healthBonus, pointBonus);
+		if (StrEqual(tier, "完美剿灭")) {
+			// 统一播报 +5生命，满血者静默转50分不单独播报
+			PrintToChatAll("\x04[特感]\x01 本波次剿灭完成，\x03%s%s\x01全体\x05+%d\x01分 \x05+5生命\x01，下一波来袭 \x05%d\x01 秒",
+				tankTag, tier, score, total);
+		} else {
+			PrintToChatAll("\x04[特感]\x01 本波次剿灭完成，\x03%s%s\x01全体 \x05+%d\x01 分，下一波来袭 \x05%d\x01 秒",
+				tankTag, tier, score, total);
+		}
 	} else {
 		// 零波或关闭: 保持原播报
 		PrintToChatAll("\x04[特感]\x01 波次清剿完毕，\x05%d\x01 秒后下一波", total);

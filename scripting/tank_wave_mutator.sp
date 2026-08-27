@@ -60,7 +60,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "2.7.12"
+#define PLUGIN_VERSION "2.7.13"
 
 // 配置常量
 #define MUTATION_CHANCE 0.07        // 7% 突变概率（v2.7.0 2026-08-17: 10%→7%, 波次密度提高后惩罚后移）
@@ -246,9 +246,16 @@ public void SS_OnWaveRest(float totalCountdown) {
         shouldSpawnTank = true;
         Format(reason, sizeof(reason), "Guaranteed (no tank for %d waves)", g_iNoTankWaves);
     } else {
-        // 10% 随机突变
+        // 10% 随机突变 / 补偿波后 3%
+        float mutationChance = MUTATION_CHANCE;
+        ConVar hComp = FindConVar("ss_comp_next_tank_chance");
+        if (hComp != null && hComp.FloatValue >= 0.0) {
+            mutationChance = hComp.FloatValue;
+            hComp.SetFloat(-1.0);
+            LogMessage("[Tank Mutator] Comp override: next wave mutation %.1f%%", mutationChance * 100.0);
+        }
         float roll = GetURandomFloat();
-        if (roll < MUTATION_CHANCE) {
+        if (roll < mutationChance) {
             shouldSpawnTank = true;
             Format(reason, sizeof(reason), "Random mutation (rolled %.1f%%)", roll * 100.0);
         } else {
