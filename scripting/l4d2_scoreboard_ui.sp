@@ -20,7 +20,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.3.1"
+#define PLUGIN_VERSION      "1.3.2"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -63,7 +63,7 @@ public void OnPluginStart()
     CreateConVar("sui_version", PLUGIN_VERSION, "Plugin Version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 
     g_cvEnable    = CreateConVar("sui_enable", "1", "常驻得分榜总开关 [0=关|1=开]", _, true, 0.0, true, 1.0);
-    g_cvTop       = CreateConVar("sui_top", "3", "显示前 N 名 [1-3]（标题+表头+3行）", _, true, 1.0, true, 3.0);
+    g_cvTop       = CreateConVar("sui_top", "5", "显示前 N 名 [1-5]（标题+表头+5行）", _, true, 1.0, true, 5.0);
     g_cvInterval  = CreateConVar("sui_interval", "1.0", "刷新间隔秒（修改需重载插件）", _, true, 0.5, true, 10.0);
     g_cvNameLen   = CreateConVar("sui_name_len", "10", "玩家名最大字节数（UTF-8 安全截断）", _, true, 4.0, true, 24.0);
 
@@ -74,12 +74,14 @@ public void OnMapStart()
 {
     RemoveAllHUD();
     EnableHUD();
-    // 5 行表: 标题 0.02, 表头 0.05, 数据 0.08/0.11/0.14, 宽 0.40 紧贴内容 (图3 0.55 太宽拦中屏)
+    // 7 行表: 标题 0.02, 表头 0.05, 数据 0.08/0.11/0.14/0.17/0.20, 宽 0.40
     HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.40, 0.025);
     HUDPlace(HUD_LEFT_BOT, 0.02, 0.05, 0.40, 0.025);
     HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.40, 0.025);
     HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.40, 0.025);
     HUDPlace(HUD_RIGHT_TOP,0.02, 0.14, 0.40, 0.025);
+    HUDPlace(HUD_RIGHT_BOT,0.02, 0.17, 0.40, 0.025);
+    HUDPlace(HUD_TICKER,   0.02, 0.20, 0.40, 0.025);
     g_bHudReady = true;
 
     if (g_hTimer == null)
@@ -115,6 +117,8 @@ public Action Timer_Refresh(Handle timer)
         HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.40, 0.025);
         HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.40, 0.025);
         HUDPlace(HUD_RIGHT_TOP,0.02, 0.14, 0.40, 0.025);
+        HUDPlace(HUD_RIGHT_BOT,0.02, 0.17, 0.40, 0.025);
+        HUDPlace(HUD_TICKER,   0.02, 0.20, 0.40, 0.025);
         g_bHudReady = true;
     }
     HUDPlace(HUD_LEFT_TOP, 0.02, 0.02, 0.40, 0.025);
@@ -122,12 +126,14 @@ public Action Timer_Refresh(Handle timer)
     HUDPlace(HUD_MID_TOP,  0.02, 0.08, 0.40, 0.025);
     HUDPlace(HUD_MID_BOT,  0.02, 0.11, 0.40, 0.025);
     HUDPlace(HUD_RIGHT_TOP,0.02, 0.14, 0.40, 0.025);
+    HUDPlace(HUD_RIGHT_BOT,0.02, 0.17, 0.40, 0.025);
+    HUDPlace(HUD_TICKER,   0.02, 0.20, 0.40, 0.025);
     for (int s = HUD_SCORE_TITLE; s <= HUD_SCORE_4; s++) RemoveHUD(s);
     // 旧 LEFT/MID 以外残留也清 (5槽外)
     RemoveHUD(HUD_RIGHT_BOT);
     RemoveHUD(HUD_TICKER);
 
-    char lines[5][128];
+    char lines[7][128];
     int lineCount = BuildLeaderboard(lines);
 
     if (!g_cvEnable.BoolValue)
@@ -138,18 +144,20 @@ public Action Timer_Refresh(Handle timer)
 
     if (lineCount == 1 && (StrContains(lines[0], "未加载") != -1 || StrContains(lines[0], "暂无数据") != -1))
     {
-        int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT; // 无底框 (用户定)
+        int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT;
         HUDSetLayout(HUD_LEFT_TOP, flags, lines[0]);
         RemoveHUD(HUD_LEFT_BOT);
         RemoveHUD(HUD_MID_TOP);
         RemoveHUD(HUD_MID_BOT);
         RemoveHUD(HUD_RIGHT_TOP);
+        RemoveHUD(HUD_RIGHT_BOT);
+        RemoveHUD(HUD_TICKER);
         return Plugin_Continue;
     }
 
-    int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT; // 无底框
-    int slots[5] = {HUD_LEFT_TOP, HUD_LEFT_BOT, HUD_MID_TOP, HUD_MID_BOT, HUD_RIGHT_TOP};
-    for (int i = 0; i < 5; i++)
+    int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT;
+    int slots[7] = {HUD_LEFT_TOP, HUD_LEFT_BOT, HUD_MID_TOP, HUD_MID_BOT, HUD_RIGHT_TOP, HUD_RIGHT_BOT, HUD_TICKER};
+    for (int i = 0; i < 7; i++)
     {
         int slot = slots[i];
         if (i < lineCount)
@@ -160,8 +168,8 @@ public Action Timer_Refresh(Handle timer)
     return Plugin_Continue;
 }
 
-// 组装 5 行 Excel 表，返回行数
-int BuildLeaderboard(char lines[5][128])
+// 组装 7 行 Excel 表 (标题+表头+TOP5)，返回行数
+int BuildLeaderboard(char lines[7][128])
 {
     if (!g_bCoreAvailable)
     {
@@ -216,12 +224,10 @@ int BuildLeaderboard(char lines[5][128])
 
     int top = g_cvTop.IntValue;
     if (top > count) top = count;
-    if (top > 3) top = 3;
+    if (top > 5) top = 5;
 
-    // 标题 + 表头 (Excel 列头, 五属性)
-    Format(lines[0], 128, "[得分榜 TOP%d] 共%d人  积分>特感>击杀", top, count);
-    // 表头对齐: #  玩家       积分 特感 击杀  友伤 被黑
-    // 宽度: #3  玩家10  积分5 特感4 击杀4 友伤5 被黑4  (127 内)
+    // 标题 (去排序提示) + 表头
+    Format(lines[0], 128, "[得分榜 TOP%d] 共%d人", top, count);
     Format(lines[1], 128, "%-3s %-10s %5s %4s %4s %5s %4s", "#", "玩家", "积分", "特感", "击杀", "友伤", "被黑");
 
     char name[32];
