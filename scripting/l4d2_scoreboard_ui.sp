@@ -20,7 +20,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.3.8"
+#define PLUGIN_VERSION      "1.3.9"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -72,7 +72,7 @@ public void OnPluginStart()
     if (g_cvTop.IntValue > 5) g_cvTop.SetInt(5);
     else if (g_cvTop.IntValue < 1) g_cvTop.SetInt(1);
     g_cvInterval  = CreateConVar("sui_interval", "1.0", "刷新间隔秒（修改需重载插件）", _, true, 0.5, true, 10.0);
-    g_cvNameLen   = CreateConVar("sui_name_len", "10", "玩家名最大字节数（UTF-8 安全截断）", _, true, 4.0, true, 24.0);
+    g_cvNameLen   = CreateConVar("sui_name_len", "12", "玩家名最大显示宽（CJK=2, UTF-8 截断）", _, true, 4.0, true, 24.0);
     RegConsoleCmd("sm_boarddebug", Cmd_BoardDebug, "Dump raw board values (blacked check)");
 
     AutoExecConfig(true, "l4d2_scoreboard_ui");
@@ -82,14 +82,14 @@ public void OnMapStart()
 {
     RemoveAllHUD();
     EnableHUD();
-    // 7 行表: 标题 0.02, 表头 0.044, 数据 0.068/0.092/0.116/0.14/0.164, 紧凑 0.024 步进, 高 0.022
-    HUDPlace(HUD_LEFT_TOP, 0.02, 0.020, 0.42, 0.022);
-    HUDPlace(HUD_LEFT_BOT, 0.02, 0.044, 0.42, 0.022);
-    HUDPlace(HUD_MID_TOP,  0.02, 0.068, 0.42, 0.022);
-    HUDPlace(HUD_MID_BOT,  0.02, 0.092, 0.42, 0.022);
-    HUDPlace(HUD_RIGHT_TOP,0.02, 0.116, 0.42, 0.022);
-    HUDPlace(HUD_RIGHT_BOT,0.02, 0.140, 0.42, 0.022);
-    HUDPlace(HUD_TICKER,   0.02, 0.164, 0.42, 0.022);
+    // 7 行表: 标题 0.02, 表头 0.044, 数据 0.068/0.092/0.116/0.14/0.164, 紧凑 0.024, 宽 0.50 放长ID
+    HUDPlace(HUD_LEFT_TOP, 0.02, 0.020, 0.50, 0.022);
+    HUDPlace(HUD_LEFT_BOT, 0.02, 0.044, 0.50, 0.022);
+    HUDPlace(HUD_MID_TOP,  0.02, 0.068, 0.50, 0.022);
+    HUDPlace(HUD_MID_BOT,  0.02, 0.092, 0.50, 0.022);
+    HUDPlace(HUD_RIGHT_TOP,0.02, 0.116, 0.50, 0.022);
+    HUDPlace(HUD_RIGHT_BOT,0.02, 0.140, 0.50, 0.022);
+    HUDPlace(HUD_TICKER,   0.02, 0.164, 0.50, 0.022);
     g_bHudReady = true;
 
     if (g_hTimer == null)
@@ -120,22 +120,22 @@ public Action Timer_Refresh(Handle timer)
     {
         RemoveAllHUD();
         EnableHUD();
-        HUDPlace(HUD_LEFT_TOP, 0.02, 0.020, 0.42, 0.022);
-        HUDPlace(HUD_LEFT_BOT, 0.02, 0.044, 0.42, 0.022);
-        HUDPlace(HUD_MID_TOP,  0.02, 0.068, 0.42, 0.022);
-        HUDPlace(HUD_MID_BOT,  0.02, 0.092, 0.42, 0.022);
-        HUDPlace(HUD_RIGHT_TOP,0.02, 0.116, 0.42, 0.022);
-        HUDPlace(HUD_RIGHT_BOT,0.02, 0.140, 0.42, 0.022);
-        HUDPlace(HUD_TICKER,   0.02, 0.164, 0.42, 0.022);
+        HUDPlace(HUD_LEFT_TOP, 0.02, 0.020, 0.50, 0.022);
+        HUDPlace(HUD_LEFT_BOT, 0.02, 0.044, 0.50, 0.022);
+        HUDPlace(HUD_MID_TOP,  0.02, 0.068, 0.50, 0.022);
+        HUDPlace(HUD_MID_BOT,  0.02, 0.092, 0.50, 0.022);
+        HUDPlace(HUD_RIGHT_TOP,0.02, 0.116, 0.50, 0.022);
+        HUDPlace(HUD_RIGHT_BOT,0.02, 0.140, 0.50, 0.022);
+        HUDPlace(HUD_TICKER,   0.02, 0.164, 0.50, 0.022);
         g_bHudReady = true;
     }
-    HUDPlace(HUD_LEFT_TOP, 0.02, 0.020, 0.42, 0.022);
-    HUDPlace(HUD_LEFT_BOT, 0.02, 0.044, 0.42, 0.022);
-    HUDPlace(HUD_MID_TOP,  0.02, 0.068, 0.42, 0.022);
-    HUDPlace(HUD_MID_BOT,  0.02, 0.092, 0.42, 0.022);
-    HUDPlace(HUD_RIGHT_TOP,0.02, 0.116, 0.42, 0.022);
-    HUDPlace(HUD_RIGHT_BOT,0.02, 0.140, 0.42, 0.022);
-    HUDPlace(HUD_TICKER,   0.02, 0.164, 0.42, 0.022);
+    HUDPlace(HUD_LEFT_TOP, 0.02, 0.020, 0.50, 0.022);
+    HUDPlace(HUD_LEFT_BOT, 0.02, 0.044, 0.50, 0.022);
+    HUDPlace(HUD_MID_TOP,  0.02, 0.068, 0.50, 0.022);
+    HUDPlace(HUD_MID_BOT,  0.02, 0.092, 0.50, 0.022);
+    HUDPlace(HUD_RIGHT_TOP,0.02, 0.116, 0.50, 0.022);
+    HUDPlace(HUD_RIGHT_BOT,0.02, 0.140, 0.50, 0.022);
+    HUDPlace(HUD_TICKER,   0.02, 0.164, 0.50, 0.022);
     for (int s = HUD_SCORE_TITLE; s <= HUD_SCORE_4; s++) RemoveHUD(s);
 
     char lines[7][128];
@@ -233,17 +233,17 @@ int BuildLeaderboard(char lines[7][128])
 
     // 标题 (去排序提示)
     Format(lines[0], 128, "[得分榜 TOP%d] 共%d人", top, count);
-    // 表头: 左对齐, 列间距拉宽到2空格, 保证数字列不串
+    // 表头: 左对齐, 玩家-积分间距拉宽到4空格给长ID留足, 其余2空格
     {
         char hRank[16], hName[32], hScore[16], hSI[16], hKill[16], hFF[16], hBlk[16];
         PadRight(hRank, sizeof(hRank), "#", 3);
-        PadRight(hName, sizeof(hName), "玩家", 10);
+        PadRight(hName, sizeof(hName), "玩家", 12);
         PadRight(hScore, sizeof(hScore), "积分", 6);
         PadRight(hSI, sizeof(hSI), "特感", 4);
         PadRight(hKill, sizeof(hKill), "击杀", 4);
         PadRight(hFF, sizeof(hFF), "友伤", 5);
         PadRight(hBlk, sizeof(hBlk), "被黑", 5);
-        Format(lines[1], 128, "%s  %s  %s  %s  %s  %s  %s", hRank, hName, hScore, hSI, hKill, hFF, hBlk);
+        Format(lines[1], 128, "%s  %s    %s  %s  %s  %s  %s", hRank, hName, hScore, hSI, hKill, hFF, hBlk);
     }
 
     char name[32];
@@ -253,13 +253,13 @@ int BuildLeaderboard(char lines[7][128])
         int c = clients[k];
         GetClientName(c, name, sizeof(name));
         SanitizeName(name, nameMax);
-        // 玩家名按显示宽度截断补齐, 保证 Excel 对齐 (最长 10 显示宽, CJK=2)
-        TruncateByDisplayWidth(name, 10);
+        // 玩家名按显示宽度截断补齐, 最长 12 显示宽 (用户: 给长ID留够, 4空格间距)
+        TruncateByDisplayWidth(name, 12);
         char namePad[32], rankPad[16], scorePad[16], siPad[16], killPad[16], ffPad[16], blkPad[16];
         char rankStr[8], scoreStr[16], siStr[16], killStr[16], ffStr[16], blkStr[16];
         Format(rankStr, sizeof(rankStr), "#%d", k+1);
         PadRight(rankPad, sizeof(rankPad), rankStr, 3);
-        PadRight(namePad, sizeof(namePad), name, 10);
+        PadRight(namePad, sizeof(namePad), name, 12);
         int si = SH_GetSIKills(c);
         int kill = SH_GetCommonKills(c);
         int ff = 0, blacked = 0;
@@ -279,7 +279,7 @@ int BuildLeaderboard(char lines[7][128])
         PadRight(killPad, sizeof(killPad), killStr, 4);
         PadRight(ffPad, sizeof(ffPad), ffStr, 5);
         PadRight(blkPad, sizeof(blkPad), blkStr, 5);
-        Format(lines[2+k], 128, "%s  %s  %s  %s  %s  %s  %s", rankPad, namePad, scorePad, siPad, killPad, ffPad, blkPad);
+        Format(lines[2+k], 128, "%s  %s    %s  %s  %s  %s  %s", rankPad, namePad, scorePad, siPad, killPad, ffPad, blkPad);
     }
     return 2 + top;
 }
