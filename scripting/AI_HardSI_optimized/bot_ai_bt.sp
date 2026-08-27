@@ -1161,10 +1161,10 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
     if (GetEntProp(client, Prop_Send, "m_isIncapacitated") || GetEntProp(client, Prop_Send, "m_isHangingFromLedge")) return Plugin_Continue;
     g_iTickCounter[client]++;
     if (g_iTickCounter[client] < TICK_INTERVAL) {
-        // P0-5: 对齐 SI v5.23.2 — 非决策帧交还 Valve，仅保留视角保真窗口
-        // 旧 Lite 重放 IN_USE/MOVE 致 33ms 旧意图泄漏 + 梯子卡死
+        // 热修：生还者 Lite 帧抑跳 — 连续原地起跳根因为 StuckDetour 每 0.6s 注入 JUMP 且 Lite 透传 Valve 跳
+        buttons &= ~IN_JUMP;
         if (g_bBT_AnglesSet[client]) BT_ApplyAngles(client, angles);
-        return Plugin_Continue;
+        return Plugin_Changed;
     }
     g_iTickCounter[client]=0;
     if (!BT_IsBound(client)) return Plugin_Continue;

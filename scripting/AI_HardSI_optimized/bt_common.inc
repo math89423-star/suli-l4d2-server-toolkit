@@ -112,13 +112,16 @@ stock bool BT_StuckDetour(int client) {
             // v5.37: Smoker 拉人/瞄准时不跳——m_tongueVictim>0 表示正在拖拽，
             // 跳跃会断舌或观感"原地蹦"。同理 Hunter 扑击中不跳。
             bool skipJump = false;
-            int zClass = GetEntProp(client, Prop_Send, "m_zombieClass");
-            if (zClass == 1) {  // Smoker
-                int victim = GetEntPropEnt(client, Prop_Send, "m_tongueVictim");
-                if (victim > 0) skipJump = true;
-            } else if (zClass == 3) {  // Hunter
-                int victim = GetEntPropEnt(client, Prop_Send, "m_pounceVictim");
-                if (victim > 0) skipJump = true;
+            if (GetClientTeam(client) == 2) skipJump = true; // 生还者抑跳：原地起跳主因，绕行即可
+            else {
+                int zClass = GetEntProp(client, Prop_Send, "m_zombieClass");
+                if (zClass == 1) {  // Smoker
+                    int victim = GetEntPropEnt(client, Prop_Send, "m_tongueVictim");
+                    if (victim > 0) skipJump = true;
+                } else if (zClass == 3) {  // Hunter
+                    int victim = GetEntPropEnt(client, Prop_Send, "m_pounceVictim");
+                    if (victim > 0) skipJump = true;
+                }
             }
             if (!skipJump) {
                 float jumpUntil = BB_GetFloat(client, "_stuck_jump_until", 0.0);
