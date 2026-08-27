@@ -13,8 +13,8 @@ stock bool Wave_IsStaging() { return false; }
 public Plugin myinfo = {
     name = "Bot AI BT - Survivor",
     author = "Muse Spark",
-    description = "Survivor bot AI via Behavior Tree (follow/scout/door/scavenge/rescue/combat + acid/mounted gun, rescue 4-branch + heal + dodge + flow + formation, priority fix 1.7.6)",
-    version = "1.7.6",
+    description = "Survivor bot AI via Behavior Tree (follow/scout/door/scavenge/rescue/combat + acid/mounted gun, rescue 4-branch + heal + dodge + flow + formation, priority fix 1.7.7)",
+    version = "1.7.7",
     url = ""
 };
 
@@ -80,19 +80,17 @@ stock int GetClosestHangingTeammate(float pos[3]) {
     return best;
 }
 stock int GetClosestDeadWithDefib(float pos[3]) {
-    // 找携带电击器的 bot 附近的死亡队友
+    bool hasDefib=false;
+    for(int b=1;b<=MaxClients;b++) if (IsSurvivorBot(b) && IsPlayerAlive(b)) {
+        int ent = GetPlayerWeaponSlot(b, 3);
+        if (ent>0) {
+            char cls[32]; GetEdictClassname(ent, cls, sizeof(cls));
+            if (StrContains(cls,"defibrillator")!=-1) { hasDefib=true; break; }
+        }
+    }
+    if (!hasDefib) return -1;
     int best=-1; float bestDist=999999.0;
     for (int i=1;i<=MaxClients;i++) if (IsClientInGame(i) && GetClientTeam(i)==2 && !IsPlayerAlive(i)) {
-        // 检查是否有 bot 携带电击器且在范围内
-        bool hasDefib=false;
-        for(int b=1;b<=MaxClients;b++) if (IsSurvivorBot(b) && IsPlayerAlive(b)) {
-            int ent = GetPlayerWeaponSlot(b, 3);
-            if (ent>0) {
-                char cls[32]; GetEdictClassname(ent, cls, sizeof(cls));
-                if (StrContains(cls,"defibrillator")!=-1) { hasDefib=true; break; }
-            }
-        }
-        if (!hasDefib) return -1;
         float p[3]; GetClientAbsOrigin(i,p);
         float d = GetVectorDistance(pos,p);
         if (d < 2500.0 && d < bestDist) { bestDist=d; best=i; }
@@ -141,8 +139,8 @@ stock bool IsItemFlowValid(float itemPos[3]) {
     int lead = SI_GetLeadFlow();
     if (lead < 0) return true;
     int diff = itemFlow - lead;
-    // 允许前方 400 内或后方 150 内，防大幅回头
-    if (diff > -150 && diff < 400) return true;
+    // 仅前方 50-400，防回头穿图（原 -150 允许大幅回头）
+    if (diff > 50 && diff < 400) return true;
     return false;
 }
 stock int CountTeamWeaponType(const char[] typeSubstr) {
@@ -244,8 +242,13 @@ BT_Status BotCond_TeammateHangingNearby(int client) {
 }
 BT_Status BotCond_DeadWithDefibNearby(int client) {
     float pos[3]; GetClientAbsOrigin(client,pos);
+    if (IsTankNear(pos, 700.0) || FindVisibleSI(client, 400.0) > 0) return BT_FAILURE;
     int t = GetClosestDeadWithDefib(pos);
-    if (t>0) { BB_SetInt(client, "rescue_target", t); BB_SetInt(client, "rescue_kind", 3); return BT_SUCCESS; }
+    if (t>0) {
+        float tp[3]; GetClientAbsOrigin(t, tp);
+        if (IsTankNear(tp, 700.0)) return BT_FAILURE;
+        BB_SetInt(client, "rescue_target", t); BB_SetInt(client, "rescue_kind", 3); return BT_SUCCESS;
+    }
     return BT_FAILURE;
 }
 BT_Status BotCond_IsBlackAndWhite(int client) {
@@ -317,11 +320,9 @@ BT_Status BotCond_NeedsWeapon(int client) {
     if (pri>0) {
         int upgrade = GetEntProp(pri, Prop_Send, "m_upgradeBitVec");
         if (upgrade & 4) return BT_FAILURE; // 激光
-        int clip = GetEntProp(pri, Prop_Send, "m_iClip1");
         int ammoType = GetEntProp(pri, Prop_Send, "m_iPrimaryAmmoType");
         int reserve = GetEntProp(client, Prop_Send, "m_iAmmo", _, ammoType);
-        float ratio = (clip + reserve) >0 ? float(clip)/float(clip+reserve) : 1.0;
-        if (ratio > 0.33) return BT_FAILURE; // 备弹充足不换
+        if (reserve > 30) return BT_FAILURE; // 备弹充足不换
     }
     return BT_SUCCESS;
 }
@@ -722,7 +723,10 @@ BT_Status BotAct_RetreatFromAcid(int client) {
                 if (GetVectorDistance(test,aPos)<200.0) { inDanger=true; break; }
             }
         }
-        if (!inDanger) { safePos=test; foundSafe=true; break; }
+        if (!inDanger) {
+            if (L4D2_NavAreaTravelDistance(test, pos, false) < 0.0) inDanger=true;
+            else { safePos=test; foundSafe=true; break; }
+        }
     }
     if (foundSafe) {
         float dir[3], ang[3]; MakeVectorFromPoints(pos,safePos,dir); GetVectorAngles(dir,ang);
@@ -968,6 +972,8 @@ BT_Status BotAct_PickupWeapon(int client) {
 BT_Status BotAct_ShootSI(int client) {
     int target = BB_GetInt(client, "combat_target", -1);
     if (target<=0 || !IsClientInGame(target) || !IsPlayerAlive(target)) return BT_FAILURE;
+    // 酸中不射：脚下有酸时先躲
+    if (BB_GetInt(client, "_inacid_cached", 0)) return BT_FAILURE;
     // 对空开火根因：粘滞期内 LOS 已断仍按旧 target 射
     float myEye[3], tEye[3];
     GetClientEyePosition(client, myEye);
@@ -1050,7 +1056,14 @@ BT_Status BotAct_ThrowGrenade(int client) {
 }
 BT_Status BotAct_FollowHuman(int client) {
     float pos[3]; GetClientAbsOrigin(client,pos);
-    int human = GetClosestHumanSurvivor(pos);
+    // 优先跟领跑者（flow 最前），而非最近人类（避免跟尾部倒退）
+    int human = -1;
+    float bestFlow = -1.0;
+    for (int i=1;i<=MaxClients;i++) if (IsSurvivorHuman(i)) {
+        float f = L4D2Direct_GetFlowDistance(i);
+        if (f > bestFlow) { bestFlow=f; human=i; }
+    }
+    if (human<=0) human = GetClosestHumanSurvivor(pos);
     if (human<=0) return BT_FAILURE;
     float hPos[3]; GetClientAbsOrigin(human,hPos);
     float dist = GetVectorDistance(pos,hPos);
@@ -1061,14 +1074,23 @@ BT_Status BotAct_FollowHuman(int client) {
         float dir[3], ang[3]; MakeVectorFromPoints(pos,hPos,dir); GetVectorAngles(dir,ang);
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
         return BT_RUNNING;
-    } else if (wasHolding && dist < 180.0) {
-        // 滞回 150-180 防抽搐
+    } else if (wasHolding && dist < 200.0) {
         BT_ClearMoveDirection(client);
         float dir[3], ang[3]; MakeVectorFromPoints(pos,hPos,dir); GetVectorAngles(dir,ang);
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
         return BT_RUNNING;
     }
     BB_SetFloat(client, "_follow_hold", 0.0);
+    // 远距/高差用 Flow 寻路，防直线穿墙/梯子卡死
+    float myFlow = L4D2Direct_GetFlowDistance(client);
+    float humanFlow = L4D2Direct_GetFlowDistance(human);
+    if (myFlow >=0 && humanFlow >=0 && humanFlow - myFlow > 200.0) {
+        return ACT_MoveToRouteAhead(client);
+    }
+    if (dist > 400.0) {
+        // 超远距交 nav
+        return ACT_MoveToRouteAhead(client);
+    }
     float dir[3], ang[3]; MakeVectorFromPoints(pos,hPos,dir); GetVectorAngles(dir,ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     BT_AddButton(client, IN_FORWARD);
