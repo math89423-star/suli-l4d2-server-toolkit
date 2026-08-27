@@ -12,7 +12,7 @@
 
 | cvar | 实测值 | 插件对应 | 匹配状态 |
 |------|--------|----------|----------|
-| `z_charge_interval` | **12** | Charger 冲锋冷却簇 `Cooldown(12.0)` | ✅ v4.0.3 对齐 |
+| `z_charge_interval` | **8**（def 12，插件设 8） | Charger 冲锋冷却簇 `Cooldown(8.0)` | ✅ v5.42 对齐 |
 | `z_charge_warmup` | 0.5 | —（冲锋起步加速 0.5s） | — |
 | `z_charge_duration` | **2.5** | —（冲锋持续） | — |
 | `z_charge_start_speed` | 250 | —（起步速度 u/s） | — |

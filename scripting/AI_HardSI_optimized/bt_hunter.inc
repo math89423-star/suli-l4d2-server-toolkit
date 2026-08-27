@@ -502,7 +502,11 @@ BT_Status HunterAct_HarasserApproach(int client) {
         BT_RemoveButton(client, IN_DUCK);
     }
 
-    BT_BeginMovement(client);   // v5.34: 声明运动意图
+    // v5.34: 仅运动态声明意图 — <600 蹲守非运动，误判停滞蹦（P0-1）
+    if (distance >= 600.0)
+        BT_BeginMovement(client);
+    else
+        BB_SetBool(client, "_stuck_movement_intent", false);
     BT_StuckDetour(client);
     return BT_RUNNING;
 }
@@ -1159,20 +1163,10 @@ stock int BT_CreateHunterTree() {
     // v5.23: 且都移到 crouchPrep/sprint 泛用接近之前 —— 路线感知是"战术"
     // 分支，优先级必须高于泛用接近（任务书 §5.2）。
     // ==========================================
-    int routeAmbushSeq = BT_CreateSequence(4,
-        BT_CreateIsAheadOnRoute(500.0),
-        BT_CreateInverter(BT_CreateCondition(CND_HasTargetLOS)),
-        BT_CreateIsNotInRange(700.0),
-        BT_CreateSequence(2,
-            BT_CreateAction(ACT_Crouch),            // 蹲守 = 隐蔽 + 扑击前置态
-            BT_CreateAction(ACT_HoldRouteAmbush)
-        )
-    );
-    int routeFlankSeq = BT_CreateSequence(3,
-        BT_CreateIsBehindOnRoute(800.0),            // 落后 800 flow 以上
-        BT_CreateIsNotInRange(900.0),               // 900u 内已能打，别绕了
-        BT_CreateAction(ACT_MoveToRouteAhead)
-    );
+    // v5.44 激进模式: flow 路线感知两支已移除 —— 远处刷出直接 sprint 朝生还者冲，不蹲守/绕路
+    // 原 routeAmbushSeq(500flow/!LOS/>700 -> Crouch+Hold) 与 routeFlankSeq(落后800flow -> MoveToRouteAhead) 按用户"1"选项禁用
+    // int routeAmbushSeq = BT_CreateSequence(4, BT_CreateIsAheadOnRoute(500.0), ... HoldRouteAmbush);
+    // int routeFlankSeq = BT_CreateSequence(3, BT_CreateIsBehindOnRoute(800.0), ... MoveToRouteAhead);
 
     int root = BT_Create(BTN_SELECTOR);
     // v5.24: 骑乘守卫置顶 —— 扑中后树零输出（引擎管骑乘动画），
@@ -1200,13 +1194,10 @@ stock int BT_CreateHunterTree() {
     BT_AddChild(root, semiApproachSeq);         // 8. v3.2: semi → hug wall
     BT_AddChild(root, closePounceSeq);          // 9. v3.3: close-range direct pounce
     BT_AddChild(root, fastPounceSeq);           // 10. standard fast pounce (Gauss angle)
-    // v5.23 P0 FIX: routeAmbush/routeFlank 移到 crouchPrep 之前 —— 原顺序
-    // sprintApproachSeq（OnGround + >400u，动作恒 RUNNING）排在战术分支之前，
-    // 距离 >400u 时路线战术分支永远被遮蔽（任务书 §5.1）。战术分支优先于
-    // 泛用接近分支（§5.2）：能扑就扑 → 够不到先走路线战术 → 才退泛用接近。
-    BT_AddChild(root, routeAmbushSeq);          // 11. v5.18: flow 前方 → 蹲守埋伏
-    BT_AddChild(root, routeFlankSeq);           // 12. v5.18: flow 后方 → 绕行抢位
-    BT_AddChild(root, crouchPrepSeq);           // 13. v3.3: inRange + noDuck → crouch
+    // v5.44 激进模式: flow 两支已移除，远距直接落泛用接近（sprint/crouchApproach）
+    // BT_AddChild(root, routeAmbushSeq);          // 11. v5.18: flow 前方 → 蹲守埋伏 (已禁用)
+    // BT_AddChild(root, routeFlankSeq);           // 12. v5.18: flow 后方 → 绕行抢位 (已禁用)
+    BT_AddChild(root, crouchPrepSeq);           // 11. v3.3: inRange + noDuck → crouch
     BT_AddChild(root, sprintApproachSeq);       // 14. v3.3: far away → SPRINT full speed
     BT_AddChild(root, crouchApproachSeq);       // 15. v3.3: inRange + ducking + noLOS → strafe+forward
     BT_AddChild(root, wander);                  // 16. last resort

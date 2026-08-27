@@ -371,8 +371,8 @@ BT_Status TankCond_BhopEligible(int client) {
     }
     if (GetSurvivorProximity(tPos, target) > maxDist) return BT_FAILURE;
 
-    // v4.0.5 FIX: 恢复前方墙检测（v3.2 重构丢失 ai_tank_bhop_wall_dist/evade）
-    int wallDist = (g_hCvarTankBhopWall_cached != null) ? GetConVarInt(g_hCvarTankBhopWall_cached) : 200;
+    // v6.8.1: 墙检 200→120 收窄，减少窄巷误判“有墙”导致不开跳；Tank大体型在200内常误触侧墙
+    int wallDist = (g_hCvarTankBhopWall_cached != null) ? GetConVarInt(g_hCvarTankBhopWall_cached) : 120;
     if (Tank_IsWallAhead(client, wallDist)) {
         bool evade = (g_hCvarTankBhopEvade_cached != null) ? GetConVarBool(g_hCvarTankBhopEvade_cached) : true;
         if (!evade) return BT_FAILURE;  // 不绕墙 → 不跳，fallback 地面走
@@ -491,6 +491,13 @@ BT_Status TankAct_AimRock(int client) {
             if (g_hCvarTankRockPitch_cached != null) {
                 ang[0] += GetConVarFloat(g_hCvarTankRockPitch_cached);
             }
+            // v6.8.1: 30% 高抛 — 低抛易被掩体挡，高抛越障；-18~-25° 抬头，存BB供OnRelease校正
+            float highAdd = 0.0;
+            if (dist > 600.0 && GetRandomFloat(0.0, 1.0) < 0.3) {
+                highAdd = GetRandomFloat(-25.0, -18.0);
+                ang[0] += highAdd;
+            }
+            BB_SetFloat(client, "_tank_rock_high_pitch", highAdd);
             BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
         }
     }
@@ -820,32 +827,33 @@ BT_Status TankCond_SpawnPush(int client) {
 
 public Tank_OnModuleStart() {
     // --- Tank ConVars (v3.0 fix: re-create cvars lost during BT refactor) ---
-    CreateConVar("ai_tank_bhop",            "1",   "Enable bhop facsimile on AI tanks", FCVAR_NONE);
-    CreateConVar("ai_tank_rock",            "1",   "Enable rock throws on AI tanks (0=disable)", FCVAR_NONE);
+    // v6.8.2: OnMapStart 重入守卫 — CreateConVar 二次创建抛 "already exists"
+    if (FindConVar("ai_tank_bhop") == null) CreateConVar("ai_tank_bhop",            "1",   "Enable bhop facsimile on AI tanks", FCVAR_NONE);
+    if (FindConVar("ai_tank_rock") == null) CreateConVar("ai_tank_rock",            "1",   "Enable rock throws on AI tanks (0=disable)", FCVAR_NONE);
     // v4.0.5: min_dist 200→400→500 —— 玩家反馈"连跳追击过于困难"。
     // 设计定位：bhop 是远程拉近距离的工具（>min_dist 才跳），进入威胁圈
     // 必须落地走过去 —— 200u 等于贴脸才停，一路蹦到脸上，失去游戏性。
     // 400 仍偏低（玩家反馈后上调），500u = 更早收跳，玩家有完整反应空间。
     // 体验参数可调（sourcemod.cfg 覆盖）。配合 min_dist 收紧，近身时
     // 原版 AI 的移动被每帧清跳约束 → 稳步走进去出拳。
-    CreateConVar("ai_tank_bhop_min_dist",   "500", "Min distance to survivor for bhop (below this: walk, no bhop)", FCVAR_NONE);
-    CreateConVar("ai_tank_bhop_max_dist",   "800", "Max distance to survivor for bhop", FCVAR_NONE);
-    CreateConVar("ai_tank_bhop_wall_dist",  "200", "Trace distance for wall/obstacle check", FCVAR_NONE);
-    CreateConVar("ai_tank_bhop_adaptive",   "1",   "Adaptive bhop cooldown (0=fixed 0.6s)", FCVAR_NONE);
-    CreateConVar("ai_tank_bhop_momentum",   "1",   "Momentum building: consecutive bhops get stronger", FCVAR_NONE);
-    CreateConVar("ai_tank_bhop_evade",      "1",   "Obstacle evasion: sideways bhop around walls", FCVAR_NONE);
-    CreateConVar("ai_tank_punch_jump",      "0",   "Punch-jump combo at close range", FCVAR_NONE);
-    CreateConVar("ai_tank_rage_multiplier", "1.5", "On-fire multiplier for cooldown + push force", FCVAR_NONE);
-    CreateConVar("ai_tank_punch_instakill", "1",   "Instakill: melee punch incaps survivors", FCVAR_NONE);
-    CreateConVar("ai_tank_punch_damage",    "150", "Damage per punch when instakill enabled (>100=incap)", FCVAR_NONE);
-    CreateConVar("ai_tank_aggro_bhop",      "1",   "Aggressive bhop: Tank relentlessly bhops toward target", FCVAR_NONE);
+    if (FindConVar("ai_tank_bhop_min_dist") == null) CreateConVar("ai_tank_bhop_min_dist",   "500", "Min distance to survivor for bhop (below this: walk, no bhop)", FCVAR_NONE);
+    if (FindConVar("ai_tank_bhop_max_dist") == null) CreateConVar("ai_tank_bhop_max_dist",   "800", "Max distance to survivor for bhop", FCVAR_NONE);
+    if (FindConVar("ai_tank_bhop_wall_dist") == null) CreateConVar("ai_tank_bhop_wall_dist",  "200", "Trace distance for wall/obstacle check", FCVAR_NONE);
+    if (FindConVar("ai_tank_bhop_adaptive") == null) CreateConVar("ai_tank_bhop_adaptive",   "1",   "Adaptive bhop cooldown (0=fixed 0.6s)", FCVAR_NONE);
+    if (FindConVar("ai_tank_bhop_momentum") == null) CreateConVar("ai_tank_bhop_momentum",   "1",   "Momentum building: consecutive bhops get stronger", FCVAR_NONE);
+    if (FindConVar("ai_tank_bhop_evade") == null) CreateConVar("ai_tank_bhop_evade",      "1",   "Obstacle evasion: sideways bhop around walls", FCVAR_NONE);
+    if (FindConVar("ai_tank_punch_jump") == null) CreateConVar("ai_tank_punch_jump",      "0",   "Punch-jump combo at close range", FCVAR_NONE);
+    if (FindConVar("ai_tank_rage_multiplier") == null) CreateConVar("ai_tank_rage_multiplier", "1.5", "On-fire multiplier for cooldown + push force", FCVAR_NONE);
+    if (FindConVar("ai_tank_punch_instakill") == null) CreateConVar("ai_tank_punch_instakill", "1",   "Instakill: melee punch incaps survivors", FCVAR_NONE);
+    if (FindConVar("ai_tank_punch_damage") == null) CreateConVar("ai_tank_punch_damage",    "150", "Damage per punch when instakill enabled (>100=incap)", FCVAR_NONE);
+    if (FindConVar("ai_tank_aggro_bhop") == null) CreateConVar("ai_tank_aggro_bhop",      "1",   "Aggressive bhop: Tank relentlessly bhops toward target", FCVAR_NONE);
 
     // --- v4.1: Tank 高级玩法 cvar（地形秒杀 3 个已按用户拍板移除）---
-    CreateConVar("ai_tank_coord",              "1",   "Tank consumes coordination window (rush pinned survivor)", FCVAR_NONE);
-    CreateConVar("ai_tank_rock_predict",       "1",   "Predictive rock aiming (lead) + OnRelease correction", FCVAR_NONE);
-    CreateConVar("ai_tank_rock_lead_max",      "400", "Max lead distance (u) for rock prediction", FCVAR_NONE);
-    CreateConVar("ai_tank_rock_pitch_offset",  "0",   "Vertical aim compensation for rock arc (empirical)", FCVAR_NONE);
-    CreateConVar("ai_tank_damager_max_dist",   "800", "Damager-preference chase distance gate (kiter immunity)", FCVAR_NONE);
+    if (FindConVar("ai_tank_coord") == null) CreateConVar("ai_tank_coord",              "1",   "Tank consumes coordination window (rush pinned survivor)", FCVAR_NONE);
+    if (FindConVar("ai_tank_rock_predict") == null) CreateConVar("ai_tank_rock_predict",       "1",   "Predictive rock aiming (lead) + OnRelease correction", FCVAR_NONE);
+    if (FindConVar("ai_tank_rock_lead_max") == null) CreateConVar("ai_tank_rock_lead_max",      "400", "Max lead distance (u) for rock prediction", FCVAR_NONE);
+    if (FindConVar("ai_tank_rock_pitch_offset") == null) CreateConVar("ai_tank_rock_pitch_offset",  "0",   "Vertical aim compensation for rock arc (empirical)", FCVAR_NONE);
+    if (FindConVar("ai_tank_damager_max_dist") == null) CreateConVar("ai_tank_damager_max_dist",   "800", "Damager-preference chase distance gate (kiter immunity)", FCVAR_NONE);
 
     // v3.4: cache handles to avoid per-tick FindConVar in BT callbacks
     g_hCvarTankBhop_cached = FindConVar("ai_tank_bhop");
@@ -868,7 +876,8 @@ public Tank_OnModuleStart() {
     g_hCvarTankRockPitch_cached = FindConVar("ai_tank_rock_pitch_offset");
     g_hCvarTankDamagerMaxDist_cached = FindConVar("ai_tank_damager_max_dist");
 
-    HookEvent("player_hurt", Tank_OnPlayerHurt, EventHookMode_Pre);
+    static bool s_bTankHooked = false;
+    if (!s_bTankHooked) { HookEvent("player_hurt", Tank_OnPlayerHurt, EventHookMode_Pre); s_bTankHooked = true; }
 }
 
 public Action:Tank_OnPlayerHurt(Handle:event, const String:name[], bool:dontBroadcast) {
@@ -913,7 +922,7 @@ public Action:Tank_OnPlayerHurt(Handle:event, const String:name[], bool:dontBroa
     if (g_hCvarTankRockPredict_cached == null || !GetConVarBool(g_hCvarTankRockPredict_cached)) return Plugin_Continue;
     int target = BB_GetInt(tank, "target", -1);
     if (target <= 0 || !IsSurvivor(target) || !IsPlayerAlive(target)) return Plugin_Continue;
-    float tPos[3], tVel[3], lead[3], dir[3];
+    float tPos[3], tVel[3], lead[3], dir[3], ang[3];
     // v5.30: 同 AimRock —— 瞄准眼睛高度（原脚底 → 低抛命中差）
     GetClientEyePosition(target, tPos);
     GetEntPropVector(target, Prop_Data, "m_vecVelocity", tVel);
@@ -930,10 +939,17 @@ public Action:Tank_OnPlayerHurt(Handle:event, const String:name[], bool:dontBroa
     if (leadLen > maxLead) ScaleVector(lead, maxLead / leadLen);
     AddVectors(tPos, lead, tPos);
     MakeVectorFromPoints(vecPos, tPos, dir);
+    GetVectorAngles(dir, ang);
+    // v6.8.1: 高抛同步——AimRock存的高抬头在释放校正层重放，保持高弧
+    float highAdd = BB_GetFloat(tank, "_tank_rock_high_pitch", 0.0);
+    if (highAdd != 0.0) ang[0] += highAdd;
+    if (g_hCvarTankRockPitch_cached != null) ang[0] += GetConVarFloat(g_hCvarTankRockPitch_cached);
+    GetAngleVectors(ang, dir, NULL_VECTOR, NULL_VECTOR);
     NormalizeVector(dir, dir);
     ScaleVector(dir, speed);          // 保持引擎速度不变，只改方向
     vecVel[0] = dir[0];
     vecVel[1] = dir[1];
     vecVel[2] = dir[2];
+    BB_SetFloat(tank, "_tank_rock_high_pitch", 0.0); // 消费后清零
     return Plugin_Changed;
 }

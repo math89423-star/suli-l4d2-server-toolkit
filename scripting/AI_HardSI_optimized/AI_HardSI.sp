@@ -191,7 +191,7 @@ public Plugin:myinfo = {
     name = "AI: Hard SI (Behavior Tree v3.5)",
     author = "Breezy, refactored by Claude",
     description = "Improves the AI of special infected — BT-driven terrain-aware decision engine",
-    version = "5.43.0",
+    version = "5.48.0",
     url = "github.com/breezyplease"
 };
 
@@ -281,6 +281,11 @@ public OnPluginStart() {
     CreateConVar("ai_harass_max_hold", "5.0",
         "Max seconds a harasser holds off before attacking regardless of initiator",
         FCVAR_NONE, true, 0.0, true, 30.0);
+    // v6.8.2: 骚扰解放距离独立于 Hunter pounce（P0-3）— v5.34 逻辑已读但未创建
+    if (FindConVar("ai_harass_release_proximity") == null)
+        CreateConVar("ai_harass_release_proximity", "800",
+            "Harasser release distance (independent of hunter pounce range)",
+            FCVAR_NONE, true, 100.0, true, 2000.0);
 
     // --- Per-SI module initialization (cvars + game tuning) ---
     Smoker_OnModuleStart();
