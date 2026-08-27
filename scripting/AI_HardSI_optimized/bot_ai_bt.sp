@@ -13,8 +13,8 @@ stock bool Wave_IsStaging() { return false; }
 public Plugin myinfo = {
     name = "Bot AI BT - Survivor",
     author = "Muse Spark",
-    description = "Survivor bot AI via Behavior Tree (follow/scout/door/scavenge/rescue/combat + acid/mounted gun, rescue 4-branch + heal + dodge + flow + formation, priority fix 1.7.4)",
-    version = "1.7.4",
+    description = "Survivor bot AI via Behavior Tree (follow/scout/door/scavenge/rescue/combat + acid/mounted gun, rescue 4-branch + heal + dodge + flow + formation, priority fix 1.7.5)",
+    version = "1.7.5",
     url = ""
 };
 
@@ -334,8 +334,8 @@ BT_Status BotCond_HasVisibleSI(int client) {
     }
     int si = FindVisibleSI(client, maxDist);
     if (si>0) { BB_SetInt(client, "combat_target", si); g_fBotLastCombatSeen[client]=GetGameTime(); return BT_SUCCESS; }
-    // 0.5s 粘滞：LOS 瞬断不立即切走，避免战斗/跟随来回抖
-    if (GetGameTime() - g_fBotLastCombatSeen[client] < 0.5) {
+    // 0.8s 粘滞：LOS 瞬断不立即切走，避免战斗/跟随来回抽搐（0.5→0.8）
+    if (GetGameTime() - g_fBotLastCombatSeen[client] < 0.8) {
         int last = BB_GetInt(client, "combat_target", -1);
         if (last>0 && IsClientInGame(last) && IsPlayerAlive(last) && GetClientTeam(last)==3) {
             float myPos[3], tPos[3]; GetClientAbsOrigin(client,myPos); GetClientAbsOrigin(last,tPos);
@@ -1036,13 +1036,21 @@ BT_Status BotAct_FollowHuman(int client) {
     if (human<=0) return BT_FAILURE;
     float hPos[3]; GetClientAbsOrigin(human,hPos);
     float dist = GetVectorDistance(pos,hPos);
+    bool wasHolding = BB_GetFloat(client, "_follow_hold", 0.0) > 0.5;
     if (dist < 150.0) {
-        // close enough, hold a bit
+        BB_SetFloat(client, "_follow_hold", 1.0);
+        BT_ClearMoveDirection(client);
+        float dir[3], ang[3]; MakeVectorFromPoints(pos,hPos,dir); GetVectorAngles(dir,ang);
+        BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
+        return BT_RUNNING;
+    } else if (wasHolding && dist < 180.0) {
+        // 滞回 150-180 防抽搐
         BT_ClearMoveDirection(client);
         float dir[3], ang[3]; MakeVectorFromPoints(pos,hPos,dir); GetVectorAngles(dir,ang);
         BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
         return BT_RUNNING;
     }
+    BB_SetFloat(client, "_follow_hold", 0.0);
     float dir[3], ang[3]; MakeVectorFromPoints(pos,hPos,dir); GetVectorAngles(dir,ang);
     BT_SetAimAngles(client, ang[0], ang[1], ang[2]);
     BT_AddButton(client, IN_FORWARD);
@@ -1118,7 +1126,7 @@ stock int BT_CreateBotTree() {
     BT_AddChild(root, scavengeSeq);
     BT_AddChild(root, weaponSeq);
     BT_AddChild(root, scoutSeq);
-    BT_AddChild(root, BT_CreateAction(BotAct_FollowHuman));
+    BT_AddChild(root, BT_CreateCooldown(0.3, BT_CreateAction(BotAct_FollowHuman)));
     BT_AddChild(root, BT_CreateAction(ACT_Wander));
     return root;
 }
@@ -1161,7 +1169,8 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
     if (GetEntProp(client, Prop_Send, "m_isIncapacitated") || GetEntProp(client, Prop_Send, "m_isHangingFromLedge")) return Plugin_Continue;
     g_iTickCounter[client]++;
     if (g_iTickCounter[client] < TICK_INTERVAL) {
-        // 热修：生还者 Lite 帧抑跳 — 连续原地起跳根因为 StuckDetour 每 0.6s 注入 JUMP 且 Lite 透传 Valve 跳
+        // 热修2：Lite 回放 MOVE 防抽搐，仍抑跳
+        BT_ApplyControlLite(client, buttons);
         buttons &= ~IN_JUMP;
         if (g_bBT_AnglesSet[client]) BT_ApplyAngles(client, angles);
         return Plugin_Changed;
