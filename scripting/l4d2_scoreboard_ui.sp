@@ -1,37 +1,34 @@
 /**
- * [L4D2] Scoreboard UI — 常驻得分榜数据源（scripted_hud 喂食器） v1.1.0
+ * [L4D2] Scoreboard UI — 常驻得分榜 (EMS 直写)  v1.2.0
  *
- * 架构（2026-08-26 定稿，用户拍板"先用别人的插件再慢慢改"）：
- *   渲染层 = Marttt [L4D2] Scripted HUD v1.0.2（原版插件，0.1s 全量重写 4 槽，
- *            实测无黑框/无残留/无闪烁——本服已验证）
- *   数据层 = 本插件：每秒把 score_core 榜单写进 scripted_hud 的 4 个文本 cvar。
+ * 架构 (2026-08-27 极简重构):
+ *   本插件直接调 sorall l4d2_ems_hud.inc (EnableHUD + HUDSetLayout/HUDPlace)
+ *   不再依赖 Marttt l4d2_scripted_hud 中转 (4 cvar 喂食已废弃)。
+ *   社区 100% 常驻榜都用此法 (LinLinLin t=340601 / Gold Fish t=352495)。
  *
- * 槽位分配（4 槽上限，标题+TOP3）：
- *   HUD1 = "[得分榜 TOPn] 共N人"
- *   HUD2 = "#1 名字 分/特x/杀x"   （三级排序 积分>特感>击杀，同 !rank 口径）
- *   HUD3 = "#2 ..."
- *   HUD4 = "#3 ..."
+ * 槽位: HUD_SCORE_TITLE(10)=标题, HUD_SCORE_1(11)=#1, _2(12)=#2, _3(13)=#3
+ *   避开 0-6 预定义区, 纯文本 127 字符/槽, NOBG 左对齐。
+ *   位置 0.02,0.02 起纵向 0.04 步进, 与 Valve EMS/Appendix:HUD 一致。
  *
- * ⚠ 必须占满全部 4 个 text cvar：scripted_hud 对空 cvar 会启用预定义内容
- *   （HUD2=幸存者血量/HUD3=Tank 血量），留空就会串台。
- *
- * 数据源：l4d2_score_core SH_GetRoundScore/SIKills/CommonKills 只读 native
- * （可选绑定，score_core 未加载时本插件空转）。
+ * 数据源: l4d2_score_core SH_GetRoundScore/SIKills/CommonKills 只读 native
+ *   三级排序 积分>特感>击杀 同 !rank 口径, 可选绑定 score_core 未加载时空转。
  */
 
 #pragma semicolon 1
 #pragma newdecls required
 
 #include <sourcemod>
+#include <sdktools>
+#include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.1.0"
+#define PLUGIN_VERSION      "1.2.0"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
 public Plugin myinfo = {
     name        = "[L4D2] Scoreboard UI",
     author      = "suli",
-    description = "Leaderboard data feeder -> l4d2_scripted_hud cvars (data from l4d2_score_core)",
+    description = "Persistent leaderboard via EMS HUD (direct, no scripted_hud middleman)",
     version     = PLUGIN_VERSION,
     url         = ""
 };
@@ -42,14 +39,13 @@ native int SH_GetSIKills(int client);
 native int SH_GetCommonKills(int client);
 
 ConVar  g_cvEnable;
-ConVar  g_cvTop;        // 名次行数（受 4 槽限制，实际 = min(top, 3)）
+ConVar  g_cvTop;        // 名次行数，实际 = min(top, 3)
 ConVar  g_cvInterval;
 ConVar  g_cvNameLen;
 
 bool    g_bCoreAvailable = false;
-bool    g_bHudAvailable = false;
+bool    g_bHudReady = false;
 Handle  g_hTimer = null;
-ConVar  g_hHudText[4];          // l4d2_scripted_hud_hud1..4_text
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
@@ -64,9 +60,38 @@ public void OnPluginStart()
     CreateConVar("sui_version", PLUGIN_VERSION, "Plugin Version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 
     g_cvEnable    = CreateConVar("sui_enable", "1", "常驻得分榜总开关 [0=关|1=开]", _, true, 0.0, true, 1.0);
-    g_cvTop       = CreateConVar("sui_top", "3", "显示前 N 名 [1-3]（4 槽 = 标题 + 3 行名次）", _, true, 1.0, true, 3.0);
+    g_cvTop       = CreateConVar("sui_top", "3", "显示前 N 名 [1-3]（标题+3行名次）", _, true, 1.0, true, 3.0);
     g_cvInterval  = CreateConVar("sui_interval", "1.0", "刷新间隔秒（修改需重载插件）", _, true, 0.5, true, 10.0);
     g_cvNameLen   = CreateConVar("sui_name_len", "10", "玩家名最大字节数（UTF-8 安全截断）", _, true, 4.0, true, 24.0);
+
+    AutoExecConfig(true, "l4d2_scoreboard_ui");
+}
+
+public void OnMapStart()
+{
+    // EMS 启用 + 槽位定位 (0.0-1.0 屏占比, 左上 0.02,0.02 起)
+    EnableHUD();
+    HUDPlace(HUD_SCORE_TITLE, 0.02, 0.02, 0.30, 0.03);
+    HUDPlace(HUD_SCORE_1,     0.02, 0.06, 0.30, 0.03);
+    HUDPlace(HUD_SCORE_2,     0.02, 0.10, 0.30, 0.03);
+    HUDPlace(HUD_SCORE_3,     0.02, 0.14, 0.30, 0.03);
+    g_bHudReady = true;
+
+    // late load / 热重载后 timer 需重建 (OnConfigsExecuted 不一定再调)
+    if (g_hTimer == null)
+        g_hTimer = CreateTimer(g_cvInterval.FloatValue, Timer_Refresh, _, TIMER_REPEAT);
+}
+
+public void OnMapEnd()
+{
+    // 清理残留 (换图隐藏)
+    RemoveAllHUD();
+    g_bHudReady = false;
+    if (g_hTimer != null)
+    {
+        KillTimer(g_hTimer);
+        g_hTimer = null;
+    }
 }
 
 public void OnConfigsExecuted()
@@ -78,40 +103,45 @@ public void OnConfigsExecuted()
 // ── 主刷新循环 ──────────────────────────────────────────────
 public Action Timer_Refresh(Handle timer)
 {
-    // 渲染器/数据源可用性探测（热重载后自动接通）
-    g_bHudAvailable = false;
-    char cname[64];
-    for (int i = 0; i < 4; i++)
+    // late load 补一次 EnableHUD+Place (OnMapStart 已过时)
+    if (!g_bHudReady)
     {
-        Format(cname, sizeof(cname), "l4d2_scripted_hud_hud%d_text", i+1);
-        g_hHudText[i] = FindConVar(cname);
-        if (g_hHudText[i] == null)
-        {
-            g_bHudAvailable = false;
-            break;
-        }
-        g_bHudAvailable = true;
+        EnableHUD();
+        HUDPlace(HUD_SCORE_TITLE, 0.02, 0.02, 0.30, 0.03);
+        HUDPlace(HUD_SCORE_1,     0.02, 0.06, 0.30, 0.03);
+        HUDPlace(HUD_SCORE_2,     0.02, 0.10, 0.30, 0.03);
+        HUDPlace(HUD_SCORE_3,     0.02, 0.14, 0.30, 0.03);
+        g_bHudReady = true;
     }
 
     char lines[4][96];
     int lineCount = BuildLeaderboard(lines);
 
-    if (!g_cvEnable.BoolValue || !g_bHudAvailable)
+    if (!g_cvEnable.BoolValue)
     {
-        // 关闭时清空渲染器文本（防残留；注意不能置 ""——会触发预定义串台，
-        // 写一个空格占位）
-        for (int i = 0; i < 4; i++)
-            if (g_hHudText[i] != null)
-                g_hHudText[i].SetString("-");
+        RemoveAllHUD();
         return Plugin_Continue;
     }
 
+    // 无数据 / 未加载时标题显示提示，其余槽隐藏
+    if (lineCount == 1 && (StrContains(lines[0], "未加载") != -1 || StrContains(lines[0], "暂无数据") != -1))
+    {
+        int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT;
+        HUDSetLayout(HUD_SCORE_TITLE, flags, lines[0]);
+        RemoveHUD(HUD_SCORE_1);
+        RemoveHUD(HUD_SCORE_2);
+        RemoveHUD(HUD_SCORE_3);
+        return Plugin_Continue;
+    }
+
+    int flags = HUD_FLAG_TEXT|HUD_FLAG_NOBG|HUD_FLAG_ALIGN_LEFT;
     for (int i = 0; i < 4; i++)
     {
+        int slot = HUD_SCORE_TITLE + i;
         if (i < lineCount)
-            g_hHudText[i].SetString(lines[i]);
+            HUDSetLayout(slot, flags, lines[i]);
         else
-            g_hHudText[i].SetString("-");   // 占位防预定义串台
+            RemoveHUD(slot);
     }
     return Plugin_Continue;
 }
