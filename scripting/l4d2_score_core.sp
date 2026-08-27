@@ -824,7 +824,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.14.1"	// v1.14.1: 团灭不回退可用积分，有多少分就是多少分
+#define PLUGIN_VERSION "1.14.2"	// v1.14.2: 被黑=被队友打掉的血量(FFTaken)
 
 // ============================================================================
 // ConVar handles
@@ -947,7 +947,8 @@ int       g_iCommonKills[MAXPLAYERS + 1];             // v1.13.6+: 小僵尸击�
 int       g_iDeaths[MAXPLAYERS + 1];                  // v1.7.7: survivor deaths
 int       g_iJoinCheckLeft[MAXPLAYERS + 1];           // v1.12.1: 入队即死兜底复活重试剩余次数（0=无检测）
 int       g_iFFDamage[MAXPLAYERS + 1];                // v1.7.7: friendly-fire damage dealt
-int       g_iBlacked[MAXPLAYERS + 1];                 // v1.7.7: killed by a teammate (被黑)
+int       g_iFFTaken[MAXPLAYERS + 1];                 // v1.14.2: 被队友打掉的血量 (被黑, 用户定: 丢失生命值)
+int       g_iBlacked[MAXPLAYERS + 1];                 // v1.7.7: killed by a teammate (被黑旧口径, 保留兼容)
 bool      g_bMapEndBroadcasted;                        // v1.7.9: map-end scoreboard already broadcast
 float     g_fSIHurtAt[MAXPLAYERS + 1];                // v1.7.2: last hurt time per SI (0.0 = untouched → full-HP kill bonus)
 ArrayList g_hHurtVictims[MAXPLAYERS + 1];             // per-client victims hit this frame (AoE batch)
@@ -1049,6 +1050,14 @@ public int Native_SH_GetFFDamage(Handle plugin, int numParams)
     if (client < 1 || client > MaxClients)
         return 0;
     return g_iFFDamage[client];
+}
+
+public int Native_SH_GetFFTaken(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients)
+        return 0;
+    return g_iFFTaken[client];
 }
 
 public int Native_SH_GetBlacked(Handle plugin, int numParams)
@@ -1434,6 +1443,7 @@ public void OnPluginStart()
     CreateNative("SH_GetSIKills",     Native_SH_GetSIKills);
     CreateNative("SH_GetCommonKills", Native_SH_GetCommonKills);
     CreateNative("SH_GetFFDamage",    Native_SH_GetFFDamage);
+    CreateNative("SH_GetFFTaken",     Native_SH_GetFFTaken);
     CreateNative("SH_GetBlacked",     Native_SH_GetBlacked);
     // v1.12.0: 复活币 natives（Get/AddReviveCoins/GetCoinMax/ReviveClient）已移除
     // v1.9.2: 复活完成全局 forward（l4d2_shop v1.5.1 监听发复活套装+满血）
@@ -1483,6 +1493,7 @@ public void OnPluginStart()
         g_iCommonKills[i] = 0;
         g_iDeaths[i] = 0;
         g_iFFDamage[i] = 0;
+        g_iFFTaken[i] = 0;
         g_iBlacked[i] = 0;
         if (!IsFakeClient(i))
         {
@@ -1931,6 +1942,7 @@ void SaveScoreState()
         g_iSaveDeaths[i] = g_iDeaths[i];
         g_iSaveFFDamage[i] = g_iFFDamage[i];
         g_iSaveBlacked[i] = g_iBlacked[i];
+        // g_iFFTaken 不纳入团灭快照 (用户: 被黑是本图累计, 团灭保留当前值, 不回滚)
         g_iSaveWallet[i] = g_iWallet[i];        // v1.7.35
     }
 }
@@ -2139,6 +2151,7 @@ public void OnMapEnd()
         g_iCommonKills[i] = 0;
         g_iDeaths[i] = 0;
         g_iFFDamage[i] = 0;
+        g_iFFTaken[i] = 0;                  // v1.14.2
         g_iBlacked[i] = 0;
         g_fLastStreakKillTime[i] = 0.0;
         g_fSIHurtAt[i] = 0.0;              // v1.7.2: full-HP bonus state
@@ -2248,6 +2261,7 @@ public void OnClientPutInServer(int client)
     g_iCommonKills[client] = 0;
     g_iDeaths[client] = 0;
     g_iFFDamage[client] = 0;
+    g_iFFTaken[client] = 0;
     g_iBlacked[client] = 0;
 
     // v1.12.1 (user 实测 bug): l4dmultislots 中途加入死尸入队——新玩家第 5+ 位加入时
@@ -2293,6 +2307,7 @@ public void OnClientDisconnect(int client)
     g_iCommonKills[client] = 0;
     g_iDeaths[client] = 0;
     g_iFFDamage[client] = 0;
+    g_iFFTaken[client] = 0;
     g_iBlacked[client] = 0;
     g_fLastStreakKillTime[client] = 0.0;
     g_fSIHurtAt[client] = 0.0;             // v1.7.2
@@ -2374,13 +2389,16 @@ public Action Event_PlayerHurt(Event event, const char[] name, bool dontBroadcas
     }
 
     // v1.7.7: friendly-fire damage tally (survivor → survivor)
+    // v1.14.2: 被黑 = 被队友打掉的血量 (hurtVictim 视角)
     int ffAttacker = GetClientOfUserId(event.GetInt("attacker"));
     if (ffAttacker >= 1 && ffAttacker <= MaxClients
         && IsClientInGame(ffAttacker) && GetClientTeam(ffAttacker) == 2
         && hurtVictim >= 1 && hurtVictim <= MaxClients
         && GetClientTeam(hurtVictim) == 2)
     {
-        g_iFFDamage[ffAttacker] += event.GetInt("dmg_health");
+        int dmg = event.GetInt("dmg_health");
+        g_iFFDamage[ffAttacker] += dmg;
+        g_iFFTaken[hurtVictim] += dmg;
     }
 
     // v1.7.16: BF-style damage points — every survivor who damages an SI

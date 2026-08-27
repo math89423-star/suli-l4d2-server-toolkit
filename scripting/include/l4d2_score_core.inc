@@ -58,8 +58,11 @@ native int SH_GetSIKills(int client);
 /** 小僵尸击杀数（总击杀 = SIKills + CommonKills）。 */
 native int SH_GetCommonKills(int client);
 
-/** 友伤伤害累计。 */
+/** 友伤伤害累计 (打出)。 */
 native int SH_GetFFDamage(int client);
 
-/** 被黑（黑枪/被 SI 控制次数）计数。 */
+/** 被黑：被队友打掉的血量 (受到, v1.14.2 用户定)。 */
+native int SH_GetFFTaken(int client);
+
+/** 被黑旧口径：被队友击杀次数 (保留兼容)。 */
 native int SH_GetBlacked(int client);

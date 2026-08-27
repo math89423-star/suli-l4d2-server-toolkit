@@ -20,7 +20,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.3.6"
+#define PLUGIN_VERSION      "1.3.7"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -37,6 +37,7 @@ native int SH_GetRoundScore(int client);
 native int SH_GetSIKills(int client);
 native int SH_GetCommonKills(int client);
 native int SH_GetFFDamage(int client);
+native int SH_GetFFTaken(int client);
 native int SH_GetBlacked(int client);
 
 ConVar  g_cvEnable;
@@ -54,6 +55,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
     MarkNativeAsOptional("SH_GetSIKills");
     MarkNativeAsOptional("SH_GetCommonKills");
     MarkNativeAsOptional("SH_GetFFDamage");
+    MarkNativeAsOptional("SH_GetFFTaken");
     MarkNativeAsOptional("SH_GetBlacked");
     return APLRes_Success;
 }
@@ -263,14 +265,15 @@ int BuildLeaderboard(char lines[7][128])
         int ff = 0, blacked = 0;
         if (GetFeatureStatus(FeatureType_Native, "SH_GetFFDamage") == FeatureStatus_Available)
             ff = SH_GetFFDamage(c);
-        if (GetFeatureStatus(FeatureType_Native, "SH_GetBlacked") == FeatureStatus_Available)
+        if (GetFeatureStatus(FeatureType_Native, "SH_GetFFTaken") == FeatureStatus_Available)
+            blacked = SH_GetFFTaken(c);
+        else if (GetFeatureStatus(FeatureType_Native, "SH_GetBlacked") == FeatureStatus_Available)
             blacked = SH_GetBlacked(c);
         Format(scoreStr, sizeof(scoreStr), "%d", scores[k]);
         Format(siStr, sizeof(siStr), "%d", si);
         Format(killStr, sizeof(killStr), "%d", kill);
         Format(ffStr, sizeof(ffStr), "%d", ff);
         Format(blkStr, sizeof(blkStr), "%d", blacked);
-        // 列宽: 积分6 特感3→4 击杀4 友伤5 被黑5 (与表头一致, 钳制超长)
         PadLeft(scorePad, sizeof(scorePad), scoreStr, 6);
         PadLeft(siPad, sizeof(siPad), siStr, 4);
         PadLeft(killPad, sizeof(killPad), killStr, 4);
@@ -342,11 +345,12 @@ public Action Cmd_BoardDebug(int client, int args)
         if (GetFeatureStatus(FeatureType_Native, "SH_GetSIKills") == FeatureStatus_Available) si = SH_GetSIKills(i);
         if (GetFeatureStatus(FeatureType_Native, "SH_GetCommonKills") == FeatureStatus_Available) kill = SH_GetCommonKills(i);
         if (GetFeatureStatus(FeatureType_Native, "SH_GetFFDamage") == FeatureStatus_Available) ff = SH_GetFFDamage(i);
-        if (GetFeatureStatus(FeatureType_Native, "SH_GetBlacked") == FeatureStatus_Available) blk = SH_GetBlacked(i);
+        if (GetFeatureStatus(FeatureType_Native, "SH_GetFFTaken") == FeatureStatus_Available) blk = SH_GetFFTaken(i);
+        else if (GetFeatureStatus(FeatureType_Native, "SH_GetBlacked") == FeatureStatus_Available) blk = SH_GetBlacked(i);
         char name[32]; GetClientName(i, name, sizeof(name));
         if (client > 0 && IsClientInGame(client))
             PrintToChat(client, "[DBG] %s: 分%d 特%d 杀%d 友伤%d 被黑%d (blk %s)", name, sc, si, kill, ff, blk, blk==-1?"缺":"有");
-        PrintToServer("[DBG] %N: score %d SI %d kill %d FF %d blacked %d", i, sc, si, kill, ff, blk);
+        PrintToServer("[DBG] %N: score %d SI %d kill %d FF %d blacked(FFTaken) %d", i, sc, si, kill, ff, blk);
     }
     if (client == 0) PrintToServer("[DBG] dump done (see server log)");
     else ReplyToCommand(client, "[DBG] dump done (see chat+server log)");
