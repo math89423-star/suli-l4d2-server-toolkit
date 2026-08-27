@@ -824,7 +824,7 @@
 // 调用前用 GetFeatureStatus 检查，Defib_Fix 未加载时静默跳过。
 native void L4D2_KillSurvivorDeathModel(int client);
 
-#define PLUGIN_VERSION "1.14.3"	// v1.14.3: B 团灭也清榜(同源同清)
+#define PLUGIN_VERSION "1.14.4"	// v1.14.4: B 调试日志
 
 // ============================================================================
 // ConVar handles
@@ -2196,6 +2196,7 @@ public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcas
 {
     if (!g_bFreshMapStart)
     {
+        LogMessage("[Score] Wipe restart detected: clearing board (B)");
         for (int i = 1; i <= MaxClients; i++)
         {
             g_iRevivesLeft[i] = g_cvRespawnBase.IntValue;
@@ -2220,7 +2221,14 @@ public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcas
                 g_iDmgPtsKiller[i][j] = 0;
         ScoreSave_All();
         PrintToChatAll("\x04[得分榜]\x01 团灭重开：排行榜已重置");
-        LogMessage("[Score] Wipe restart: board reset (B), wallet kept, revives reset");
+        LogMessage("[Score] Wipe restart: board reset (B), wallet kept, revives reset, scores now 0");
+        // 调试: 打当前榜
+        for (int i = 1; i <= MaxClients; i++) if (IsClientInGame(i) && GetClientTeam(i)==2)
+            LogMessage("[Score][WipeDBG] %N score %d SI %d", i, g_iTotalScore[i], g_iSIKills[i]);
+    }
+    else
+    {
+        LogMessage("[Score] RoundStart fresh map, no wipe clear (g_bFreshMapStart=true)");
     }
     g_bFreshMapStart = false;
     return Plugin_Continue;
