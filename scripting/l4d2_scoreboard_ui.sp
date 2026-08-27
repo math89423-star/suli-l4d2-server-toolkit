@@ -15,7 +15,7 @@
 #include <sdktools>
 #include <l4d2_ems_hud>
 
-#define PLUGIN_VERSION      "1.4.4"
+#define PLUGIN_VERSION      "1.4.5"
 
 #define SCORE_CORE_FILE     "l4d2_score_core.smx"
 
@@ -83,15 +83,15 @@ public void OnMapStart()
 {
     RemoveAllHUD();
     EnableHUD();
-    // 再收: Name 0.05->0.04, 总宽 0.335->0.325, 玩家-积分再贴 0.01
-    HUDPlace(COL_TITLE, 0.02, 0.005, 0.33, 0.020);
-    HUDPlace(COL_RANK,  0.02, 0.030, 0.025, 0.16);
-    HUDPlace(COL_NAME,  0.045,0.030, 0.04, 0.16);
-    HUDPlace(COL_SCORE, 0.085,0.030, 0.06, 0.16);
-    HUDPlace(COL_SI,    0.145,0.030, 0.04, 0.16);
-    HUDPlace(COL_KILL,  0.185,0.030, 0.04, 0.16);
-    HUDPlace(COL_FF,    0.225,0.030, 0.05, 0.16);
-    HUDPlace(COL_BLK,   0.275,0.030, 0.05, 0.16);
+    // 贴左上: 标题 0.005->0.008 紧贴表头, 列 y 0.030->0.028, X 0.02->0.01 左移
+    HUDPlace(COL_TITLE, 0.01, 0.008, 0.35, 0.018);
+    HUDPlace(COL_RANK,  0.01, 0.028, 0.025, 0.16);
+    HUDPlace(COL_NAME,  0.035,0.028, 0.04, 0.16);
+    HUDPlace(COL_SCORE, 0.075,0.028, 0.06, 0.16);
+    HUDPlace(COL_SI,    0.135,0.028, 0.04, 0.16);
+    HUDPlace(COL_KILL,  0.175,0.028, 0.04, 0.16);
+    HUDPlace(COL_FF,    0.215,0.028, 0.05, 0.16);
+    HUDPlace(COL_BLK,   0.265,0.028, 0.05, 0.16);
     g_bHudReady = true;
     if (g_hTimer == null)
         g_hTimer = CreateTimer(g_cvInterval.FloatValue, Timer_Refresh, _, TIMER_REPEAT);
@@ -116,24 +116,24 @@ public Action Timer_Refresh(Handle timer)
     {
         RemoveAllHUD();
         EnableHUD();
-        HUDPlace(COL_TITLE, 0.02, 0.005, 0.33, 0.020);
-        HUDPlace(COL_RANK,  0.02, 0.030, 0.025, 0.16);
-        HUDPlace(COL_NAME,  0.045,0.030, 0.04, 0.16);
-        HUDPlace(COL_SCORE, 0.085,0.030, 0.06, 0.16);
-        HUDPlace(COL_SI,    0.145,0.030, 0.04, 0.16);
-        HUDPlace(COL_KILL,  0.185,0.030, 0.04, 0.16);
-        HUDPlace(COL_FF,    0.225,0.030, 0.05, 0.16);
-        HUDPlace(COL_BLK,   0.275,0.030, 0.05, 0.16);
+        HUDPlace(COL_TITLE, 0.01, 0.008, 0.35, 0.018);
+        HUDPlace(COL_RANK,  0.01, 0.028, 0.025, 0.16);
+        HUDPlace(COL_NAME,  0.035,0.028, 0.04, 0.16);
+        HUDPlace(COL_SCORE, 0.075,0.028, 0.06, 0.16);
+        HUDPlace(COL_SI,    0.135,0.028, 0.04, 0.16);
+        HUDPlace(COL_KILL,  0.175,0.028, 0.04, 0.16);
+        HUDPlace(COL_FF,    0.215,0.028, 0.05, 0.16);
+        HUDPlace(COL_BLK,   0.265,0.028, 0.05, 0.16);
         g_bHudReady = true;
     }
-    HUDPlace(COL_TITLE, 0.02, 0.005, 0.33, 0.020);
-    HUDPlace(COL_RANK,  0.02, 0.030, 0.025, 0.16);
-    HUDPlace(COL_NAME,  0.045,0.030, 0.04, 0.16);
-    HUDPlace(COL_SCORE, 0.085,0.030, 0.06, 0.16);
-    HUDPlace(COL_SI,    0.145,0.030, 0.04, 0.16);
-    HUDPlace(COL_KILL,  0.185,0.030, 0.04, 0.16);
-    HUDPlace(COL_FF,    0.225,0.030, 0.05, 0.16);
-    HUDPlace(COL_BLK,   0.275,0.030, 0.05, 0.16);
+    HUDPlace(COL_TITLE, 0.01, 0.008, 0.35, 0.018);
+    HUDPlace(COL_RANK,  0.01, 0.028, 0.025, 0.16);
+    HUDPlace(COL_NAME,  0.035,0.028, 0.04, 0.16);
+    HUDPlace(COL_SCORE, 0.075,0.028, 0.06, 0.16);
+    HUDPlace(COL_SI,    0.135,0.028, 0.04, 0.16);
+    HUDPlace(COL_KILL,  0.175,0.028, 0.04, 0.16);
+    HUDPlace(COL_FF,    0.215,0.028, 0.05, 0.16);
+    HUDPlace(COL_BLK,   0.265,0.028, 0.05, 0.16);
     for (int s = 7; s <= 9; s++) RemoveHUD(s); // 清旧 FAR 残留
     for (int s = HUD_SCORE_1; s <= HUD_SCORE_4; s++) RemoveHUD(s);
 
